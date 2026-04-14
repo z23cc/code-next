@@ -3,10 +3,10 @@
 ## 1. 安装
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[dev]'
+uv sync --extra dev
 ```
+
+> 开发与运行统一使用 `uv run <cmd>`（无需手动激活虚拟环境）。
 
 ## 2. 创建任务
 
@@ -17,7 +17,7 @@ pip install -e '.[dev]'
 使用默认 Claude 适配器：
 
 ```bash
-aiwf run plan --task .ai/tasks/<your-task>.md --adapter claude
+uv run aiwf run plan --task .ai/tasks/<your-task>.md --adapter claude
 ```
 
 计划 artifact 会写到：
@@ -28,25 +28,25 @@ aiwf run plan --task .ai/tasks/<your-task>.md --adapter claude
 ## 4. 实现阶段
 
 ```bash
-aiwf run implement --task .ai/tasks/<your-task>.md --adapter claude
+uv run aiwf run implement --task .ai/tasks/<your-task>.md --adapter claude
 ```
 
 如果 gates 失败，修复后可继续：
 
 ```bash
-aiwf resume <run_id>
+uv run aiwf resume <run_id>
 ```
 
 ## 5. 复核阶段
 
 ```bash
-aiwf run review --task .ai/tasks/<your-task>.md --adapter claude
+uv run aiwf run review --task .ai/tasks/<your-task>.md --adapter claude
 ```
 
 ## 6. 编译 Claude 输入包
 
 ```bash
-aiwf compile claude --output .claude/compiled
+uv run aiwf compile claude --output .claude/compiled
 ```
 
 生成内容包括：
@@ -66,6 +66,6 @@ aiwf compile claude --output .claude/compiled
 
 默认 gate 集会运行：
 
-- `ruff check src/ tests/`
-- `mypy src/aiwf/`
-- `pytest tests/ -x -q`
+- `uv run ruff check src/ tests/`
+- `uv run mypy src/aiwf/`
+- `uv run pytest tests/ -x -q`

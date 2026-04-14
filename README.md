@@ -23,19 +23,23 @@ Phase 1 现已实现：
 ## 安装
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[dev]'
+uv sync --extra dev
 ```
+
+## uv 开发说明
+
+- 使用 `uv sync --extra dev` 初始化并同步开发依赖。
+- 使用 `uv run <cmd>` 在项目环境中运行命令（无需手动激活虚拟环境）。
+- 快速验证可运行：`uv run pytest tests/ -x -q`。
 
 ## 常用命令
 
 ```bash
-aiwf run plan --task .ai/tasks/<task>.md --adapter claude
-aiwf run implement --task .ai/tasks/<task>.md --adapter claude
-aiwf run review --task .ai/tasks/<task>.md --adapter claude
-aiwf resume <run_id>
-aiwf compile claude --output .claude/compiled
+uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude
+uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude
+uv run aiwf run review --task .ai/tasks/<task>.md --adapter claude
+uv run aiwf resume <run_id>
+uv run aiwf compile claude --output .claude/compiled
 ```
 
 说明：
@@ -63,9 +67,9 @@ aiwf compile claude --output .claude/compiled
 
 默认 gate 集位于 `.ai/gates/default.yaml`，包含：
 
-- `ruff check src/ tests/`
-- `mypy src/aiwf/`
-- `pytest tests/ -x -q`
+- `uv run ruff check src/ tests/`
+- `uv run mypy src/aiwf/`
+- `uv run pytest tests/ -x -q`
 
 ## Claude Code 技能
 
