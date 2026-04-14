@@ -1,0 +1,12 @@
+name: default
+description: Default validation gates for aiwf.
+gates:
+  - name: lint
+    command: "ruff check src/ tests/"
+    timeout_seconds: 120
+  - name: typecheck
+    command: "mypy src/aiwf/"
+    timeout_seconds: 120
+  - name: test
+    command: "pytest tests/ -x -q"
+    timeout_seconds: 120

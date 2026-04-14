@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Run artifacts (generated at runtime, not source)
+.ai/runs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Planning exports (local-only oracle artifacts)
+prompt-exports/
