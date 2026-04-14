@@ -10,6 +10,7 @@ from rich.console import Console
 
 from aiwf import __version__
 from aiwf.adapters.base import RunnerAdapter
+from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AiwfError
@@ -17,14 +18,14 @@ from aiwf.state import RunStateManager
 
 app = typer.Typer(
     invoke_without_command=True,
-    help="aiwf workflow CLI."
+    help="aiwf workflow CLI.",
 )
-run_app = typer.Typer(help="Run workflow stages with the built-in stub adapter.")
+run_app = typer.Typer(help="Run workflow stages with the configured adapter.")
 app.add_typer(run_app, name="run")
 console = Console()
 
 
-AdapterName = Literal["stub"]
+AdapterName = Literal["claude", "stub"]
 
 
 def _version_callback(value: bool) -> None:
@@ -53,10 +54,13 @@ def _build_engine(
     repo_root: Path,
     *,
     adapter_name: AdapterName,
+    auto: bool = False,
 ) -> WorkflowEngine:
     adapter: RunnerAdapter
     if adapter_name == "stub":
         adapter = StubRunnerAdapter()
+    elif adapter_name == "claude":
+        adapter = ClaudeCodeAdapter(repo_root=repo_root, auto=auto)
     else:
         raise ValueError(f"Unknown adapter: {adapter_name}")
     return WorkflowEngine(
@@ -64,7 +68,7 @@ def _build_engine(
         ai_root=ai_root,
         repo_root=repo_root,
         adapter_name=adapter_name,
-        adapter_auto=False,
+        adapter_auto=auto if adapter_name == "claude" else False,
     )
 
 
@@ -86,10 +90,11 @@ def run_plan(
     task: Annotated[Path, typer.Option("--task", exists=True, dir_okay=False, readable=True)],
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
-    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "stub",
+    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "claude",
+    auto: Annotated[bool, typer.Option("--auto", help="Use the Claude CLI for subprocess execution.")] = False,
 ) -> None:
     """Run the plan workflow."""
-    engine = _build_engine(ai_root, repo_root, adapter_name=adapter)
+    engine = _build_engine(ai_root, repo_root, adapter_name=adapter, auto=auto)
     _execute_command("plan", ai_root, lambda: engine.run_plan(task))
 
 
@@ -98,10 +103,11 @@ def run_implement(
     task: Annotated[Path, typer.Option("--task", exists=True, dir_okay=False, readable=True)],
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
-    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "stub",
+    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "claude",
+    auto: Annotated[bool, typer.Option("--auto", help="Use the Claude CLI for subprocess execution.")] = False,
 ) -> None:
     """Run the implement workflow."""
-    engine = _build_engine(ai_root, repo_root, adapter_name=adapter)
+    engine = _build_engine(ai_root, repo_root, adapter_name=adapter, auto=auto)
     _execute_command("implement", ai_root, lambda: engine.run_implement(task))
 
 
@@ -110,10 +116,11 @@ def run_review(
     task: Annotated[Path, typer.Option("--task", exists=True, dir_okay=False, readable=True)],
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
-    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "stub",
+    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "claude",
+    auto: Annotated[bool, typer.Option("--auto", help="Use the Claude CLI for subprocess execution.")] = False,
 ) -> None:
     """Run the review workflow."""
-    engine = _build_engine(ai_root, repo_root, adapter_name=adapter)
+    engine = _build_engine(ai_root, repo_root, adapter_name=adapter, auto=auto)
     _execute_command("review", ai_root, lambda: engine.run_review(task))
 
 
@@ -123,10 +130,11 @@ def resume(
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
     adapter: Annotated[AdapterName | None, typer.Option("--adapter")] = None,
+    auto: Annotated[bool, typer.Option("--auto", help="Use the Claude CLI for subprocess execution.")] = False,
 ) -> None:
     """Resume a failed, blocked, or needs-review workflow run."""
     stored_meta = RunStateManager(ai_root).load_run(run_id)
-    stored_adapter = str(stored_meta.data.get("adapter", "stub"))
-    resolved_adapter = adapter or ("stub" if stored_adapter == "stub" else "stub")
-    engine = _build_engine(ai_root, repo_root, adapter_name=resolved_adapter)
+    stored_adapter = str(stored_meta.data.get("adapter", "claude"))
+    resolved_adapter: AdapterName = adapter or ("claude" if stored_adapter == "claude" else "stub")
+    engine = _build_engine(ai_root, repo_root, adapter_name=resolved_adapter, auto=auto)
     _execute_command("resume", ai_root, lambda: engine.resume(run_id))

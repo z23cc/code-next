@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from aiwf.cli import app
+from aiwf.state import RunStateManager
 
 
 runner = CliRunner()
@@ -162,6 +164,75 @@ def test_cli_resume_uses_stored_adapter_when_not_provided(tmp_path: Path) -> Non
 
     assert resume_result.exit_code == 0
     assert "resume completed" in resume_result.stdout
+
+
+def test_cli_defaults_to_claude_adapter_for_plan(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "plan",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    meta = RunStateManager(ai_root).load_run(run_id)
+    plan_text = (ai_root / "runs" / run_id / "exec-plan.md").read_text(encoding="utf-8")
+
+    assert meta.data["adapter"] == "claude"
+    assert "Claude Code Plan" in plan_text
+
+
+def test_cli_resume_uses_stored_claude_adapter_when_not_provided(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path, gate_command=_python_exit_command(1))
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert implement_result.exit_code == 1
+    run_id = next((ai_root / "runs").iterdir()).name
+    meta = RunStateManager(ai_root).load_run(run_id)
+    assert meta.data["adapter"] == "claude"
+
+    (ai_root / "gates" / "default.yaml").write_text(
+        _gates_yaml(_python_print_command("fixed")),
+        encoding="utf-8",
+    )
+
+    resume_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert resume_result.exit_code == 0
+    review_report = json.loads((ai_root / "runs" / run_id / "review-report.json").read_text(encoding="utf-8"))
+    assert review_report["summary"].startswith("Manual Claude review prompt")
 
 
 def _create_ai_workspace(
