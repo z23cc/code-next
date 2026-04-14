@@ -12,6 +12,7 @@ from aiwf import __version__
 from aiwf.adapters.base import RunnerAdapter
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
+from aiwf.compilers.claude import compile_claude
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AiwfError
 from aiwf.state import RunStateManager
@@ -21,7 +22,9 @@ app = typer.Typer(
     help="aiwf workflow CLI.",
 )
 run_app = typer.Typer(help="Run workflow stages with the configured adapter.")
+compile_app = typer.Typer(help="Compile workflow inputs for host-specific outputs.")
 app.add_typer(run_app, name="run")
+app.add_typer(compile_app, name="compile")
 console = Console()
 
 
@@ -138,3 +141,20 @@ def resume(
     resolved_adapter: AdapterName = adapter or ("claude" if stored_adapter == "claude" else "stub")
     engine = _build_engine(ai_root, repo_root, adapter_name=resolved_adapter, auto=auto)
     _execute_command("resume", ai_root, lambda: engine.resume(run_id))
+
+
+@compile_app.command("claude")
+def compile_claude_command(
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    output: Annotated[Path, typer.Option("--output")] = Path(".claude/compiled"),
+) -> None:
+    """Compile `.ai/` sources into a Claude-friendly bundle."""
+    try:
+        result = compile_claude(ai_root, output)
+    except AiwfError as exc:
+        console.print(f"[red]compile failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        "[green]compile completed[/green] "
+        f"bundle={result['bundle_path']} manifest={result['manifest_path']}"
+    )
