@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from aiwf.adapters.stub import StubRunnerAdapter
+from aiwf.engine import WorkflowEngine
+from aiwf.models import RunStatus
+from aiwf.state import RunStateManager
+
+
+def test_run_plan_creates_expected_artifacts(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(StubRunnerAdapter(), ai_root=ai_root, repo_root=repo_root)
+
+    run_id = engine.run_plan(task_path)
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+
+    assert meta.status is RunStatus.passed
+    assert meta.data["workflow"] == "plan"
+    assert meta.data["adapter"] == "stub"
+    assert (run_dir / "context-pack.md").exists()
+    assert (run_dir / "exec-plan.md").exists()
+    assert (run_dir / "work-receipt.json").exists()
+
+
+def test_run_implement_completes_full_stub_workflow(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(StubRunnerAdapter(), ai_root=ai_root, repo_root=repo_root)
+
+    run_id = engine.run_implement(task_path)
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+    verify_report = json.loads((run_dir / "verify-report.json").read_text(encoding="utf-8"))
+
+    assert meta.status is RunStatus.passed
+    assert meta.last_completed_stage == "review"
+    assert verify_report["passed"] is True
+    assert (run_dir / "review-report.json").exists()
+
+
+def test_run_review_writes_review_artifacts(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(StubRunnerAdapter(), ai_root=ai_root, repo_root=repo_root)
+
+    run_id = engine.run_review(task_path)
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+
+    assert meta.status is RunStatus.passed
+    assert (run_dir / "review-report.json").exists()
+    assert (run_dir / "work-receipt.json").exists()
+
+
+def test_failed_gate_run_can_resume_after_gate_fix(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path, gate_command=_python_exit_command(1))
+    engine = WorkflowEngine(StubRunnerAdapter(), ai_root=ai_root, repo_root=repo_root)
+
+    run_id = engine.run_implement(task_path)
+    state_manager = RunStateManager(ai_root)
+    failed_meta = state_manager.load_run(run_id)
+
+    assert failed_meta.status is RunStatus.failed
+    assert failed_meta.last_completed_stage == "gates"
+
+    (ai_root / "gates" / "default.yaml").write_text(
+        _gates_yaml(_python_print_command("gate-fixed")),
+        encoding="utf-8",
+    )
+
+    resumed_run_id = engine.resume(run_id)
+    resumed_meta = state_manager.load_run(resumed_run_id)
+    review_report = json.loads((ai_root / "runs" / run_id / "review-report.json").read_text(encoding="utf-8"))
+
+    assert resumed_run_id == run_id
+    assert resumed_meta.status is RunStatus.passed
+    assert review_report["summary"].startswith("Stub review completed")
+
+
+def test_adapter_failure_writes_failed_receipt(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(StubRunnerAdapter(fail_stages={"discover"}), ai_root=ai_root, repo_root=repo_root)
+
+    try:
+        engine.run_plan(task_path)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("Expected run_plan to fail when the stub adapter fails discover")
+
+    run_root = next((ai_root / "runs").iterdir())
+    meta = RunStateManager(ai_root).load_run(run_root.name)
+    receipt = json.loads((run_root / "work-receipt.json").read_text(encoding="utf-8"))
+
+    assert meta.status is RunStatus.failed
+    assert receipt["status"] == "failed"
+    assert "discover" in receipt["summary"]
+
+
+def _create_ai_workspace(
+    tmp_path: Path,
+    *,
+    gate_command: str | None = None,
+) -> tuple[Path, Path, Path]:
+    repo_root = tmp_path / "repo"
+    ai_root = repo_root / ".ai"
+    (ai_root / "tasks").mkdir(parents=True)
+    (ai_root / "runbooks").mkdir()
+    (ai_root / "gates").mkdir()
+    (ai_root / "policies").mkdir()
+
+    task_path = ai_root / "tasks" / "sample.md"
+    task_path.write_text(
+        "\n".join(
+            [
+                "---",
+                "title: Sample Task",
+                "slug: sample-task",
+                "runbook: default",
+                "gates: default",
+                "policy: repo-policy",
+                "---",
+                "",
+                "# Goal",
+                "",
+                "Exercise the stub workflow.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (ai_root / "runbooks" / "default.md").write_text(
+        "\n".join(
+            [
+                "---",
+                "name: default",
+                "description: default runbook",
+                "stages:",
+                "  - name: discover",
+                "  - name: plan",
+                "  - name: implement",
+                "  - name: review",
+                "---",
+                "",
+                "# Runbook",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (ai_root / "policies" / "repo-policy.md").write_text(
+        "# Policy\n\nUse stub orchestration for tests.\n",
+        encoding="utf-8",
+    )
+    (ai_root / "gates" / "default.yaml").write_text(
+        _gates_yaml(gate_command or _python_print_command("gate-pass")),
+        encoding="utf-8",
+    )
+    return task_path, ai_root, repo_root
+
+
+def _gates_yaml(command: str) -> str:
+    escaped_command = command.replace("'", "''")
+    return "\n".join(
+        [
+            "name: default",
+            "description: test gates",
+            "gates:",
+            "  - name: check",
+            f"    command: '{escaped_command}'",
+            "    timeout_seconds: 30",
+        ]
+    )
+
+
+def _python_print_command(message: str) -> str:
+    return f"{sys.executable} -c \"print('{message}')\""
+
+
+def _python_exit_command(code: int) -> str:
+    return f"{sys.executable} -c \"import sys; sys.exit({code})\""
