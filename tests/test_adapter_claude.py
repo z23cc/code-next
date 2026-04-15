@@ -19,6 +19,13 @@ def test_claude_adapter_manual_mode_generates_expected_outputs(tmp_path: Path) -
     result = adapter.execute(task, plan, run_dir)
     review = adapter.review(task, run_dir)
 
+    assert adapter.host_contract.adapter == "claude"
+    assert adapter.host_contract.mode == "manual"
+    assert adapter.host_contract.capabilities.supports_auto_execution is True
+    assert adapter.host_contract.capabilities.requires_explicit_review_handoff is True
+    assert adapter.host_contract.review.required_run_artifacts == ("verify-report.json",)
+    assert adapter.host_contract.review.expected_report_mode == "manual"
+    assert adapter.host_contract.review.linked_report_artifact_field == "prompt_file"
     assert "Claude Context Pack" in context
     assert "Suggested Claude Prompt" in plan
     assert result.status is RunStatus.blocked
@@ -41,6 +48,13 @@ def test_claude_adapter_auto_mode_uses_subprocess_output(tmp_path: Path) -> None
     result = adapter.execute(task, plan, run_dir)
     review = adapter.review(task, run_dir)
 
+    assert adapter.host_contract.adapter == "claude"
+    assert adapter.host_contract.mode == "auto"
+    assert adapter.host_contract.capabilities.supports_auto_execution is True
+    assert adapter.host_contract.capabilities.requires_explicit_review_handoff is False
+    assert adapter.host_contract.review.required_run_artifacts == ("verify-report.json",)
+    assert adapter.host_contract.review.expected_report_mode == "auto"
+    assert adapter.host_contract.review.linked_report_artifact_field == "response_file"
     assert plan == "stdin:yes"
     assert result.metadata["mode"] == "auto"
     assert (run_dir / "claude-implement-response.md").read_text(encoding="utf-8") == "stdin:yes"

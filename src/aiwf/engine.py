@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
-from aiwf.adapters.base import RunnerAdapter
+from aiwf.adapters import restore_host_contract
+from aiwf.adapters.base import HostContract, RunnerAdapter
 from aiwf.artifacts import ArtifactStore
-from aiwf.exceptions import StateError
+from aiwf.exceptions import ArtifactError, StateError
 from aiwf.gates import run_gates
 from aiwf.loader import load_gate_set, load_policy, load_runbook, load_task
 from aiwf.models import RunMeta, RunStatus, StageResult, TaskSpec, WorkReceipt
@@ -23,15 +25,25 @@ class WorkflowEngine:
         ai_root: str | Path = ".ai",
         repo_root: str | Path | None = None,
         state_manager: RunStateManager | None = None,
-        adapter_name: str = "stub",
-        adapter_auto: bool = False,
+        host_contract: HostContract | None = None,
+        adapter_resolver: Callable[[HostContract], RunnerAdapter] | None = None,
     ) -> None:
         self.adapter = adapter
         self.ai_root = Path(ai_root)
         self.repo_root = Path(repo_root) if repo_root is not None else self.ai_root.parent
         self.state_manager = state_manager or RunStateManager(self.ai_root)
-        self.adapter_name = adapter_name
-        self.adapter_auto = adapter_auto
+        self.host_contract = host_contract or adapter.host_contract
+        self.adapter_resolver = adapter_resolver
+        if self.adapter.host_contract != self.host_contract:
+            raise ValueError("Configured adapter does not match the provided host contract")
+
+    @property
+    def adapter_name(self) -> str:
+        return self.host_contract.adapter
+
+    @property
+    def adapter_auto(self) -> bool:
+        return self.host_contract.auto
 
     def run_plan(self, task_path: str | Path) -> str:
         """Run the stub-backed plan workflow."""
@@ -98,12 +110,12 @@ class WorkflowEngine:
         if meta.last_completed_stage not in {"gates", "review"}:
             raise StateError("Run has not reached the review boundary", path=meta.run_dir, stage="review")
 
-        self._restore_execution_metadata(meta)
+        self._restore_execution_metadata(meta, stage="review")
         task = self._load_task_from_meta(meta)
         self._load_supporting_specs(task)
         run_dir = Path(meta.run_dir)
         store = ArtifactStore(run_dir, state_manager=self.state_manager)
-        self._require_review_artifacts(run_dir)
+        self._require_review_artifacts(store)
 
         try:
             self.state_manager.transition(run_id, RunStatus.running, stage="review", data=self._workflow_data(workflow))
@@ -135,7 +147,7 @@ class WorkflowEngine:
                 stage="resume",
             )
 
-        self._restore_execution_metadata(meta)
+        self._restore_execution_metadata(meta, stage="resume")
         task = self._load_task_from_meta(meta)
         self._load_supporting_specs(task)
         run_dir = Path(meta.run_dir)
@@ -287,15 +299,22 @@ class WorkflowEngine:
         success_summary: str,
         success_artifacts: list[str],
     ) -> None:
+        self._require_review_artifacts(store)
+        review_report: dict[str, object]
         if last_completed_stage != "review":
             review_report = self.adapter.review(task, run_dir)
+            self._validate_review_report(review_report, run_dir)
             store.write_review_report(review_report)
             self.state_manager.update_run(run_id, last_completed_stage="review", data=self._workflow_data(workflow_name))
             if self._requires_explicit_review_handoff(review_report):
                 self.state_manager.transition(run_id, RunStatus.blocked, stage="review")
                 return
         else:
-            store.read_artifact("review-report.json")
+            stored_review_report = store.read_artifact("review-report.json")
+            if not isinstance(stored_review_report, dict):
+                raise StateError("Stored review-report.json must be a JSON object", path=run_dir / "review-report.json", stage="review")
+            review_report = stored_review_report
+            self._validate_review_report(review_report, run_dir)
 
         self._write_receipt(
             store,
@@ -349,33 +368,100 @@ class WorkflowEngine:
     def _workflow_data(self, workflow: str) -> dict[str, object]:
         return {
             "workflow": workflow,
-            "adapter": self.adapter_name,
-            "auto": self.adapter_auto,
+            "host_contract": self.host_contract.to_metadata(),
         }
 
-    def _restore_execution_metadata(self, meta: RunMeta) -> None:
-        adapter_name = str(meta.data.get("adapter", "")).strip()
-        auto = meta.data.get("auto")
-        if adapter_name not in {"claude", "rp", "stub"}:
-            raise StateError("Run does not include a valid stored adapter", path=meta.run_dir, stage="resume")
-        if not isinstance(auto, bool):
-            raise StateError("Run does not include a valid stored auto setting", path=meta.run_dir, stage="resume")
-        self.adapter_name = adapter_name
-        self.adapter_auto = auto
+    def _restore_execution_metadata(self, meta: RunMeta, *, stage: str) -> None:
+        try:
+            contract = restore_host_contract(meta.data)
+        except ValueError as exc:
+            raise StateError("Run does not include a valid stored host contract", path=meta.run_dir, stage=stage) from exc
 
-    def _require_review_artifacts(self, run_dir: Path) -> None:
-        verify_report = run_dir / "verify-report.json"
-        if not verify_report.exists():
-            raise StateError("Run is missing verify-report.json required for review", path=verify_report, stage="review")
+        self.host_contract = contract
+        if self.adapter.host_contract == contract:
+            return
+        if self.adapter_resolver is None:
+            raise StateError("WorkflowEngine adapter does not match stored host contract", path=meta.run_dir, stage=stage)
+        try:
+            restored_adapter = self.adapter_resolver(contract)
+        except Exception as exc:
+            raise StateError("Failed to restore adapter from stored host contract", path=meta.run_dir, stage=stage) from exc
+        if restored_adapter.host_contract != contract:
+            raise StateError("Restored adapter does not honor stored host contract", path=meta.run_dir, stage=stage)
+        self.adapter = restored_adapter
+
+    def _require_review_artifacts(self, store: ArtifactStore) -> None:
+        for artifact_name in self.host_contract.review.required_run_artifacts:
+            try:
+                store.read_artifact(artifact_name)
+            except ArtifactError as exc:
+                raise StateError(
+                    f"Run is missing required review artifact {artifact_name!r}",
+                    path=store.run_dir / artifact_name,
+                    stage="review",
+                ) from exc
 
     def _requires_explicit_review_handoff(self, review_report: dict[str, object] | None = None) -> bool:
-        if self.adapter_name not in {"claude", "rp"}:
-            return False
-        if self.adapter_name == "claude" and self.adapter_auto:
-            return False
+        expected = self.host_contract.capabilities.requires_explicit_review_handoff
         if review_report is None:
-            return True
-        return str(review_report.get("mode", "")).strip() == "manual"
+            return expected
+        reported_mode = str(review_report.get("mode", "")).strip()
+        if reported_mode in {"manual", "auto"} and (reported_mode == "manual") != expected:
+            raise StateError(
+                f"Review report mode {reported_mode!r} does not match stored host contract "
+                f"(requires_explicit_review_handoff={expected})",
+                stage="review",
+            )
+        return expected
+
+    def _validate_review_report(self, review_report: dict[str, object], run_dir: Path) -> None:
+        review_contract = self.host_contract.review
+
+        for field_name in review_contract.required_report_string_fields:
+            value = review_report.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise StateError(
+                    f"Review report is missing required string field {field_name!r}",
+                    path=run_dir / "review-report.json",
+                    stage="review",
+                )
+
+        for field_name in review_contract.required_report_list_fields:
+            value = review_report.get(field_name)
+            if not isinstance(value, list):
+                raise StateError(
+                    f"Review report field {field_name!r} must be a list",
+                    path=run_dir / "review-report.json",
+                    stage="review",
+                )
+
+        expected_mode = review_contract.expected_report_mode
+        if expected_mode is not None:
+            reported_mode = review_report.get("mode")
+            if reported_mode != expected_mode:
+                raise StateError(
+                    f"Review report mode {reported_mode!r} does not match expected review evidence mode {expected_mode!r}",
+                    path=run_dir / "review-report.json",
+                    stage="review",
+                )
+
+        linked_field = review_contract.linked_report_artifact_field
+        if linked_field is None:
+            return
+        artifact_name = review_report.get(linked_field)
+        if not isinstance(artifact_name, str) or not artifact_name.strip():
+            raise StateError(
+                f"Review report is missing linked artifact field {linked_field!r}",
+                path=run_dir / "review-report.json",
+                stage="review",
+            )
+        linked_artifact_path = run_dir / artifact_name
+        if not linked_artifact_path.exists() or not linked_artifact_path.is_file():
+            raise StateError(
+                f"Review evidence artifact {artifact_name!r} referenced by {linked_field!r} does not exist",
+                path=linked_artifact_path,
+                stage="review",
+            )
 
     def _load_supporting_specs(self, task: TaskSpec) -> None:
         load_runbook(self.ai_root / "runbooks" / f"{task.runbook}.md")

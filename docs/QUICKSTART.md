@@ -25,6 +25,8 @@ uv run aiwf run plan --task .ai/tasks/<your-task>.md --adapter claude
 - `.ai/runs/<run_id>/context-pack.md`
 - `.ai/runs/<run_id>/exec-plan.md`
 
+同时 run metadata 会保存显式 `host_contract`，供后续 `run review` / `resume` 恢复宿主能力边界。
+
 ## 4. 实现阶段
 
 ```bash
@@ -43,6 +45,8 @@ uv run aiwf resume <run_id>
 如果 gates 通过，run 会停在 `needs_review`，等待显式 review。
 如果 gates 失败，修复后同样使用 `uv run aiwf resume <run_id>` 继续。
 
+如果使用 `--auto`，只有当前宿主契约声明支持自动模式时才会生效；Claude 支持，RP / stub 不支持。
+
 ## 5. 复核阶段
 
 对已经到达 `needs_review` 的 run 执行：
@@ -56,6 +60,12 @@ uv run aiwf run review --run-id <run_id>
 ```bash
 uv run aiwf resume <run_id>
 ```
+
+review 阶段会按当前 `host_contract.review` 契约检查：
+
+- review 前是否已有 `verify-report.json`
+- `review-report.json` 是否包含最小必需字段
+- 报告中引用的证据 artifact（如 `prompt_file` / `response_file`）是否真实存在
 
 ## 6. 编译 Claude 输入包
 
@@ -72,7 +82,7 @@ uv run aiwf compile claude --output .claude/compiled
 其中：
 
 - `claude-bundle.md` 是 Claude 可直接阅读的合并包
-- `claude-projection.json` 是 Claude 宿主投影契约
+- `claude-projection.json` 是 Claude 宿主投影契约，包含显式 host/review contract 元数据
 - `manifest.json` 会记录 source fingerprint 与上一次编译相比的 drift 状态
 
 ## 7. Claude Code 技能入口

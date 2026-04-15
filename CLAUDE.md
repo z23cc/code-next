@@ -102,7 +102,10 @@ src/aiwf/
 - `context-pack.md`
 - `exec-plan.md`
 - `verify-report.json`
+- `review-report.json`
 - `work-receipt.json`
+
+此外，运行态宿主边界不应只靠 adapter 名称猜测；`run.json` 中持久化的 `host_contract` / `review` 契约是恢复与 review 校验的依据。
 
 ## Claude Code 的工作方式
 
@@ -114,7 +117,7 @@ src/aiwf/
 4. 先产出计划，再做实现
 5. 对手动 Claude 模式，要把 prompt 文件视为人工 handoff 边界，而不是视为实现或 review 已经终态完成
 6. 实现完成后必须跑 gates
-7. review 现在基于既有 run 与 artifacts，通过 `run review --run-id <run_id>` 进入
+7. review 现在基于既有 run 与 artifacts，通过 `run review --run-id <run_id>` 进入，并按已存储的 review artifact contract 校验证据
 8. 所有关键决定写入 artifact
 9. 如果上下文过大，拆分任务，不要把过多设计塞进一次回答
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
 from aiwf.exceptions import AdapterError
 from aiwf.models import RunStatus, StageResult, TaskSpec
 
@@ -13,6 +14,19 @@ class StubRunnerAdapter:
 
     def __init__(self, fail_stages: set[str] | None = None) -> None:
         self.fail_stages = fail_stages or set()
+        self.host_contract = HostContract(
+            adapter="stub",
+            mode="manual",
+            capabilities=HostCapabilities(
+                supports_auto_execution=False,
+                requires_explicit_review_handoff=False,
+            ),
+            review=ReviewArtifactContract(
+                required_run_artifacts=("verify-report.json",),
+                required_report_string_fields=("summary",),
+                required_report_list_fields=("issues",),
+            ),
+        )
 
     def discover(self, task: TaskSpec, run_dir: Path) -> str:
         self._maybe_fail("discover", run_dir)

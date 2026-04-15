@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
+from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
 from aiwf.exceptions import AdapterError
 from aiwf.models import RunStatus, StageResult, TaskSpec
 
@@ -24,6 +25,21 @@ class ClaudeCodeAdapter:
     ) -> None:
         self.repo_root = Path(repo_root)
         self.auto = auto
+        self.host_contract = HostContract(
+            adapter="claude",
+            mode="auto" if auto else "manual",
+            capabilities=HostCapabilities(
+                supports_auto_execution=True,
+                requires_explicit_review_handoff=not auto,
+            ),
+            review=ReviewArtifactContract(
+                required_run_artifacts=("verify-report.json",),
+                required_report_string_fields=("summary", "mode", "response_file" if auto else "prompt_file"),
+                required_report_list_fields=("issues",),
+                expected_report_mode="auto" if auto else "manual",
+                linked_report_artifact_field="response_file" if auto else "prompt_file",
+            ),
+        )
         self.claude_command = list(claude_command) if claude_command is not None else ["claude", "--print"]
         self.max_snapshot_entries = max_snapshot_entries
         self.claude_timeout = claude_timeout

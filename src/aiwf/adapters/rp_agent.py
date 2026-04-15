@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
 from aiwf.exceptions import AdapterError
 from aiwf.models import RunStatus, StageResult, TaskSpec
 
@@ -14,6 +15,21 @@ class RpAgentAdapter:
     def __init__(self, repo_root: str | Path = ".", *, max_snapshot_entries: int = 60) -> None:
         self.repo_root = Path(repo_root)
         self.max_snapshot_entries = max_snapshot_entries
+        self.host_contract = HostContract(
+            adapter="rp",
+            mode="manual",
+            capabilities=HostCapabilities(
+                supports_auto_execution=False,
+                requires_explicit_review_handoff=True,
+            ),
+            review=ReviewArtifactContract(
+                required_run_artifacts=("verify-report.json",),
+                required_report_string_fields=("summary", "mode", "prompt_file"),
+                required_report_list_fields=("issues",),
+                expected_report_mode="manual",
+                linked_report_artifact_field="prompt_file",
+            ),
+        )
 
     def discover(self, task: TaskSpec, run_dir: Path) -> str:
         """Build a RepoPrompt-oriented local context pack without invoking an external host."""

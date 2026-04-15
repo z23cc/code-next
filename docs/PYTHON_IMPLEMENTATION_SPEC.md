@@ -24,6 +24,14 @@ Claude 适配器的职责只是：
 - 解析执行结果
 - 把结果写回统一 artifact 协议
 
+### 2.4 宿主契约与 review 契约应显式化
+不要再把运行时边界只隐含在 `adapter` 字符串、`auto` flag 和宿主专属条件分支里。  
+运行时应显式持久化宿主契约（`host_contract`），至少覆盖：
+
+- adapter 名称与 mode（manual / auto）
+- capability（如 auto support、是否需要显式 review handoff）
+- review 证据契约（review 前必需 artifacts、review report 最小字段、linked evidence artifact）
+
 ## 3. 推荐依赖
 
 ```toml
@@ -116,8 +124,11 @@ tests/
 - `resume(run_id)`
 
 ### 4.7 `adapters/base.py`
-定义统一适配器协议，例如：
+定义统一适配器协议与显式宿主契约，例如：
 
+- `HostContract`
+- `HostCapabilities`
+- `ReviewArtifactContract`
 - `discover()`
 - `plan()`
 - `execute()`
@@ -156,7 +167,7 @@ uv run aiwf compile claude
 `compile claude` 不应只做简单 bundle 导出；最小可行版本至少应输出：
 
 - 一个 Claude 可直接消费的 markdown bundle
-- 一个显式宿主投影文件（命令、artifact、workflow 边界）
+- 一个显式宿主投影文件（命令、host contract、review artifact contract、workflow 边界）
 - 一个带 source fingerprint 与 drift 信息的 manifest
 
 ## 6. 运行目录契约
@@ -167,19 +178,19 @@ uv run aiwf compile claude
 .ai/runs/<run_id>/
   run.json
   events.ndjson
-  task.md
   context-pack.md
   exec-plan.md
   verify-report.json
   review-report.json
   work-receipt.json
-  logs/
 ```
 
 其中：
 - `run.json` 是当前快照
 - `events.ndjson` 是 append-only 事件流
 - `work-receipt.json` 是最终摘要
+- `run.json.data.host_contract` 是恢复运行时宿主边界的真源
+- 手动宿主的 handoff prompt / 自动宿主的 response artifact 会按宿主契约选择性出现
 
 ## 7. 最小可行流程
 
@@ -205,10 +216,12 @@ uv run aiwf compile claude
 
 ### `review`
 1. 读取既有 run 与 artifacts（不是重新从 task 启动一条独立 review run）
-2. 收集 verify-report / diff / review 上下文
-3. 做独立 review
-4. 输出 `review-report.json`
-5. 手动 Claude 模式下可再次停在 `blocked`，由后续 `resume(run_id)` 完成终态收口
+2. 依据已存储的 `host_contract.review` 校验 review 前置 artifacts
+3. 收集 verify-report / diff / review 上下文
+4. 做独立 review
+5. 输出满足最小 review 契约的 `review-report.json`
+6. 如果报告声明了 linked evidence artifact（如 `prompt_file` / `response_file`），对应 artifact 必须存在
+7. 手动 Claude 模式下可再次停在 `blocked`，由后续 `resume(run_id)` 完成终态收口
 
 ## 8. 第一阶段的现实取舍
 

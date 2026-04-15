@@ -53,7 +53,7 @@ def compile_claude(ai_root: str | Path, output_dir: str | Path) -> dict[str, Pat
         "compiler": {
             "name": "aiwf.compile.claude",
             "host": "claude_code",
-            "projection_contract": "claude-host-projection-v1",
+            "projection_contract": "claude-host-projection-v2",
         },
         "ai_root": str(ai_root_path),
         "output_dir": str(output_path),
@@ -84,7 +84,7 @@ def compile_claude(ai_root: str | Path, output_dir: str | Path) -> dict[str, Pat
         "bundle_path": bundle_path,
         "projection_path": projection_path,
         "manifest_path": manifest_path,
-        "drift_status": drift["status"],
+        "drift_status": str(drift["status"]),
     }
 
 
@@ -105,11 +105,17 @@ def _build_compiled_markdown(
         "- drift_manifest: `manifest.json`",
         "",
         "## Claude Host Contract",
-        "- adapter: `claude`",
-        "- manual_handoff: supported",
-        "- auto_subprocess: supported",
-        "- review_mode: existing run + `verify-report.json` driven",
-        "- resume_mode: restores stored `adapter` and `auto` settings from run metadata",
+        "- stored_runtime_key: `host_contract`",
+        "- default_variant: `claude/manual`",
+        "- supported_variants: `claude/manual`, `claude/auto`",
+        "- resume_mode: restores stored `host_contract` from run metadata",
+        "",
+        "## Claude Review Evidence Contract",
+        "- review entrypoint targets an existing run at `needs_review`",
+        "- required pre-review artifact: `verify-report.json`",
+        "- manual review report fields: `summary`, `issues`, `mode`, `prompt_file`",
+        "- auto review report fields: `summary`, `issues`, `mode`, `response_file`",
+        "- linked review evidence artifact must exist before finalization",
         "",
         "## Suggested Commands",
         "```bash",
@@ -207,9 +213,40 @@ def _build_projection(
         "host": {
             "name": "claude_code",
             "display_name": "Claude Code",
-            "adapter": "claude",
-            "manual_handoff": True,
-            "auto_subprocess": True,
+            "stored_runtime_key": "host_contract",
+            "default_variant": "claude/manual",
+            "variants": {
+                "manual": {
+                    "adapter": "claude",
+                    "mode": "manual",
+                    "capabilities": {
+                        "supports_auto_execution": True,
+                        "requires_explicit_review_handoff": True,
+                    },
+                    "review": {
+                        "required_run_artifacts": ["verify-report.json"],
+                        "required_report_string_fields": ["summary", "mode", "prompt_file"],
+                        "required_report_list_fields": ["issues"],
+                        "expected_report_mode": "manual",
+                        "linked_report_artifact_field": "prompt_file",
+                    },
+                },
+                "auto": {
+                    "adapter": "claude",
+                    "mode": "auto",
+                    "capabilities": {
+                        "supports_auto_execution": True,
+                        "requires_explicit_review_handoff": False,
+                    },
+                    "review": {
+                        "required_run_artifacts": ["verify-report.json"],
+                        "required_report_string_fields": ["summary", "mode", "response_file"],
+                        "required_report_list_fields": ["issues"],
+                        "expected_report_mode": "auto",
+                        "linked_report_artifact_field": "response_file",
+                    },
+                },
+            },
         },
         "artifacts": {
             "bundle": "claude-bundle.md",
@@ -229,12 +266,25 @@ def _build_projection(
             "review": {
                 "entrypoint": commands["review"],
                 "requires_status": "needs_review",
-                "requires_artifact": "verify-report.json",
-                "manual_handoff_artifact": "claude-review-prompt.md",
+                "required_run_artifacts": ["verify-report.json"],
+                "report_contract": {
+                    "manual": {
+                        "required_report_string_fields": ["summary", "mode", "prompt_file"],
+                        "required_report_list_fields": ["issues"],
+                        "expected_report_mode": "manual",
+                        "linked_report_artifact_field": "prompt_file",
+                    },
+                    "auto": {
+                        "required_report_string_fields": ["summary", "mode", "response_file"],
+                        "required_report_list_fields": ["issues"],
+                        "expected_report_mode": "auto",
+                        "linked_report_artifact_field": "response_file",
+                    },
+                },
             },
             "resume": {
                 "entrypoint": commands["resume"],
-                "restores_run_metadata": ["adapter", "auto"],
+                "restores_run_metadata": ["host_contract"],
             },
         },
         "projection_inputs": source_index,

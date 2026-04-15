@@ -16,8 +16,6 @@ def test_phase_one_end_to_end_artifact_contract_and_resume(tmp_path: Path) -> No
         StubRunnerAdapter(),
         ai_root=ai_root,
         repo_root=repo_root,
-        adapter_name="stub",
-        adapter_auto=False,
     )
 
     plan_run_id = engine.run_plan(task_path)

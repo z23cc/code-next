@@ -4,10 +4,14 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
+from aiwf.adapters import build_adapter_from_contract
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.adapters.rp_agent import RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 from aiwf.engine import WorkflowEngine
+from aiwf.exceptions import StateError
 from aiwf.models import RunStatus
 from aiwf.state import RunStateManager
 
@@ -22,7 +26,8 @@ def test_run_plan_creates_expected_artifacts(tmp_path: Path) -> None:
 
     assert meta.status is RunStatus.passed
     assert meta.data["workflow"] == "plan"
-    assert meta.data["adapter"] == "stub"
+    assert meta.data["host_contract"]["adapter"] == "stub"
+    assert meta.data["host_contract"]["mode"] == "manual"
     assert (run_dir / "context-pack.md").exists()
     assert (run_dir / "exec-plan.md").exists()
     assert (run_dir / "work-receipt.json").exists()
@@ -49,8 +54,6 @@ def test_run_review_operates_on_existing_run_and_blocks_for_manual_claude(tmp_pa
         ClaudeCodeAdapter(repo_root=repo_root, auto=False),
         ai_root=ai_root,
         repo_root=repo_root,
-        adapter_name="claude",
-        adapter_auto=False,
     )
 
     run_id = engine.run_implement(task_path)
@@ -67,14 +70,67 @@ def test_run_review_operates_on_existing_run_and_blocks_for_manual_claude(tmp_pa
     assert not (run_dir / "work-receipt.json").exists()
 
 
+def test_run_review_requires_contract_declared_verify_report_artifact(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    engine.resume(run_id)
+    verify_report = ai_root / "runs" / run_id / "verify-report.json"
+    verify_report.unlink()
+
+    with pytest.raises(StateError, match="missing required review artifact 'verify-report.json'"):
+        engine.run_review(run_id)
+
+
+def test_run_review_fails_when_adapter_returns_review_report_missing_linked_prompt_artifact(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    engine.resume(run_id)
+    engine.adapter.review = lambda task, run_dir: {  # type: ignore[method-assign]
+        "summary": "Manual review prepared",
+        "issues": [],
+        "mode": "manual",
+    }
+
+    with pytest.raises(StateError, match="missing required string field 'prompt_file'"):
+        engine.run_review(run_id)
+
+
+def test_resume_review_fails_when_persisted_linked_review_evidence_artifact_is_missing(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    engine.resume(run_id)
+    engine.run_review(run_id)
+    prompt_artifact = ai_root / "runs" / run_id / "claude-review-prompt.md"
+    prompt_artifact.unlink()
+
+    with pytest.raises(StateError, match="Review evidence artifact 'claude-review-prompt.md'"):
+        engine.resume(run_id)
+
+
 def test_manual_claude_implement_stops_after_prompt_handoff(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
     engine = WorkflowEngine(
         ClaudeCodeAdapter(repo_root=repo_root, auto=False),
         ai_root=ai_root,
         repo_root=repo_root,
-        adapter_name="claude",
-        adapter_auto=False,
     )
 
     run_id = engine.run_implement(task_path)
@@ -95,8 +151,6 @@ def test_manual_claude_resume_stops_at_needs_review_after_passing_gates(tmp_path
         ClaudeCodeAdapter(repo_root=repo_root, auto=False),
         ai_root=ai_root,
         repo_root=repo_root,
-        adapter_name="claude",
-        adapter_auto=False,
     )
 
     run_id = engine.run_implement(task_path)
@@ -119,8 +173,6 @@ def test_manual_claude_resume_after_review_handoff_finalizes_run(tmp_path: Path)
         ClaudeCodeAdapter(repo_root=repo_root, auto=False),
         ai_root=ai_root,
         repo_root=repo_root,
-        adapter_name="claude",
-        adapter_auto=False,
     )
 
     run_id = engine.run_implement(task_path)
@@ -143,8 +195,6 @@ def test_manual_rp_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: P
         RpAgentAdapter(repo_root=repo_root),
         ai_root=ai_root,
         repo_root=repo_root,
-        adapter_name="rp",
-        adapter_auto=False,
     )
 
     run_id = engine.run_implement(task_path)
@@ -157,11 +207,10 @@ def test_manual_rp_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: P
     assert (run_dir / "rp-agent-implement-prompt.md").exists()
 
     resumed_engine = WorkflowEngine(
-        RpAgentAdapter(repo_root=repo_root),
+        StubRunnerAdapter(),
         ai_root=ai_root,
         repo_root=repo_root,
-        adapter_name="stub",
-        adapter_auto=True,
+        adapter_resolver=lambda contract: build_adapter_from_contract(contract, repo_root),
     )
 
     resumed_run_id = resumed_engine.resume(run_id)
@@ -170,6 +219,7 @@ def test_manual_rp_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: P
     assert resumed_run_id == run_id
     assert needs_review_meta.status is RunStatus.needs_review
     assert needs_review_meta.last_completed_stage == "gates"
+    assert isinstance(resumed_engine.adapter, RpAgentAdapter)
     assert resumed_engine.adapter_name == "rp"
     assert resumed_engine.adapter_auto is False
     assert (run_dir / "verify-report.json").exists()

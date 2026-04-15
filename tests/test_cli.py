@@ -5,6 +5,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from aiwf.cli import app
+from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
 from aiwf.state import RunStateManager
 
 
@@ -215,7 +216,8 @@ def test_cli_defaults_to_claude_adapter_for_plan(tmp_path: Path) -> None:
     meta = RunStateManager(ai_root).load_run(run_id)
     plan_text = (ai_root / "runs" / run_id / "exec-plan.md").read_text(encoding="utf-8")
 
-    assert meta.data["adapter"] == "claude"
+    assert meta.data["host_contract"]["adapter"] == "claude"
+    assert meta.data["host_contract"]["mode"] == "manual"
     assert "Claude Code Plan" in plan_text
 
 
@@ -239,7 +241,8 @@ def test_cli_resume_uses_stored_claude_adapter_when_not_provided(tmp_path: Path)
     assert "status=blocked" in implement_result.stdout
     run_id = next((ai_root / "runs").iterdir()).name
     meta = RunStateManager(ai_root).load_run(run_id)
-    assert meta.data["adapter"] == "claude"
+    assert meta.data["host_contract"]["adapter"] == "claude"
+    assert meta.data["host_contract"]["mode"] == "manual"
     assert meta.status.value == "blocked"
 
     (ai_root / "gates" / "default.yaml").write_text(
@@ -320,8 +323,8 @@ def test_cli_rp_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path)
     assert "status=blocked" in implement_result.stdout
     run_id = next((ai_root / "runs").iterdir()).name
     meta = RunStateManager(ai_root).load_run(run_id)
-    assert meta.data["adapter"] == "rp"
-    assert meta.data["auto"] is False
+    assert meta.data["host_contract"]["adapter"] == "rp"
+    assert meta.data["host_contract"]["mode"] == "manual"
     assert (ai_root / "runs" / run_id / "rp-agent-implement-prompt.md").exists()
 
     resume_result = runner.invoke(
@@ -406,19 +409,40 @@ def test_cli_review_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
     )
     assert gates_result.exit_code == 0
     state_manager = RunStateManager(ai_root)
-    state_manager.update_run(run_id, data={"adapter": "claude", "auto": True})
+    state_manager.update_run(
+        run_id,
+        data={
+            "host_contract": {
+                "adapter": "claude",
+                "mode": "auto",
+                "capabilities": {
+                    "supports_auto_execution": True,
+                    "requires_explicit_review_handoff": False,
+                },
+            }
+        },
+    )
 
-    seen: list[tuple[str, bool]] = []
+    seen: list[HostContract | None] = []
 
     class FakeEngine:
         def run_review(self, captured_run_id: str) -> str:
             assert captured_run_id == run_id
             return captured_run_id
 
-    def fake_build_engine(ai_root_arg: Path, repo_root_arg: Path, *, adapter_name: str, auto: bool = False) -> FakeEngine:
+    def fake_build_engine(
+        ai_root_arg: Path,
+        repo_root_arg: Path,
+        *,
+        adapter_name: str | None = None,
+        auto: bool = False,
+        host_contract: HostContract | None = None,
+    ) -> FakeEngine:
         assert ai_root_arg == ai_root
         assert repo_root_arg == repo_root
-        seen.append((adapter_name, auto))
+        assert adapter_name is None
+        assert auto is False
+        seen.append(host_contract)
         return FakeEngine()
 
     monkeypatch.setattr("aiwf.cli._build_engine", fake_build_engine)
@@ -438,7 +462,23 @@ def test_cli_review_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
     )
 
     assert result.exit_code == 0
-    assert seen == [("claude", True)]
+    assert seen == [
+        HostContract(
+            adapter="claude",
+            mode="auto",
+            capabilities=HostCapabilities(
+                supports_auto_execution=True,
+                requires_explicit_review_handoff=False,
+            ),
+            review=ReviewArtifactContract(
+                required_run_artifacts=("verify-report.json",),
+                required_report_string_fields=("summary", "mode", "response_file"),
+                required_report_list_fields=("issues",),
+                expected_report_mode="auto",
+                linked_report_artifact_field="response_file",
+            ),
+        )
+    ]
 
 
 def test_cli_resume_builds_engine_from_stored_run_metadata(tmp_path: Path, monkeypatch) -> None:
@@ -459,19 +499,40 @@ def test_cli_resume_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
     assert implement_result.exit_code == 0
     run_id = next((ai_root / "runs").iterdir()).name
     state_manager = RunStateManager(ai_root)
-    state_manager.update_run(run_id, data={"adapter": "claude", "auto": True})
+    state_manager.update_run(
+        run_id,
+        data={
+            "host_contract": {
+                "adapter": "claude",
+                "mode": "auto",
+                "capabilities": {
+                    "supports_auto_execution": True,
+                    "requires_explicit_review_handoff": False,
+                },
+            }
+        },
+    )
 
-    seen: list[tuple[str, bool]] = []
+    seen: list[HostContract | None] = []
 
     class FakeEngine:
         def resume(self, captured_run_id: str) -> str:
             assert captured_run_id == run_id
             return captured_run_id
 
-    def fake_build_engine(ai_root_arg: Path, repo_root_arg: Path, *, adapter_name: str, auto: bool = False) -> FakeEngine:
+    def fake_build_engine(
+        ai_root_arg: Path,
+        repo_root_arg: Path,
+        *,
+        adapter_name: str | None = None,
+        auto: bool = False,
+        host_contract: HostContract | None = None,
+    ) -> FakeEngine:
         assert ai_root_arg == ai_root
         assert repo_root_arg == repo_root
-        seen.append((adapter_name, auto))
+        assert adapter_name is None
+        assert auto is False
+        seen.append(host_contract)
         return FakeEngine()
 
     monkeypatch.setattr("aiwf.cli._build_engine", fake_build_engine)
@@ -489,7 +550,47 @@ def test_cli_resume_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
     )
 
     assert result.exit_code == 0
-    assert seen == [("claude", True)]
+    assert seen == [
+        HostContract(
+            adapter="claude",
+            mode="auto",
+            capabilities=HostCapabilities(
+                supports_auto_execution=True,
+                requires_explicit_review_handoff=False,
+            ),
+            review=ReviewArtifactContract(
+                required_run_artifacts=("verify-report.json",),
+                required_report_string_fields=("summary", "mode", "response_file"),
+                required_report_list_fields=("issues",),
+                expected_report_mode="auto",
+                linked_report_artifact_field="response_file",
+            ),
+        )
+    ]
+
+
+def test_cli_rejects_auto_when_adapter_contract_does_not_support_it(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "plan",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--auto",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "does not support auto mode" in result.stdout
 
 
 def _create_ai_workspace(

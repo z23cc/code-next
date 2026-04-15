@@ -30,11 +30,19 @@ def test_compile_claude_writes_bundle_projection_and_manifest(tmp_path: Path) ->
     assert "## Suggested Commands" in bundle
     assert "uv run aiwf run review --run-id <run_id>" in bundle
     assert "uv run aiwf resume <run_id>" in bundle
+    assert "- stored_runtime_key: `host_contract`" in bundle
+    assert "- required pre-review artifact: `verify-report.json`" in bundle
     assert "- discover: no description" in bundle
     assert ".ai/policies/repo-policy.md" in bundle
     assert projection["host"]["name"] == "claude_code"
-    assert projection["workflow_contract"]["review"]["requires_artifact"] == "verify-report.json"
+    assert projection["host"]["stored_runtime_key"] == "host_contract"
+    assert projection["host"]["variants"]["manual"]["review"]["linked_report_artifact_field"] == "prompt_file"
+    assert projection["host"]["variants"]["auto"]["review"]["linked_report_artifact_field"] == "response_file"
+    assert projection["workflow_contract"]["review"]["required_run_artifacts"] == ["verify-report.json"]
+    assert projection["workflow_contract"]["review"]["report_contract"]["manual"]["expected_report_mode"] == "manual"
+    assert projection["workflow_contract"]["resume"]["restores_run_metadata"] == ["host_contract"]
     assert projection["artifacts"]["bundle"] == "claude-bundle.md"
+    assert manifest["compiler"]["projection_contract"] == "claude-host-projection-v2"
     assert manifest["sources"]["runbooks"] == ["default.md"]
     assert manifest["sources"]["gates"] == ["default.yaml"]
     assert manifest["files"]["projection"] == "claude-projection.json"

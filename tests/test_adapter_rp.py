@@ -18,6 +18,13 @@ def test_rp_agent_adapter_generates_manual_handoff_outputs(tmp_path: Path) -> No
     result = adapter.execute(task, plan, run_dir)
     review = adapter.review(task, run_dir)
 
+    assert adapter.host_contract.adapter == "rp"
+    assert adapter.host_contract.mode == "manual"
+    assert adapter.host_contract.capabilities.supports_auto_execution is False
+    assert adapter.host_contract.capabilities.requires_explicit_review_handoff is True
+    assert adapter.host_contract.review.required_run_artifacts == ("verify-report.json",)
+    assert adapter.host_contract.review.expected_report_mode == "manual"
+    assert adapter.host_contract.review.linked_report_artifact_field == "prompt_file"
     assert "RepoPrompt Context Pack" in context
     assert "Suggested RepoPrompt Brief" in plan
     assert result.status is RunStatus.blocked
