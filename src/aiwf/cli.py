@@ -15,6 +15,7 @@ from aiwf.adapters import ADAPTER_SPECS, build_adapter, build_adapter_from_contr
 from aiwf.adapters.base import HostContract
 from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
+from aiwf.compilers.codex import compile_codex
 from aiwf.contracts import assess_review_boundary, assess_review_evidence, lint_contract_registry, review_contract_fields
 from aiwf.doctor import render_doctor_report, run_doctor
 from aiwf.engine import WorkflowEngine
@@ -426,6 +427,24 @@ def compile_claude_command(
     """Compile `.ai/` sources into a Claude host projection and drift manifest."""
     try:
         result = compile_claude(ai_root, output)
+    except AiwfError as exc:
+        console.print(f"[red]compile failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        "[green]compile completed[/green] "
+        f"bundle={result['bundle_path']} projection={result['projection_path']} "
+        f"manifest={result['manifest_path']} drift={result['drift_status']}"
+    )
+
+
+@compile_app.command("codex")
+def compile_codex_command(
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    output: Annotated[Path, typer.Option("--output")] = Path(".codex/compiled"),
+) -> None:
+    """Compile `.ai/` sources into a Codex host projection and drift manifest."""
+    try:
+        result = compile_codex(ai_root, output)
     except AiwfError as exc:
         console.print(f"[red]compile failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc

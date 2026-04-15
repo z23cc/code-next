@@ -1,0 +1,106 @@
+{
+  "schema_version": 2,
+  "projection_name": "codex-host-projection",
+  "host": {
+    "name": "codex",
+    "display_name": "Codex",
+    "stored_runtime_key": "host_contract",
+    "default_variant": "codex/manual",
+    "variants": {
+      "manual": {
+        "adapter": "codex",
+        "mode": "manual",
+        "capabilities": {
+          "supports_auto_execution": false,
+          "requires_explicit_review_handoff": true
+        },
+        "review": {
+          "required_run_artifacts": [
+            "verify-report.json"
+          ],
+          "required_report_string_fields": [
+            "summary",
+            "mode",
+            "prompt_file"
+          ],
+          "required_report_list_fields": [
+            "issues"
+          ],
+          "expected_report_mode": "manual",
+          "linked_report_artifact_field": "prompt_file"
+        }
+      }
+    }
+  },
+  "artifacts": {
+    "bundle": "codex-bundle.md",
+    "manifest": "manifest.json"
+  },
+  "commands": {
+    "plan": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter codex",
+    "implement": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter codex",
+    "review": "uv run aiwf run review --run-id <run_id>",
+    "resume": "uv run aiwf resume <run_id>"
+  },
+  "workflow_contract": {
+    "plan": {
+      "entrypoint": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter codex",
+      "primary_artifacts": [
+        "context-pack.md",
+        "exec-plan.md"
+      ]
+    },
+    "implement": {
+      "entrypoint": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter codex",
+      "manual_handoff_artifact": "codex-implement-prompt.md",
+      "resume_boundary": "Use `uv run aiwf resume <run_id>` after manual Codex implement handoff."
+    },
+    "review": {
+      "entrypoint": "uv run aiwf run review --run-id <run_id>",
+      "requires_status": "needs_review",
+      "required_run_artifacts": [
+        "verify-report.json"
+      ],
+      "report_contract": {
+        "manual": {
+          "required_run_artifacts": [
+            "verify-report.json"
+          ],
+          "required_report_string_fields": [
+            "summary",
+            "mode",
+            "prompt_file"
+          ],
+          "required_report_list_fields": [
+            "issues"
+          ],
+          "expected_report_mode": "manual",
+          "linked_report_artifact_field": "prompt_file"
+        }
+      }
+    },
+    "resume": {
+      "entrypoint": "uv run aiwf resume <run_id>",
+      "restores_run_metadata": [
+        "host_contract"
+      ]
+    }
+  },
+  "projection_inputs": {
+    "count": 3,
+    "entry_keys": [
+      "kind",
+      "logical_name",
+      "sha256",
+      "source_path"
+    ],
+    "kind_counts": {
+      "gate": 1,
+      "policy": 1,
+      "runbook": 1
+    }
+  },
+  "projection_hash_keys": [
+    "bundle_sha256"
+  ]
+}
