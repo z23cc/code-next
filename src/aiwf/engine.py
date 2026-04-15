@@ -356,7 +356,7 @@ class WorkflowEngine:
     def _restore_execution_metadata(self, meta: RunMeta) -> None:
         adapter_name = str(meta.data.get("adapter", "")).strip()
         auto = meta.data.get("auto")
-        if adapter_name not in {"claude", "stub"}:
+        if adapter_name not in {"claude", "rp", "stub"}:
             raise StateError("Run does not include a valid stored adapter", path=meta.run_dir, stage="resume")
         if not isinstance(auto, bool):
             raise StateError("Run does not include a valid stored auto setting", path=meta.run_dir, stage="resume")
@@ -369,7 +369,9 @@ class WorkflowEngine:
             raise StateError("Run is missing verify-report.json required for review", path=verify_report, stage="review")
 
     def _requires_explicit_review_handoff(self, review_report: dict[str, object] | None = None) -> bool:
-        if self.adapter_name != "claude" or self.adapter_auto:
+        if self.adapter_name not in {"claude", "rp"}:
+            return False
+        if self.adapter_name == "claude" and self.adapter_auto:
             return False
         if review_report is None:
             return True

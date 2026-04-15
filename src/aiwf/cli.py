@@ -11,6 +11,7 @@ from rich.console import Console
 from aiwf import __version__
 from aiwf.adapters.base import RunnerAdapter
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
+from aiwf.adapters.rp_agent import RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 from aiwf.compilers.claude import compile_claude
 from aiwf.engine import WorkflowEngine
@@ -28,7 +29,7 @@ app.add_typer(compile_app, name="compile")
 console = Console()
 
 
-AdapterName = Literal["claude", "stub"]
+AdapterName = Literal["claude", "rp", "stub"]
 
 
 def _version_callback(value: bool) -> None:
@@ -62,6 +63,8 @@ def _build_engine(
     adapter: RunnerAdapter
     if adapter_name == "stub":
         adapter = StubRunnerAdapter()
+    elif adapter_name == "rp":
+        adapter = RpAgentAdapter(repo_root=repo_root)
     elif adapter_name == "claude":
         adapter = ClaudeCodeAdapter(repo_root=repo_root, auto=auto)
     else:
@@ -79,7 +82,7 @@ def _resolve_run_execution(ai_root: Path, run_id: str) -> tuple[AdapterName, boo
     meta = RunStateManager(ai_root).load_run(run_id)
     adapter_name = str(meta.data.get("adapter", "")).strip()
     auto = meta.data.get("auto")
-    if adapter_name not in {"claude", "stub"}:
+    if adapter_name not in {"claude", "rp", "stub"}:
         raise AiwfError(f"Run {run_id} does not include a valid stored adapter")
     if not isinstance(auto, bool):
         raise AiwfError(f"Run {run_id} does not include a valid stored auto setting")
@@ -108,7 +111,9 @@ def run_plan(
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
     adapter: Annotated[AdapterName, typer.Option("--adapter")] = "claude",
-    auto: Annotated[bool, typer.Option("--auto", help="Use the Claude CLI for subprocess execution.")] = False,
+    auto: Annotated[
+        bool, typer.Option("--auto", help="Use subprocess auto mode when supported (currently Claude only).")
+    ] = False,
 ) -> None:
     """Run the plan workflow."""
     engine = _build_engine(ai_root, repo_root, adapter_name=adapter, auto=auto)
@@ -121,7 +126,9 @@ def run_implement(
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
     adapter: Annotated[AdapterName, typer.Option("--adapter")] = "claude",
-    auto: Annotated[bool, typer.Option("--auto", help="Use the Claude CLI for subprocess execution.")] = False,
+    auto: Annotated[
+        bool, typer.Option("--auto", help="Use subprocess auto mode when supported (currently Claude only).")
+    ] = False,
 ) -> None:
     """Run the implement workflow."""
     engine = _build_engine(ai_root, repo_root, adapter_name=adapter, auto=auto)

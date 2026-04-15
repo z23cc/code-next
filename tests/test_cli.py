@@ -297,6 +297,85 @@ def test_cli_resume_uses_stored_claude_adapter_when_not_provided(tmp_path: Path)
     assert (ai_root / "runs" / run_id / "review-report.json").exists()
 
 
+def test_cli_rp_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+        ],
+    )
+
+    assert implement_result.exit_code == 0
+    assert "status=blocked" in implement_result.stdout
+    run_id = next((ai_root / "runs").iterdir()).name
+    meta = RunStateManager(ai_root).load_run(run_id)
+    assert meta.data["adapter"] == "rp"
+    assert meta.data["auto"] is False
+    assert (ai_root / "runs" / run_id / "rp-agent-implement-prompt.md").exists()
+
+    resume_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert resume_result.exit_code == 0
+    assert "status=needs_review" in resume_result.stdout
+
+    review_result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert review_result.exit_code == 0
+    assert "status=blocked" in review_result.stdout
+    assert (ai_root / "runs" / run_id / "rp-agent-review-prompt.md").exists()
+
+    final_resume = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert final_resume.exit_code == 0
+    assert "resume completed" in final_resume.stdout
+    resumed_meta = RunStateManager(ai_root).load_run(run_id)
+    assert resumed_meta.status.value == "passed"
+    assert (ai_root / "runs" / run_id / "review-report.json").exists()
+
+
 def test_cli_review_builds_engine_from_stored_run_metadata(tmp_path: Path, monkeypatch) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
     implement_result = runner.invoke(
