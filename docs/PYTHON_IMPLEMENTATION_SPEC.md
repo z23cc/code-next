@@ -175,6 +175,7 @@ uv run aiwf compile claude
 - 一个 Claude 可直接消费的 markdown bundle
 - 一个显式宿主投影文件（命令、host contract、review artifact contract、workflow 边界）
 - 一个带 source fingerprint 与 drift 信息的 manifest
+- compiler/projection 的共享抽象层应直接复用已有 host contract 模型，而不是在编译器里重复声明 variant contract
 
 ## 6. 运行目录契约
 

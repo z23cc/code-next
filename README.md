@@ -137,4 +137,6 @@ uv run aiwf inspect <run_id>
 - `.claude/compiled/claude-projection.json`：显式宿主投影契约（host contract / review artifact contract / workflow 边界）
 - `.claude/compiled/manifest.json`：带 source fingerprint / output hash / drift 状态的编译清单
 
+当前 Claude 编译器已切到共享 compiler/projection helpers，并直接复用现有 adapter host contract 作为 projection variant 真源，因此在不改变 CLI 与输出文件名的前提下，为后续宿主扩展保留了统一抽象层。
+
 重复编译同一输出目录时，`manifest.json` 会基于上一版 manifest 标记 `initial` / `clean` / `changed`，帮助发现 `.ai` 真源与 Claude 投影之间的漂移。

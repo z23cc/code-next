@@ -114,6 +114,7 @@ uv run aiwf compile claude --output .claude/compiled
 - `claude-bundle.md` 是 Claude 可直接阅读的合并包
 - `claude-projection.json` 是 Claude 宿主投影契约，包含显式 host/review contract 元数据
 - `manifest.json` 会记录 source fingerprint 与上一次编译相比的 drift 状态
+- 当前 Claude compiler 已迁移到共享 projection helpers，并直接从既有 host contract 派生 variant 元数据，因此当前输出保持兼容，同时后续可以在同一抽象层上扩宿主
 
 ## 8. Claude Code 技能入口
 

@@ -5,7 +5,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from aiwf.adapters import resolve_adapter_contract
 from aiwf.cli import app
+from aiwf.compilers import COMPILER_SPECS
 from aiwf.compilers.claude import compile_claude
 
 
@@ -36,6 +38,9 @@ def test_compile_claude_writes_bundle_projection_and_manifest(tmp_path: Path) ->
     assert ".ai/policies/repo-policy.md" in bundle
     assert projection["host"]["name"] == "claude_code"
     assert projection["host"]["stored_runtime_key"] == "host_contract"
+    assert projection["host"]["default_variant"] == "claude/manual"
+    assert projection["host"]["variants"]["manual"] == resolve_adapter_contract("claude", auto=False).to_metadata()
+    assert projection["host"]["variants"]["auto"] == resolve_adapter_contract("claude", auto=True).to_metadata()
     assert projection["host"]["variants"]["manual"]["review"]["linked_report_artifact_field"] == "prompt_file"
     assert projection["host"]["variants"]["auto"]["review"]["linked_report_artifact_field"] == "response_file"
     assert projection["workflow_contract"]["review"]["required_run_artifacts"] == ["verify-report.json"]
@@ -43,11 +48,21 @@ def test_compile_claude_writes_bundle_projection_and_manifest(tmp_path: Path) ->
     assert projection["workflow_contract"]["resume"]["restores_run_metadata"] == ["host_contract"]
     assert projection["artifacts"]["bundle"] == "claude-bundle.md"
     assert manifest["compiler"]["projection_contract"] == "claude-host-projection-v2"
+    assert manifest["files"]["claude_bundle"] == "claude-bundle.md"
     assert manifest["sources"]["runbooks"] == ["default.md"]
     assert manifest["sources"]["gates"] == ["default.yaml"]
     assert manifest["files"]["projection"] == "claude-projection.json"
     assert manifest["drift"]["status"] == "initial"
     assert compiled["drift_status"] == "initial"
+
+
+def test_compiler_registry_exposes_claude_spec_backed_by_adapter_contracts() -> None:
+    spec = COMPILER_SPECS["claude"]
+
+    assert spec is COMPILER_SPECS["claude"]
+    assert spec.projection_name == "claude-host-projection"
+    assert spec.variants["manual"] == resolve_adapter_contract("claude", auto=False)
+    assert spec.variants["auto"] == resolve_adapter_contract("claude", auto=True)
 
 
 def test_compile_claude_tracks_manifest_drift_against_previous_projection(tmp_path: Path) -> None:

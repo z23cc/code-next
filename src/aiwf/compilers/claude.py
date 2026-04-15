@@ -2,127 +2,56 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
-from typing import Any
 
-from aiwf.exceptions import LoadError
+from aiwf.adapters import resolve_adapter_contract
+from aiwf.compilers.base import CompileContext, CompilerSpec, build_projection_document, compile_host_projection
 from aiwf.loader import load_gate_set, load_policy, load_runbook
-from aiwf.models import utc_now
+
+
+CLAUDE_COMMANDS = {
+    "plan": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude",
+    "implement": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude",
+    "review": "uv run aiwf run review --run-id <run_id>",
+    "resume": "uv run aiwf resume <run_id>",
+}
 
 
 def compile_claude(ai_root: str | Path, output_dir: str | Path) -> dict[str, Path | str]:
     """Compile `.ai/` sources into a Claude host projection with drift metadata."""
-    ai_root_path = Path(ai_root)
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    runbook_dir = ai_root_path / "runbooks"
-    policy_dir = ai_root_path / "policies"
-    gate_dir = ai_root_path / "gates"
-    _require_directory(runbook_dir, stage="compile_claude")
-    _require_directory(policy_dir, stage="compile_claude")
-    _require_directory(gate_dir, stage="compile_claude")
-
-    runbook_files = sorted(runbook_dir.glob("*.md"))
-    policy_files = sorted(policy_dir.glob("*.md"))
-    gate_files = sorted(gate_dir.glob("*.yaml"))
-    if not runbook_files:
-        raise LoadError("No runbook files found", path=runbook_dir, stage="compile_claude")
-    if not policy_files:
-        raise LoadError("No policy files found", path=policy_dir, stage="compile_claude")
-    if not gate_files:
-        raise LoadError("No gate files found", path=gate_dir, stage="compile_claude")
-
-    source_index = _build_source_index(ai_root_path, runbook_files, policy_files, gate_files)
-    compiled_markdown = _build_compiled_markdown(ai_root_path, runbook_files, policy_files, gate_files, source_index)
-    bundle_sha256 = _sha256_text(compiled_markdown)
-
-    projection = _build_projection(ai_root_path, source_index, bundle_sha256)
-    projection_text = json.dumps(projection, indent=2, ensure_ascii=False) + "\n"
-    projection_sha256 = _sha256_text(projection_text)
-
-    manifest_path = output_path / "manifest.json"
-    previous_manifest = _load_existing_manifest(manifest_path)
-    drift = _build_drift_report(previous_manifest, source_index, bundle_sha256, projection_sha256)
-
-    manifest = {
-        "schema_version": 2,
-        "generated_at": utc_now().isoformat(),
-        "compiler": {
-            "name": "aiwf.compile.claude",
-            "host": "claude_code",
-            "projection_contract": "claude-host-projection-v2",
-        },
-        "ai_root": str(ai_root_path),
-        "output_dir": str(output_path),
-        "files": {
-            "claude_bundle": "claude-bundle.md",
-            "projection": "claude-projection.json",
-            "manifest": "manifest.json",
-        },
-        "sources": {
-            "runbooks": [path.name for path in runbook_files],
-            "policies": [path.name for path in policy_files],
-            "gates": [path.name for path in gate_files],
-        },
-        "source_index": source_index,
-        "hashes": {
-            "bundle_sha256": bundle_sha256,
-            "projection_sha256": projection_sha256,
-        },
-        "drift": drift,
-    }
-
-    bundle_path = output_path / "claude-bundle.md"
-    projection_path = output_path / "claude-projection.json"
-    bundle_path.write_text(compiled_markdown, encoding="utf-8")
-    projection_path.write_text(projection_text, encoding="utf-8")
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return {
-        "bundle_path": bundle_path,
-        "projection_path": projection_path,
-        "manifest_path": manifest_path,
-        "drift_status": str(drift["status"]),
-    }
+    return compile_host_projection(CLAUDE_COMPILER_SPEC, ai_root, output_dir)
 
 
-def _build_compiled_markdown(
-    ai_root: Path,
-    runbook_files: list[Path],
-    policy_files: list[Path],
-    gate_files: list[Path],
-    source_index: list[dict[str, object]],
-) -> str:
-    traceability = {str(entry["source_path"]): str(entry["sha256"]) for entry in source_index}
+def _build_compiled_markdown(context: CompileContext) -> str:
+    manual_contract = CLAUDE_COMPILER_SPEC.variants["manual"]
+    auto_contract = CLAUDE_COMPILER_SPEC.variants["auto"]
     sections: list[str] = [
         "# Claude Workflow Bundle",
         "",
-        f"- source_ai_root: {ai_root}",
+        f"- source_ai_root: {context.ai_root}",
         "- intended_host: Claude Code",
-        "- host_projection: `claude-projection.json`",
+        f"- host_projection: `{CLAUDE_COMPILER_SPEC.projection_filename}`",
         "- drift_manifest: `manifest.json`",
         "",
         "## Claude Host Contract",
-        "- stored_runtime_key: `host_contract`",
-        "- default_variant: `claude/manual`",
+        f"- stored_runtime_key: `{CLAUDE_COMPILER_SPEC.stored_runtime_key}`",
+        f"- default_variant: `{CLAUDE_COMPILER_SPEC.variant_namespace}/{CLAUDE_COMPILER_SPEC.default_variant}`",
         "- supported_variants: `claude/manual`, `claude/auto`",
-        "- resume_mode: restores stored `host_contract` from run metadata",
+        f"- resume_mode: restores stored `{CLAUDE_COMPILER_SPEC.stored_runtime_key}` from run metadata",
         "",
         "## Claude Review Evidence Contract",
         "- review entrypoint targets an existing run at `needs_review`",
-        "- required pre-review artifact: `verify-report.json`",
-        "- manual review report fields: `summary`, `issues`, `mode`, `prompt_file`",
-        "- auto review report fields: `summary`, `issues`, `mode`, `response_file`",
+        f"- required pre-review artifact: `{manual_contract.review.required_run_artifacts[0]}`",
+        f"- manual review report fields: {_format_review_fields(manual_contract)}",
+        f"- auto review report fields: {_format_review_fields(auto_contract)}",
         "- linked review evidence artifact must exist before finalization",
         "",
         "## Suggested Commands",
         "```bash",
-        "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude",
-        "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude",
-        "uv run aiwf run review --run-id <run_id>",
-        "uv run aiwf resume <run_id>",
+        CLAUDE_COMMANDS["plan"],
+        CLAUDE_COMMANDS["implement"],
+        CLAUDE_COMMANDS["review"],
+        CLAUDE_COMMANDS["resume"],
         "```",
         "",
         "## Projection Traceability Index",
@@ -132,35 +61,35 @@ def _build_compiled_markdown(
     sections.extend(
         [
             f"| {entry['kind']} | {entry['logical_name']} | `{entry['source_path']}` | `{entry['sha256']}` |"
-            for entry in source_index
+            for entry in context.source_index
         ]
     )
 
     sections.extend(["", "## Policies"])
-    for policy_file in policy_files:
+    for policy_file in context.policy_files:
         policy_text = load_policy(policy_file)
-        source_path = _relative_source_path(ai_root, policy_file)
+        source_path = _source_path(context, policy_file)
         sections.extend(
             [
                 "",
                 f"### {policy_file.stem}",
                 f"- source: `{source_path}`",
-                f"- sha256: `{traceability[source_path]}`",
+                f"- sha256: `{context.traceability[source_path]}`",
                 "",
                 policy_text or "_Empty policy file._",
             ]
         )
 
     sections.extend(["", "## Runbooks"])
-    for runbook_file in runbook_files:
+    for runbook_file in context.runbook_files:
         runbook = load_runbook(runbook_file)
-        source_path = _relative_source_path(ai_root, runbook_file)
+        source_path = _source_path(context, runbook_file)
         sections.extend(
             [
                 "",
                 f"### {runbook.name}",
                 f"- source: `{source_path}`",
-                f"- sha256: `{traceability[source_path]}`",
+                f"- sha256: `{context.traceability[source_path]}`",
                 "",
                 runbook.description or "_No description provided._",
                 "",
@@ -172,15 +101,15 @@ def _build_compiled_markdown(
         )
 
     sections.extend(["", "## Gates"])
-    for gate_file in gate_files:
+    for gate_file in context.gate_files:
         gate_set = load_gate_set(gate_file)
-        source_path = _relative_source_path(ai_root, gate_file)
+        source_path = _source_path(context, gate_file)
         sections.extend(
             [
                 "",
                 f"### {gate_set.name}",
                 f"- source: `{source_path}`",
-                f"- sha256: `{traceability[source_path]}`",
+                f"- sha256: `{context.traceability[source_path]}`",
                 "",
                 gate_set.description or "_No description provided._",
                 "",
@@ -195,266 +124,85 @@ def _build_compiled_markdown(
     return "\n".join(sections)
 
 
-def _build_projection(
-    ai_root: Path,
-    source_index: list[dict[str, object]],
-    bundle_sha256: str,
-) -> dict[str, object]:
-    commands = {
-        "plan": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude",
-        "implement": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude",
-        "review": "uv run aiwf run review --run-id <run_id>",
-        "resume": "uv run aiwf resume <run_id>",
-    }
-    return {
-        "schema_version": 2,
-        "projection_name": "claude-host-projection",
-        "source_ai_root": str(ai_root),
-        "host": {
-            "name": "claude_code",
-            "display_name": "Claude Code",
-            "stored_runtime_key": "host_contract",
-            "default_variant": "claude/manual",
-            "variants": {
-                "manual": {
-                    "adapter": "claude",
-                    "mode": "manual",
-                    "capabilities": {
-                        "supports_auto_execution": True,
-                        "requires_explicit_review_handoff": True,
-                    },
-                    "review": {
-                        "required_run_artifacts": ["verify-report.json"],
-                        "required_report_string_fields": ["summary", "mode", "prompt_file"],
-                        "required_report_list_fields": ["issues"],
-                        "expected_report_mode": "manual",
-                        "linked_report_artifact_field": "prompt_file",
-                    },
-                },
-                "auto": {
-                    "adapter": "claude",
-                    "mode": "auto",
-                    "capabilities": {
-                        "supports_auto_execution": True,
-                        "requires_explicit_review_handoff": False,
-                    },
-                    "review": {
-                        "required_run_artifacts": ["verify-report.json"],
-                        "required_report_string_fields": ["summary", "mode", "response_file"],
-                        "required_report_list_fields": ["issues"],
-                        "expected_report_mode": "auto",
-                        "linked_report_artifact_field": "response_file",
-                    },
-                },
-            },
-        },
-        "artifacts": {
-            "bundle": "claude-bundle.md",
+def _build_projection(context: CompileContext, bundle_sha256: str) -> dict[str, object]:
+    manual_contract = CLAUDE_COMPILER_SPEC.variants["manual"]
+    auto_contract = CLAUDE_COMPILER_SPEC.variants["auto"]
+    return build_projection_document(
+        spec=CLAUDE_COMPILER_SPEC,
+        source_ai_root=context.ai_root,
+        source_index=context.source_index,
+        bundle_sha256=bundle_sha256,
+        artifacts={
+            "bundle": CLAUDE_COMPILER_SPEC.bundle_filename,
             "manifest": "manifest.json",
         },
-        "commands": commands,
-        "workflow_contract": {
+        commands=CLAUDE_COMMANDS,
+        workflow_contract={
             "plan": {
-                "entrypoint": commands["plan"],
+                "entrypoint": CLAUDE_COMMANDS["plan"],
                 "primary_artifacts": ["context-pack.md", "exec-plan.md"],
             },
             "implement": {
-                "entrypoint": commands["implement"],
+                "entrypoint": CLAUDE_COMMANDS["implement"],
                 "manual_handoff_artifact": "claude-implement-prompt.md",
                 "resume_boundary": "Use `uv run aiwf resume <run_id>` after manual implement handoff.",
             },
             "review": {
-                "entrypoint": commands["review"],
+                "entrypoint": CLAUDE_COMMANDS["review"],
                 "requires_status": "needs_review",
-                "required_run_artifacts": ["verify-report.json"],
+                "required_run_artifacts": list(manual_contract.review.required_run_artifacts),
                 "report_contract": {
-                    "manual": {
-                        "required_report_string_fields": ["summary", "mode", "prompt_file"],
-                        "required_report_list_fields": ["issues"],
-                        "expected_report_mode": "manual",
-                        "linked_report_artifact_field": "prompt_file",
-                    },
-                    "auto": {
-                        "required_report_string_fields": ["summary", "mode", "response_file"],
-                        "required_report_list_fields": ["issues"],
-                        "expected_report_mode": "auto",
-                        "linked_report_artifact_field": "response_file",
-                    },
+                    "manual": manual_contract.review.to_metadata(),
+                    "auto": auto_contract.review.to_metadata(),
                 },
             },
             "resume": {
-                "entrypoint": commands["resume"],
-                "restores_run_metadata": ["host_contract"],
+                "entrypoint": CLAUDE_COMMANDS["resume"],
+                "restores_run_metadata": [CLAUDE_COMPILER_SPEC.stored_runtime_key],
             },
         },
-        "projection_inputs": source_index,
-        "projection_hashes": {
-            "bundle_sha256": bundle_sha256,
-        },
-    }
+    )
 
 
-def _build_source_index(
-    ai_root: Path,
-    runbook_files: list[Path],
-    policy_files: list[Path],
-    gate_files: list[Path],
-) -> list[dict[str, object]]:
-    entries: list[dict[str, object]] = []
-
-    for policy_file in policy_files:
-        entries.append(
-            _source_entry(
-                ai_root,
-                policy_file,
-                kind="policy",
-                logical_name=policy_file.stem,
-            )
-        )
-    for runbook_file in runbook_files:
-        runbook = load_runbook(runbook_file)
-        entries.append(
-            _source_entry(
-                ai_root,
-                runbook_file,
-                kind="runbook",
-                logical_name=runbook.name,
-            )
-        )
-    for gate_file in gate_files:
-        gate_set = load_gate_set(gate_file)
-        entries.append(
-            _source_entry(
-                ai_root,
-                gate_file,
-                kind="gate",
-                logical_name=gate_set.name,
-            )
-        )
-
-    return sorted(entries, key=lambda entry: (str(entry["kind"]), str(entry["source_path"])))
-
-
-def _source_entry(ai_root: Path, path: Path, *, kind: str, logical_name: str) -> dict[str, object]:
-    content = path.read_text(encoding="utf-8")
-    return {
-        "kind": kind,
-        "logical_name": logical_name,
-        "source_path": _relative_source_path(ai_root, path),
-        "sha256": _sha256_text(content),
-    }
-
-
-def _build_drift_report(
-    previous_manifest: dict[str, Any] | None,
-    source_index: list[dict[str, object]],
-    bundle_sha256: str,
-    projection_sha256: str,
-) -> dict[str, object]:
-    if not previous_manifest:
-        return {
-            "status": "initial",
-            "baseline_generated_at": None,
-            "source_changes": {"added": [], "removed": [], "changed": [], "unchanged_count": len(source_index)},
-            "bundle_changed": False,
-            "projection_changed": False,
-        }
-
-    previous_index = previous_manifest.get("source_index")
-    if not isinstance(previous_index, list):
-        return {
-            "status": "initial",
-            "baseline_generated_at": previous_manifest.get("generated_at"),
-            "source_changes": {"added": [], "removed": [], "changed": [], "unchanged_count": len(source_index)},
-            "bundle_changed": False,
-            "projection_changed": False,
-            "notes": ["Previous manifest did not include compatible source fingerprints."],
-        }
-
-    previous_map = _fingerprint_map(previous_index)
-    current_map = _fingerprint_map(source_index)
-
-    added = sorted(set(current_map) - set(previous_map))
-    removed = sorted(set(previous_map) - set(current_map))
-    changed = sorted(path for path in current_map.keys() & previous_map.keys() if current_map[path] != previous_map[path])
-    unchanged_count = len(current_map.keys() & previous_map.keys()) - len(changed)
-
-    previous_hashes = previous_manifest.get("hashes")
-    if not isinstance(previous_hashes, dict):
-        return {
-            "status": "initial",
-            "baseline_generated_at": previous_manifest.get("generated_at"),
-            "source_changes": {
-                "added": added,
-                "removed": removed,
-                "changed": changed,
-                "unchanged_count": unchanged_count,
-            },
-            "bundle_changed": False,
-            "projection_changed": False,
-            "notes": ["Previous manifest did not include compatible output hashes."],
-        }
-
-    previous_bundle_sha256 = previous_hashes.get("bundle_sha256")
-    previous_projection_sha256 = previous_hashes.get("projection_sha256")
-
-    bundle_changed = bool(previous_bundle_sha256 and previous_bundle_sha256 != bundle_sha256)
-    projection_changed = bool(previous_projection_sha256 and previous_projection_sha256 != projection_sha256)
-    status = "changed" if added or removed or changed or bundle_changed or projection_changed else "clean"
-
-    return {
-        "status": status,
-        "baseline_generated_at": previous_manifest.get("generated_at"),
-        "source_changes": {
-            "added": added,
-            "removed": removed,
-            "changed": changed,
-            "unchanged_count": unchanged_count,
-        },
-        "bundle_changed": bundle_changed,
-        "projection_changed": projection_changed,
-    }
-
-
-def _fingerprint_map(entries: list[dict[str, object]] | list[Any]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        source_path = entry.get("source_path")
-        sha256 = entry.get("sha256")
-        if isinstance(source_path, str) and isinstance(sha256, str):
-            mapping[source_path] = sha256
-    return mapping
-
-
-def _load_existing_manifest(path: Path) -> dict[str, Any] | None:
-    if not path.exists() or not path.is_file():
-        return None
+def _source_path(context: CompileContext, source_path: Path) -> str:
     try:
-        content = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise LoadError("Failed to read existing manifest", path=path, stage="compile_claude") from exc
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _relative_source_path(ai_root: Path, source_path: Path) -> str:
-    try:
-        return str(source_path.relative_to(ai_root.parent))
+        return str(source_path.relative_to(context.ai_root.parent))
     except ValueError:
         return str(source_path)
 
 
-def _sha256_text(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+def _format_review_fields(contract) -> str:
+    ordered_fields: list[str] = []
+    if "summary" in contract.review.required_report_string_fields:
+        ordered_fields.append("summary")
+    if "issues" in contract.review.required_report_list_fields:
+        ordered_fields.append("issues")
+    ordered_fields.extend(
+        field_name for field_name in contract.review.required_report_string_fields if field_name != "summary"
+    )
+    ordered_fields.extend(
+        field_name for field_name in contract.review.required_report_list_fields if field_name != "issues"
+    )
+    return ", ".join(f"`{field_name}`" for field_name in ordered_fields)
 
 
-def _require_directory(path: Path, *, stage: str) -> None:
-    if not path.exists():
-        raise LoadError("Required compile source directory does not exist", path=path, stage=stage)
-    if not path.is_dir():
-        raise LoadError("Compile source path is not a directory", path=path, stage=stage)
+CLAUDE_COMPILER_SPEC = CompilerSpec(
+    key="claude",
+    projection_name="claude-host-projection",
+    variant_namespace="claude",
+    compiler_name="aiwf.compile.claude",
+    projection_contract="claude-host-projection-v2",
+    host_name="claude_code",
+    host_display_name="Claude Code",
+    stored_runtime_key="host_contract",
+    default_variant="manual",
+    bundle_filename="claude-bundle.md",
+    projection_filename="claude-projection.json",
+    bundle_manifest_key="claude_bundle",
+    variants={
+        "manual": resolve_adapter_contract("claude", auto=False),
+        "auto": resolve_adapter_contract("claude", auto=True),
+    },
+    bundle_builder=_build_compiled_markdown,
+    projection_builder=_build_projection,
+)
