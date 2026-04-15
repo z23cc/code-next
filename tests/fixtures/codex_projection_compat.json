@@ -28,6 +28,11 @@
           ],
           "expected_report_mode": "manual",
           "linked_report_artifact_field": "prompt_file"
+        },
+        "native_runtime": {
+          "enabled": false,
+          "command_candidates": [],
+          "install_hint": null
         }
       }
     }

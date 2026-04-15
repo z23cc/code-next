@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from aiwf.adapters import ADAPTER_SPECS, build_adapter, restore_host_contract
-from aiwf.adapters.base import AdapterSpec, HostCapabilities, HostContract, ReviewArtifactContract
+from aiwf.adapters.base import (
+    AdapterSpec,
+    HostCapabilities,
+    HostContract,
+    NativeRuntimeContract,
+    ReviewArtifactContract,
+)
 from aiwf.contracts import lint_contract_registry, lint_host_contract
 from aiwf.models import RunMeta
 
@@ -40,6 +46,14 @@ def test_restore_host_contract_prefers_explicit_metadata() -> None:
             required_report_list_fields=("issues",),
             expected_report_mode="manual",
             linked_report_artifact_field="prompt_file",
+        ),
+        native_runtime=NativeRuntimeContract(
+            enabled=True,
+            command_candidates=("rp", "rp-cli"),
+            install_hint=(
+                "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
+                "to make RP native-ready; manual handoff remains supported."
+            ),
         ),
     )
 
@@ -200,6 +214,32 @@ def test_restore_host_contract_backfills_review_contract_for_item1_metadata() ->
                     required_report_list_fields=("issues",),
                     expected_report_mode="manual",
                     linked_report_artifact_field="prompt_file",
+                ),
+            ),
+        ),
+        (
+            "run_metadata_rp_manual_no_native_runtime.json",
+            HostContract(
+                adapter="rp",
+                mode="manual",
+                capabilities=HostCapabilities(
+                    supports_auto_execution=False,
+                    requires_explicit_review_handoff=True,
+                ),
+                review=ReviewArtifactContract(
+                    required_run_artifacts=("verify-report.json",),
+                    required_report_string_fields=("summary", "mode", "prompt_file"),
+                    required_report_list_fields=("issues",),
+                    expected_report_mode="manual",
+                    linked_report_artifact_field="prompt_file",
+                ),
+                native_runtime=NativeRuntimeContract(
+                    enabled=True,
+                    command_candidates=("rp", "rp-cli"),
+                    install_hint=(
+                        "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
+                        "to make RP native-ready; manual handoff remains supported."
+                    ),
                 ),
             ),
         ),

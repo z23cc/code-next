@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -806,6 +807,136 @@ def test_cli_inspect_command_surfaces_gate_and_review_evidence(tmp_path: Path) -
     assert "review_linked_artifacts=claude-review-prompt.md" in inspect_result.stdout
 
 
+def test_cli_inspect_json_surfaces_machine_readable_runtime_state(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--json",
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    payload = json.loads(inspect_result.stdout)
+    assert payload["ok"] is True
+    assert payload["run_id"] == run_id
+    assert payload["diagnostics"]["status"] == "blocked"
+    assert payload["diagnostics"]["host"]["adapter"] == "claude"
+    assert payload["provenance"]["status"] == "blocked"
+    assert payload["review_report"] is None
+    assert payload["host_contract"]["adapter"] == "claude"
+    assert payload["host_contract"]["mode"] == "manual"
+    assert payload["review_boundary"] == {
+        "ready": False,
+        "missing_required_artifacts": ["verify-report.json"],
+    }
+    assert payload["review_evidence"] == {
+        "status": "not_started",
+        "mode": None,
+        "missing_report_fields": [],
+        "missing_linked_artifacts": [],
+        "linked_artifacts": [],
+        "mode_mismatch": None,
+    }
+    assert payload["artifacts"]["diagnostics"].endswith("run-diagnostics.json")
+    assert payload["artifacts"]["provenance"].endswith("run-provenance.json")
+    assert payload["artifacts"]["review_report"] is None
+
+
+def test_cli_inspect_json_includes_review_report_evidence_summary_for_rp_runs(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    resume_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert resume_result.exit_code == 0
+
+    review_result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert review_result.exit_code == 0
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--json",
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    payload = json.loads(inspect_result.stdout)
+    assert payload["ok"] is True
+    assert payload["host_contract"]["adapter"] == "rp"
+    assert payload["review_report"]["prompt_file"] == "rp-agent-review-prompt.md"
+    assert payload["review_report"]["evidence_summary"]["verify"].startswith("gate_set=default passed=True")
+    assert payload["review_report"]["evidence_summary"]["changed_files"] == []
+    assert payload["review_report"]["evidence_summary"]["diff_summary"] == []
+    assert payload["review_evidence"]["status"] == "complete"
+    assert payload["review_evidence"]["linked_artifacts"] == ["rp-agent-review-prompt.md"]
+    assert payload["artifacts"]["review_report"].endswith("review-report.json")
+
+
 def test_cli_inspect_verbose_surfaces_artifact_index_and_review_links(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
 
@@ -924,6 +1055,25 @@ def test_cli_inspect_command_fails_for_missing_run(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "inspect failed:" in result.stdout
     assert "missing-run" in result.stdout
+
+
+def test_cli_inspect_json_reports_missing_run_errors(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "inspect",
+            "missing-run",
+            "--ai-root",
+            str(tmp_path / ".ai"),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["run_id"] == "missing-run"
+    assert "missing-run" in payload["error"]
 
 
 def _create_ai_workspace(

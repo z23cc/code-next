@@ -25,6 +25,8 @@ def test_rp_agent_adapter_generates_manual_handoff_outputs(tmp_path: Path) -> No
     assert adapter.host_contract.review.required_run_artifacts == ("verify-report.json",)
     assert adapter.host_contract.review.expected_report_mode == "manual"
     assert adapter.host_contract.review.linked_report_artifact_field == "prompt_file"
+    assert adapter.host_contract.native_runtime.enabled is True
+    assert adapter.host_contract.native_runtime.command_candidates == ("rp", "rp-cli")
     assert "RepoPrompt Context Pack" in context
     assert "Suggested RepoPrompt Brief" in plan
     assert result.status is RunStatus.blocked
@@ -34,6 +36,14 @@ def test_rp_agent_adapter_generates_manual_handoff_outputs(tmp_path: Path) -> No
     assert review["verify_report_file"] == "verify-report.json"
     assert review["diagnostics_file"] == "run-diagnostics.json"
     assert review["provenance_file"] == "run-provenance.json"
+    assert review["evidence_summary"] == {
+        "verify": "gate_set=default passed=True",
+        "gate_results": [],
+        "diagnostics": "status=needs_review reviewable=True resumable=False reason=Ready for review.",
+        "provenance": "gate_report=verify-report.json review_linked_artifacts=0 review_required_artifacts_available=1",
+        "changed_files": [],
+        "diff_summary": [],
+    }
     assert review["evidence_files"] == [
         "context-pack.md",
         "exec-plan.md",
@@ -51,6 +61,43 @@ def test_rp_agent_adapter_generates_manual_handoff_outputs(tmp_path: Path) -> No
     assert "verify: gate_set=default passed=True" in prompt_text
     assert "diagnostics: status=needs_review reviewable=True resumable=False" in prompt_text
     assert "provenance: gate_report=" in prompt_text
+
+
+def test_rp_agent_adapter_review_includes_compact_gate_and_change_evidence(tmp_path: Path, monkeypatch) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    (run_dir / "verify-report.json").write_text(
+        (
+            '{"gate_set":"default","passed":false,"results":['
+            '{"name":"lint","passed":true,"returncode":0,"timed_out":false,"duration_seconds":0.25},'
+            '{"name":"pytest","passed":false,"returncode":1,"timed_out":false,"duration_seconds":1.25}'
+            ']}\n'
+        ),
+        encoding="utf-8",
+    )
+    adapter = RpAgentAdapter(repo_root=repo_root)
+    monkeypatch.setattr(
+        adapter,
+        "_collect_repo_change_evidence",
+        lambda: ([" M src/main.py", "?? tests/test_main.py"], ["src/main.py | 3 ++-", "tests/test_main.py | 8 ++++++++"]),
+    )
+
+    review = adapter.review(task, run_dir)
+
+    assert review["evidence_summary"]["gate_results"] == [
+        "lint: passed (rc=0, 0.25s)",
+        "pytest: failed (rc=1, 1.25s)",
+    ]
+    assert review["evidence_summary"]["changed_files"] == [" M src/main.py", "?? tests/test_main.py"]
+    assert review["evidence_summary"]["diff_summary"] == [
+        "src/main.py | 3 ++-",
+        "tests/test_main.py | 8 ++++++++",
+    ]
+    prompt_text = (run_dir / "rp-agent-review-prompt.md").read_text(encoding="utf-8")
+    assert "- gate: pytest: failed (rc=1, 1.25s)" in prompt_text
+    assert "- changed files:" in prompt_text
+    assert "  -  M src/main.py" in prompt_text
+    assert "- diff summary:" in prompt_text
+    assert "  - src/main.py | 3 ++-" in prompt_text
 
 
 def test_rp_agent_adapter_discover_raises_for_missing_repo_root(tmp_path: Path) -> None:

@@ -5,10 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from aiwf.adapters.base import AdapterSpec, HostCapabilities, HostContract, ReviewArtifactContract, RunnerAdapter
+from aiwf.adapters.base import (
+    AdapterSpec,
+    HostCapabilities,
+    HostContract,
+    NativeRuntimeContract,
+    ReviewArtifactContract,
+    RunnerAdapter,
+)
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.adapters.codex import CodexAdapter
-from aiwf.adapters.rp_agent import RpAgentAdapter
+from aiwf.adapters.rp_agent import RP_MANUAL_CONTRACT, RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 
 
@@ -17,8 +24,7 @@ def _build_claude_adapter(repo_root: Path, contract: HostContract) -> RunnerAdap
 
 
 def _build_rp_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
-    del contract
-    return RpAgentAdapter(repo_root=repo_root)
+    return RpAgentAdapter(repo_root=repo_root, host_contract=contract)
 
 
 def _build_codex_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
@@ -71,21 +77,7 @@ ADAPTER_SPECS: dict[str, AdapterSpec] = {
     "rp": AdapterSpec(
         name="rp",
         variants={
-            "manual": HostContract(
-                adapter="rp",
-                mode="manual",
-                capabilities=HostCapabilities(
-                    supports_auto_execution=False,
-                    requires_explicit_review_handoff=True,
-                ),
-                review=ReviewArtifactContract(
-                    required_run_artifacts=("verify-report.json",),
-                    required_report_string_fields=("summary", "mode", "prompt_file"),
-                    required_report_list_fields=("issues",),
-                    expected_report_mode="manual",
-                    linked_report_artifact_field="prompt_file",
-                ),
-            )
+            "manual": RP_MANUAL_CONTRACT,
         },
         factory=_build_rp_adapter,
     ),
@@ -172,12 +164,14 @@ def restore_host_contract(data: Mapping[str, object]) -> HostContract:
         if not isinstance(raw_contract, Mapping):
             raise ValueError("stored host_contract must be an object")
         contract_data = dict(raw_contract)
-        if "review" not in contract_data:
-            adapter_name = contract_data.get("adapter")
-            mode = contract_data.get("mode")
-            if isinstance(adapter_name, str) and mode in {"manual", "auto"}:
-                default_contract = resolve_adapter_contract(adapter_name.strip(), auto=(mode == "auto"))
+        adapter_name = contract_data.get("adapter")
+        mode = contract_data.get("mode")
+        if isinstance(adapter_name, str) and mode in {"manual", "auto"}:
+            default_contract = resolve_adapter_contract(adapter_name.strip(), auto=(mode == "auto"))
+            if "review" not in contract_data:
                 contract_data["review"] = default_contract.review.to_metadata()
+            if "native_runtime" not in contract_data:
+                contract_data["native_runtime"] = default_contract.native_runtime.to_metadata()
         return HostContract.from_metadata(contract_data)
 
     adapter_name = data.get("adapter")
@@ -195,6 +189,7 @@ __all__ = [
     "AdapterSpec",
     "HostCapabilities",
     "HostContract",
+    "NativeRuntimeContract",
     "ReviewArtifactContract",
     "RunnerAdapter",
     "ClaudeCodeAdapter",

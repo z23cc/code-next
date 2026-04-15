@@ -130,6 +130,13 @@ def _load_run_surface(ai_root: Path, run_id: str, artifact_name: str) -> dict[st
     return artifact
 
 
+def _load_optional_run_surface(ai_root: Path, run_id: str, artifact_name: str) -> dict[str, Any] | None:
+    try:
+        return _load_run_surface(ai_root, run_id, artifact_name)
+    except AiwfError:
+        return None
+
+
 def _artifact_path(ai_root: Path, run_id: str, artifact_name: str) -> Path:
     return ai_root / "runs" / run_id / artifact_name
 
@@ -169,14 +176,69 @@ def _format_csv(values: tuple[str, ...] | list[str] | set[str]) -> str:
     return ",".join(flattened) if flattened else "-"
 
 
-def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> None:
+def _build_inspection_payload(ai_root: Path, run_id: str) -> dict[str, Any]:
     diagnostics = _load_run_surface(ai_root, run_id, "run-diagnostics.json")
-    provenance: dict[str, Any] | None
+    provenance = _load_optional_run_surface(ai_root, run_id, "run-provenance.json")
+    review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "run_id": run_id,
+        "diagnostics": diagnostics,
+        "provenance": provenance,
+        "review_report": review_report,
+        "artifacts": {
+            "diagnostics": str(_artifact_path(ai_root, run_id, "run-diagnostics.json")),
+            "provenance": str(_artifact_path(ai_root, run_id, "run-provenance.json")),
+            "review_report": str(_artifact_path(ai_root, run_id, "review-report.json")) if review_report is not None else None,
+        },
+    }
+
     try:
-        provenance = _load_run_surface(ai_root, run_id, "run-provenance.json")
+        resolved_contract = _resolve_run_execution(ai_root, run_id)
     except AiwfError as exc:
-        provenance = None
-        console.print(f"provenance_warning={exc}")
+        payload["host_contract"] = None
+        payload["host_contract_warning"] = str(exc)
+        payload["review_contract"] = None
+        payload["review_boundary"] = None
+        payload["review_evidence"] = None
+        return payload
+
+    artifact_names = _list_run_artifact_names(ai_root, run_id)
+    review_contract = resolved_contract.review
+    review_boundary = assess_review_boundary(resolved_contract, available_artifact_names=artifact_names)
+    review_evidence = assess_review_evidence(
+        resolved_contract,
+        review_report if isinstance(review_report, Mapping) else None,
+        available_artifact_names=artifact_names,
+    )
+
+    payload["host_contract"] = resolved_contract.to_metadata()
+    payload["review_contract"] = {
+        "required_run_artifacts": list(review_contract.required_run_artifacts),
+        "required_report_fields": list(review_contract_fields(review_contract)),
+        "expected_mode": review_contract.expected_report_mode,
+        "linked_field": review_contract.linked_report_artifact_field,
+    }
+    payload["review_boundary"] = {
+        "ready": review_boundary.ready,
+        "missing_required_artifacts": list(review_boundary.missing_required_artifacts),
+    }
+    payload["review_evidence"] = {
+        "status": review_evidence.status,
+        "mode": review_evidence.mode,
+        "missing_report_fields": list(review_evidence.missing_report_fields),
+        "missing_linked_artifacts": list(review_evidence.missing_linked_artifacts),
+        "linked_artifacts": list(review_evidence.linked_artifacts),
+        "mode_mismatch": review_evidence.mode_mismatch,
+    }
+    return payload
+
+
+def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> None:
+    payload = _build_inspection_payload(ai_root, run_id)
+    diagnostics = payload["diagnostics"]
+    provenance = payload["provenance"]
 
     workflow = str(diagnostics.get("workflow", "")).strip()
     status = str(diagnostics.get("status", "")).strip()
@@ -190,61 +252,54 @@ def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> N
     if status_reason:
         console.print(f"reason={status_reason}")
 
-    resolved_contract: HostContract | None = None
-    try:
-        resolved_contract = _resolve_run_execution(ai_root, run_id)
-    except AiwfError as exc:
-        console.print(f"host_contract_warning={exc}")
-
-    if resolved_contract is not None:
+    resolved_contract = payload.get("host_contract")
+    if isinstance(resolved_contract, dict):
+        capabilities = resolved_contract.get("capabilities")
         console.print(
             "host_contract="
-            f"adapter={resolved_contract.adapter} "
-            f"mode={resolved_contract.mode} "
-            f"supports_auto_execution={resolved_contract.capabilities.supports_auto_execution} "
+            f"adapter={resolved_contract.get('adapter', '-')} "
+            f"mode={resolved_contract.get('mode', '-')} "
+            "supports_auto_execution="
+            f"{capabilities.get('supports_auto_execution') if isinstance(capabilities, dict) else '-'} "
             "requires_explicit_review_handoff="
-            f"{resolved_contract.capabilities.requires_explicit_review_handoff}"
+            f"{capabilities.get('requires_explicit_review_handoff') if isinstance(capabilities, dict) else '-'}"
         )
-        review_contract = resolved_contract.review
-        console.print(
-            "review_contract="
-            f"required_run_artifacts={_format_csv(list(review_contract.required_run_artifacts))} "
-            f"required_report_fields={_format_csv(list(review_contract_fields(review_contract)))} "
-            f"expected_mode={review_contract.expected_report_mode or '-'} "
-            f"linked_field={review_contract.linked_report_artifact_field or '-'}"
-        )
+        review_contract = payload.get("review_contract")
+        if isinstance(review_contract, dict):
+            console.print(
+                "review_contract="
+                f"required_run_artifacts={_format_csv(review_contract.get('required_run_artifacts', []))} "
+                f"required_report_fields={_format_csv(review_contract.get('required_report_fields', []))} "
+                f"expected_mode={review_contract.get('expected_mode') or '-'} "
+                f"linked_field={review_contract.get('linked_field') or '-'}"
+            )
 
-        artifact_names = _list_run_artifact_names(ai_root, run_id)
-        review_boundary = assess_review_boundary(resolved_contract, available_artifact_names=artifact_names)
-        console.print(
-            "review_boundary="
-            f"{'ready' if review_boundary.ready else 'waiting'} "
-            f"missing_required_artifacts={_format_csv(list(review_boundary.missing_required_artifacts))}"
-        )
+        review_boundary = payload.get("review_boundary")
+        if isinstance(review_boundary, dict):
+            console.print(
+                "review_boundary="
+                f"{'ready' if review_boundary.get('ready') else 'waiting'} "
+                f"missing_required_artifacts={_format_csv(review_boundary.get('missing_required_artifacts', []))}"
+            )
 
-        review_report: Mapping[str, object] | None = None
-        try:
-            loaded_report = _load_run_surface(ai_root, run_id, "review-report.json")
-            review_report = loaded_report if isinstance(loaded_report, Mapping) else None
-        except AiwfError:
-            review_report = None
-        review_evidence = assess_review_evidence(
-            resolved_contract,
-            review_report,
-            available_artifact_names=artifact_names,
-        )
-        console.print(
-            "review_evidence="
-            f"{review_evidence.status} "
-            f"mode={review_evidence.mode or '-'} "
-            f"missing_report_fields={_format_csv(list(review_evidence.missing_report_fields))} "
-            f"missing_linked_artifacts={_format_csv(list(review_evidence.missing_linked_artifacts))}"
-        )
-        if review_evidence.mode_mismatch:
-            console.print(f"review_evidence_mode_mismatch={review_evidence.mode_mismatch}")
-        if review_evidence.linked_artifacts:
-            console.print(f"review_linked_artifacts={_format_csv(list(review_evidence.linked_artifacts))}")
+        review_evidence = payload.get("review_evidence")
+        if isinstance(review_evidence, dict):
+            console.print(
+                "review_evidence="
+                f"{review_evidence.get('status') or '-'} "
+                f"mode={review_evidence.get('mode') or '-'} "
+                f"missing_report_fields={_format_csv(review_evidence.get('missing_report_fields', []))} "
+                f"missing_linked_artifacts={_format_csv(review_evidence.get('missing_linked_artifacts', []))}"
+            )
+            if review_evidence.get("mode_mismatch"):
+                console.print(f"review_evidence_mode_mismatch={review_evidence['mode_mismatch']}")
+            linked_artifacts = review_evidence.get("linked_artifacts")
+            if isinstance(linked_artifacts, list) and linked_artifacts:
+                console.print(f"review_linked_artifacts={_format_csv(linked_artifacts)}")
     else:
+        warning = payload.get("host_contract_warning")
+        if warning:
+            console.print(f"host_contract_warning={warning}")
         host = diagnostics.get("host")
         if isinstance(host, dict):
             adapter = str(host.get("adapter", "")).strip()
@@ -266,7 +321,7 @@ def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> N
             if isinstance(action, str) and action.strip():
                 console.print(f"- {action.strip()}")
 
-    if provenance is not None:
+    if isinstance(provenance, dict):
         gate_evidence = provenance.get("gate_evidence")
         if isinstance(gate_evidence, dict):
             report = gate_evidence.get("report")
@@ -277,8 +332,6 @@ def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> N
                     f"gate_evidence=gate_set={gate_set or '-'} passed={passed} report={report['path']}"
                 )
 
-        # The contract-assessed summary above explains readiness/completeness;
-        # this provenance block is the raw persisted evidence view for verbose inspection.
         review_evidence_ref = provenance.get("review_evidence")
         if isinstance(review_evidence_ref, dict):
             report = review_evidence_ref.get("report")
@@ -305,9 +358,14 @@ def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> N
                 path = str(artifact.get("path", "")).strip()
                 if name and path:
                     console.print(f"- [{stage_label}/{category}] {name} -> {path}")
+    else:
+        console.print(
+            f"provenance_warning=Unable to read run-provenance.json for run {run_id}: artifact unavailable or invalid"
+        )
 
-    console.print(f"diagnostics={_artifact_path(ai_root, run_id, 'run-diagnostics.json')}")
-    console.print(f"provenance={_artifact_path(ai_root, run_id, 'run-provenance.json')}")
+    artifacts = payload["artifacts"]
+    console.print(f"diagnostics={artifacts['diagnostics']}")
+    console.print(f"provenance={artifacts['provenance']}")
 
 
 @run_app.command("plan")
@@ -376,12 +434,19 @@ def inspect_run(
     run_id: str,
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     verbose: Annotated[bool, typer.Option("--verbose", help="Show artifact index and detailed provenance links.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Render inspect output as JSON.")] = False,
 ) -> None:
     """Inspect diagnostics and provenance for an existing run."""
     try:
-        _print_inspection(ai_root, run_id, verbose=verbose)
+        if json_output:
+            typer.echo(json.dumps(_build_inspection_payload(ai_root, run_id), indent=2, ensure_ascii=False))
+        else:
+            _print_inspection(ai_root, run_id, verbose=verbose)
     except AiwfError as exc:
-        console.print(f"[red]inspect failed:[/red] {exc}")
+        if json_output:
+            typer.echo(json.dumps({"ok": False, "run_id": run_id, "error": str(exc)}, indent=2, ensure_ascii=False))
+        else:
+            console.print(f"[red]inspect failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
 

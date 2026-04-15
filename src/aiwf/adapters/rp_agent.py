@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
-from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
+from aiwf.adapters.base import HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
 from aiwf.exceptions import AdapterError
 from aiwf.models import RunStatus, StageResult, TaskSpec
 
 
 # Safety-net exclusions applied before `.gitignore` rules.
 # These intentionally cannot be re-included via negation patterns.
+_MAX_REVIEW_SUMMARY_ITEMS = 8
+
+
 _SKIPPED_PATH_PARTS = {
     ".ai",
     ".git",
@@ -33,28 +37,50 @@ _SKIPPED_PATH_PARTS = {
     "htmlcov",
 }
 
+RP_NATIVE_RUNTIME = NativeRuntimeContract(
+    enabled=True,
+    command_candidates=("rp", "rp-cli"),
+    install_hint=(
+        "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
+        "to make RP native-ready; manual handoff remains supported."
+    ),
+)
+
+RP_MANUAL_CONTRACT = HostContract(
+    adapter="rp",
+    mode="manual",
+    capabilities=HostCapabilities(
+        supports_auto_execution=False,
+        requires_explicit_review_handoff=True,
+    ),
+    review=ReviewArtifactContract(
+        required_run_artifacts=("verify-report.json",),
+        required_report_string_fields=("summary", "mode", "prompt_file"),
+        required_report_list_fields=("issues",),
+        expected_report_mode="manual",
+        linked_report_artifact_field="prompt_file",
+    ),
+    native_runtime=RP_NATIVE_RUNTIME,
+)
+
 
 class RpAgentAdapter:
-    """Manual-first RepoPrompt agent adapter."""
+    """Manual-first RepoPrompt adapter with native-runtime contract scaffolding."""
 
-    def __init__(self, repo_root: str | Path = ".", *, max_snapshot_entries: int = 60) -> None:
+    def __init__(
+        self,
+        repo_root: str | Path = ".",
+        *,
+        host_contract: HostContract | None = None,
+        max_snapshot_entries: int = 60,
+    ) -> None:
         self.repo_root = Path(repo_root)
         self.max_snapshot_entries = max_snapshot_entries
-        self.host_contract = HostContract(
-            adapter="rp",
-            mode="manual",
-            capabilities=HostCapabilities(
-                supports_auto_execution=False,
-                requires_explicit_review_handoff=True,
-            ),
-            review=ReviewArtifactContract(
-                required_run_artifacts=("verify-report.json",),
-                required_report_string_fields=("summary", "mode", "prompt_file"),
-                required_report_list_fields=("issues",),
-                expected_report_mode="manual",
-                linked_report_artifact_field="prompt_file",
-            ),
-        )
+        self.host_contract = host_contract or RP_MANUAL_CONTRACT
+        if self.host_contract.adapter != "rp":
+            raise ValueError("RpAgentAdapter requires an rp host contract")
+        if self.host_contract.mode != "manual":
+            raise ValueError("RpAgentAdapter currently supports manual mode only")
 
     def discover(self, task: TaskSpec, run_dir: Path) -> str:
         """Build a RepoPrompt-oriented local context pack without invoking an external host."""
@@ -122,7 +148,8 @@ class RpAgentAdapter:
 
     def review(self, task: TaskSpec, run_dir: Path) -> dict[str, object]:
         """Write a review handoff brief and block for external agent review."""
-        prompt = self._build_review_prompt(task, run_dir)
+        evidence_summary = self._build_review_evidence_summary(run_dir)
+        prompt = self._build_review_prompt(task, run_dir, evidence_summary=evidence_summary)
         prompt_path = run_dir / "rp-agent-review-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
         evidence_files = self._review_evidence_files(run_dir)
@@ -137,6 +164,7 @@ class RpAgentAdapter:
             "diagnostics_file": "run-diagnostics.json",
             "provenance_file": "run-provenance.json",
             "evidence_files": evidence_files,
+            "evidence_summary": evidence_summary,
         }
 
     def _build_plan_prompt(self, task: TaskSpec, context: str) -> str:
@@ -171,34 +199,53 @@ class RpAgentAdapter:
             ]
         )
 
-    def _build_review_prompt(self, task: TaskSpec, run_dir: Path) -> str:
-        verify_summary = self._summarize_verify_report(run_dir / "verify-report.json")
-        diagnostics_summary = self._summarize_diagnostics(run_dir / "run-diagnostics.json")
-        provenance_summary = self._summarize_provenance(run_dir / "run-provenance.json")
+    def _build_review_prompt(
+        self,
+        task: TaskSpec,
+        run_dir: Path,
+        *,
+        evidence_summary: dict[str, object] | None = None,
+    ) -> str:
+        summary = evidence_summary or self._build_review_evidence_summary(run_dir)
         evidence_files = self._review_evidence_files(run_dir)
 
-        return "\n".join(
+        lines = [
+            f"Task: {task.title}",
+            "",
+            f"Run directory: {run_dir}",
+            "Review the current implementation results and existing run artifacts.",
+            "Focus on correctness, missing validation, follow-up work, and any mismatch between artifacts and run state.",
+            "",
+            "Inspect at minimum:",
+            f"- {run_dir / 'context-pack.md'}",
+            f"- {run_dir / 'exec-plan.md'}",
+            f"- {run_dir / 'verify-report.json'}",
+            f"- {run_dir / 'run-diagnostics.json'}",
+            f"- {run_dir / 'run-provenance.json'}",
+            "",
+            "Available review evidence files:",
+            *[f"- {run_dir / name}" for name in evidence_files],
+            "",
+            "Evidence summary:",
+            f"- verify: {summary['verify']}",
+            *[f"- gate: {line}" for line in summary["gate_results"]],
+            f"- diagnostics: {summary['diagnostics']}",
+            f"- provenance: {summary['provenance']}",
+        ]
+        changed_files = summary.get("changed_files")
+        if isinstance(changed_files, list) and changed_files:
+            lines.extend([
+                "- changed files:",
+                *[f"  - {line}" for line in changed_files],
+            ])
+        diff_summary = summary.get("diff_summary")
+        if isinstance(diff_summary, list) and diff_summary:
+            lines.extend([
+                "- diff summary:",
+                *[f"  - {line}" for line in diff_summary],
+            ])
+        lines.extend(
             [
-                f"Task: {task.title}",
-                "",
-                f"Run directory: {run_dir}",
-                "Review the current implementation results and existing run artifacts.",
-                "Focus on correctness, missing validation, follow-up work, and any mismatch between artifacts and run state.",
-                "",
-                "Inspect at minimum:",
-                f"- {run_dir / 'context-pack.md'}",
-                f"- {run_dir / 'exec-plan.md'}",
-                f"- {run_dir / 'verify-report.json'}",
-                f"- {run_dir / 'run-diagnostics.json'}",
-                f"- {run_dir / 'run-provenance.json'}",
-                "",
-                "Available review evidence files:",
-                *[f"- {run_dir / name}" for name in evidence_files],
-                "",
-                "Evidence summary:",
-                f"- verify: {verify_summary}",
-                f"- diagnostics: {diagnostics_summary}",
-                f"- provenance: {provenance_summary}",
                 "",
                 "Review checklist:",
                 "- Confirm the implementation artifacts align with the task and execution plan.",
@@ -206,6 +253,7 @@ class RpAgentAdapter:
                 "- Record concrete issues and follow-up work before the run is resumed.",
             ]
         )
+        return "\n".join(lines)
 
     def _snapshot_repo(self) -> list[str]:
         entries: list[str] = []
@@ -243,6 +291,17 @@ class RpAgentAdapter:
         ]
         return [name for name in preferred if (run_dir / name).exists()]
 
+    def _build_review_evidence_summary(self, run_dir: Path) -> dict[str, object]:
+        changed_files, diff_summary = self._collect_repo_change_evidence()
+        return {
+            "verify": self._summarize_verify_report(run_dir / "verify-report.json"),
+            "gate_results": self._summarize_gate_results(run_dir / "verify-report.json"),
+            "diagnostics": self._summarize_diagnostics(run_dir / "run-diagnostics.json"),
+            "provenance": self._summarize_provenance(run_dir / "run-provenance.json"),
+            "changed_files": changed_files,
+            "diff_summary": diff_summary,
+        }
+
     def _summarize_verify_report(self, path: Path) -> str:
         payload = self._read_optional_json(path)
         if payload is None:
@@ -256,6 +315,34 @@ class RpAgentAdapter:
         ]
         failure_suffix = f" failed={','.join(failed_gates)}" if failed_gates else ""
         return f"gate_set={gate_set} passed={passed}{failure_suffix}"
+
+    def _summarize_gate_results(self, path: Path) -> list[str]:
+        payload = self._read_optional_json(path)
+        if payload is None:
+            return []
+        results = payload.get("results")
+        if not isinstance(results, list):
+            return []
+        summaries: list[str] = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            name = self._json_string(result, "name") or "gate"
+            passed = result.get("passed")
+            returncode = result.get("returncode")
+            timed_out = result.get("timed_out")
+            duration = result.get("duration_seconds")
+            state = "passed" if passed is True else "failed" if passed is False else "unknown"
+            details: list[str] = []
+            if isinstance(returncode, int):
+                details.append(f"rc={returncode}")
+            if timed_out is True:
+                details.append("timed_out")
+            if isinstance(duration, int | float):
+                details.append(f"{duration:.2f}s")
+            suffix = f" ({', '.join(details)})" if details else ""
+            summaries.append(f"{name}: {state}{suffix}")
+        return self._limit_summary_items(summaries)
 
     def _summarize_diagnostics(self, path: Path) -> str:
         payload = self._read_optional_json(path)
@@ -292,6 +379,58 @@ class RpAgentAdapter:
             f"review_linked_artifacts={linked_count} "
             f"review_required_artifacts_available={required_available_count}"
         )
+
+    def _collect_repo_change_evidence(self) -> tuple[list[str], list[str]]:
+        changed_files = self._git_status_summary()
+        diff_summary = self._git_diff_summary()
+        return changed_files, diff_summary
+
+    def _git_status_summary(self) -> list[str]:
+        output = self._run_git_command(["status", "--short", "--untracked-files=all"])
+        if not output:
+            return []
+        lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+        return self._limit_summary_items(lines)
+
+    def _git_diff_summary(self) -> list[str]:
+        summaries: list[str] = []
+        for args in (
+            ["diff", "--stat", "--find-renames", "--cached"],
+            ["diff", "--stat", "--find-renames"],
+        ):
+            output = self._run_git_command(args)
+            if not output:
+                continue
+            for line in output.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped[0].isdigit() and " file" in stripped and " changed" in stripped:
+                    continue
+                if stripped not in summaries:
+                    summaries.append(stripped)
+        return self._limit_summary_items(summaries)
+
+    def _run_git_command(self, args: list[str]) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(self.repo_root), *args],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
+        return completed.stdout.strip()
+
+    def _limit_summary_items(self, items: list[str]) -> list[str]:
+        if len(items) <= _MAX_REVIEW_SUMMARY_ITEMS:
+            return items
+        remaining = len(items) - _MAX_REVIEW_SUMMARY_ITEMS
+        return [*items[:_MAX_REVIEW_SUMMARY_ITEMS], f"... +{remaining} more"]
 
     def _read_optional_json(self, path: Path) -> dict[str, Any] | None:
         if not path.exists() or not path.is_file():

@@ -6,7 +6,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from aiwf.adapters.base import AdapterSpec, HostContract, ReviewArtifactContract
+from aiwf.adapters.base import AdapterSpec, HostContract, NativeRuntimeContract, ReviewArtifactContract
 
 
 @dataclass(frozen=True)
@@ -113,6 +113,7 @@ def lint_host_contract(contract: HostContract, *, subject: str = "host contract"
 
     review = contract.review
     issues.extend(_lint_review_contract(review, contract=contract))
+    issues.extend(_lint_native_runtime_contract(contract.native_runtime))
     return ContractLintResult(subject=subject, issues=tuple(issues))
 
 
@@ -261,6 +262,33 @@ def _lint_review_contract(review: ReviewArtifactContract, *, contract: HostContr
                     "linked_report_artifact_field must also appear in required_report_string_fields "
                     f"(missing {review.linked_report_artifact_field!r})"
                 ),
+            )
+        )
+    return issues
+
+
+def _lint_native_runtime_contract(native_runtime: NativeRuntimeContract) -> list[ContractLintIssue]:
+    issues: list[ContractLintIssue] = []
+    duplicates = _find_duplicates(native_runtime.command_candidates)
+    if duplicates:
+        issues.append(
+            ContractLintIssue(
+                code="duplicate-native-runtime-command-candidates",
+                message=f"native runtime command_candidates contains duplicates: {', '.join(duplicates)}",
+            )
+        )
+    if native_runtime.enabled and not native_runtime.command_candidates:
+        issues.append(
+            ContractLintIssue(
+                code="missing-native-runtime-command-candidates",
+                message="enabled native runtime contracts must declare at least one command candidate",
+            )
+        )
+    if not native_runtime.enabled and native_runtime.command_candidates:
+        issues.append(
+            ContractLintIssue(
+                code="disabled-native-runtime-has-command-candidates",
+                message="disabled native runtime contracts must not declare command candidates",
             )
         )
     return issues

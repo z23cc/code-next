@@ -20,6 +20,7 @@ def test_run_doctor_reports_ok_for_valid_workspace(tmp_path: Path, monkeypatch) 
             "python": "/usr/bin/python",
             "uv": "/usr/bin/uv",
             "git": "/usr/bin/git",
+            "rp": "/usr/bin/rp",
         },
     )
 
@@ -78,6 +79,45 @@ def test_run_doctor_reports_fail_for_missing_structure_and_gate_command(tmp_path
     assert any(check.name == "default:lint" and check.status == "fail" for check in report.checks)
 
 
+def test_run_doctor_reports_rp_manual_only_when_runtime_missing(tmp_path: Path, monkeypatch) -> None:
+    repo_root, ai_root = _create_workspace(tmp_path, gate_command='python -c "print(\'ok\')"')
+    _mock_which(
+        monkeypatch,
+        {
+            "python": "/usr/bin/python",
+            "uv": "/usr/bin/uv",
+            "git": "/usr/bin/git",
+        },
+    )
+
+    report = run_doctor(ai_root=ai_root, repo_root=repo_root)
+
+    rp_check = next(check for check in report.checks if check.name == "rp")
+    assert rp_check.status == "warn"
+    assert "manual-only fallback active" in rp_check.detail
+    assert "rp, rp-cli" in rp_check.detail
+
+
+def test_run_doctor_reports_rp_native_ready_when_runtime_found(tmp_path: Path, monkeypatch) -> None:
+    repo_root, ai_root = _create_workspace(tmp_path, gate_command='python -c "print(\'ok\')"')
+    _mock_which(
+        monkeypatch,
+        {
+            "python": "/usr/bin/python",
+            "uv": "/usr/bin/uv",
+            "git": "/usr/bin/git",
+            "rp-cli": "/usr/local/bin/rp-cli",
+        },
+    )
+
+    report = run_doctor(ai_root=ai_root, repo_root=repo_root)
+
+    rp_check = next(check for check in report.checks if check.name == "rp")
+    assert rp_check.status == "ok"
+    assert rp_check.path == "/usr/local/bin/rp-cli"
+    assert "native-ready via rp-cli" in rp_check.detail
+
+
 def test_cli_doctor_human_output_succeeds(tmp_path: Path, monkeypatch) -> None:
     repo_root, ai_root = _create_workspace(tmp_path, gate_command='python -c "print(\'ok\')"')
     _mock_which(
@@ -86,6 +126,7 @@ def test_cli_doctor_human_output_succeeds(tmp_path: Path, monkeypatch) -> None:
             "python": "/usr/bin/python",
             "uv": "/usr/bin/uv",
             "git": "/usr/bin/git",
+            "rp": "/usr/bin/rp",
         },
     )
 

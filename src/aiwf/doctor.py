@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from aiwf.adapters import ADAPTER_SPECS
+from aiwf.adapters.base import HostContract
 from aiwf.loader import load_gate_set, load_policy, load_runbook
 
 
@@ -273,15 +275,45 @@ def _check_host_tools() -> list[DoctorCheck]:
     checks.append(_tool_check("uv", required=False, reason="recommended for local aiwf commands"))
     checks.append(_tool_check("git", required=False, reason="useful for repo-aware workflows"))
     checks.append(_tool_check("claude", required=False, reason="needed for Claude adapter workflows"))
-    checks.append(
-        DoctorCheck(
+    checks.append(_check_native_runtime("rp", ADAPTER_SPECS["rp"].resolve_contract()))
+    return checks
+
+
+def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCheck:
+    native_runtime = contract.native_runtime
+    if not native_runtime.enabled:
+        return DoctorCheck(
             status="ok",
             category="tool",
-            name="rp",
-            detail="RepoPrompt adapter is manual-first and does not require a dedicated executable",
+            name=adapter_name,
+            detail="manual-only contract; no native runtime scaffold declared",
         )
+
+    for command in native_runtime.command_candidates:
+        resolved = shutil.which(command)
+        if resolved:
+            return DoctorCheck(
+                status="ok",
+                category="tool",
+                name=adapter_name,
+                detail=(
+                    f"native-ready via {command} at {resolved}; "
+                    "manual handoff remains available until the native bridge is enabled"
+                ),
+                path=resolved,
+            )
+
+    candidates = ", ".join(native_runtime.command_candidates)
+    hint = native_runtime.install_hint or f"Install one of: {candidates}."
+    return DoctorCheck(
+        status="warn",
+        category="tool",
+        name=adapter_name,
+        detail=(
+            "manual-only fallback active; native runtime contract is declared but no compatible "
+            f"RepoPrompt runtime was found on PATH ({candidates}). {hint}"
+        ),
     )
-    return checks
 
 
 def _tool_check(command: str, *, required: bool, reason: str) -> DoctorCheck:

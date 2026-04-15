@@ -99,6 +99,51 @@ class ReviewArtifactContract:
 
 
 @dataclass(frozen=True)
+class NativeRuntimeContract:
+    """Optional contract scaffolding for a future native runtime bridge."""
+
+    enabled: bool = False
+    command_candidates: tuple[str, ...] = ()
+    install_hint: str | None = None
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "command_candidates": list(self.command_candidates),
+            "install_hint": self.install_hint,
+        }
+
+    @classmethod
+    def from_metadata(cls, data: Mapping[str, object]) -> NativeRuntimeContract:
+        enabled = data.get("enabled", False)
+        command_candidates = cls._read_string_sequence(data, "command_candidates")
+        install_hint = data.get("install_hint")
+        if not isinstance(enabled, bool):
+            raise ValueError("native runtime contract enabled must be a boolean")
+        if install_hint is not None and (not isinstance(install_hint, str) or not install_hint.strip()):
+            raise ValueError("native runtime contract install_hint must be a non-empty string or null")
+        if enabled and not command_candidates:
+            raise ValueError("enabled native runtime contracts must declare at least one command candidate")
+        return cls(
+            enabled=enabled,
+            command_candidates=command_candidates,
+            install_hint=install_hint.strip() if isinstance(install_hint, str) else None,
+        )
+
+    @staticmethod
+    def _read_string_sequence(data: Mapping[str, object], key: str) -> tuple[str, ...]:
+        raw_value = data.get(key, [])
+        if not isinstance(raw_value, list):
+            raise ValueError(f"native runtime contract {key} must be a list")
+        values: list[str] = []
+        for item in raw_value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(f"native runtime contract {key} entries must be non-empty strings")
+            values.append(item.strip())
+        return tuple(values)
+
+
+@dataclass(frozen=True)
 class HostContract:
     """Explicit contract persisted with each run and exposed by adapters."""
 
@@ -106,6 +151,7 @@ class HostContract:
     mode: HostMode = "manual"
     capabilities: HostCapabilities = HostCapabilities()
     review: ReviewArtifactContract = field(default_factory=ReviewArtifactContract)
+    native_runtime: NativeRuntimeContract = field(default_factory=NativeRuntimeContract)
 
     @property
     def auto(self) -> bool:
@@ -117,6 +163,7 @@ class HostContract:
             "mode": self.mode,
             "capabilities": self.capabilities.to_metadata(),
             "review": self.review.to_metadata(),
+            "native_runtime": self.native_runtime.to_metadata(),
         }
 
     @classmethod
@@ -125,6 +172,7 @@ class HostContract:
         mode = data.get("mode")
         capabilities = data.get("capabilities")
         review = data.get("review")
+        native_runtime = data.get("native_runtime")
         if not isinstance(adapter, str) or not adapter.strip():
             raise ValueError("host contract adapter must be a non-empty string")
         if mode not in {"manual", "auto"}:
@@ -135,12 +183,17 @@ class HostContract:
             review = {}
         if not isinstance(review, Mapping):
             raise ValueError("host contract review must be an object")
+        if native_runtime is None:
+            native_runtime = {}
+        if not isinstance(native_runtime, Mapping):
+            raise ValueError("host contract native_runtime must be an object")
         normalized_mode = cast(HostMode, mode)
         return cls(
             adapter=adapter.strip(),
             mode=normalized_mode,
             capabilities=HostCapabilities.from_metadata(capabilities),
             review=ReviewArtifactContract.from_metadata(review),
+            native_runtime=NativeRuntimeContract.from_metadata(native_runtime),
         )
 
 
