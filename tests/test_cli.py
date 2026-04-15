@@ -678,7 +678,7 @@ def test_cli_rejects_auto_when_adapter_contract_does_not_support_it(tmp_path: Pa
             "--repo-root",
             str(repo_root),
             "--adapter",
-            "rp",
+            "codex",
             "--auto",
         ],
     )
