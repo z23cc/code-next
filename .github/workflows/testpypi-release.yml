@@ -1,0 +1,108 @@
+name: TestPyPI Release Trial
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # Requires a GitHub environment named `testpypi` configured for TestPyPI trusted publishing.
+  publish-testpypi:
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/aiwf/
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Setup Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Ruff
+        run: uv run ruff check src/ tests/
+
+      - name: Mypy
+        run: uv run mypy src/aiwf/
+
+      - name: Pytest
+        run: uv run pytest tests/ -x -q
+
+      - name: Build package artifacts
+        run: uv build
+
+      - name: Verify release metadata and built artifacts
+        run: |
+          set -euo pipefail
+          uv run python -m aiwf.release verify \
+            --dist dist \
+            --install-smoke \
+            --write-manifest dist/release-metadata.json
+
+      - name: Capture package version
+        run: |
+          set -euo pipefail
+          version="$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))
+          print(data['project']['version'])
+          PY
+          )"
+          echo "AIWF_VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiwf-testpypi-release-bundle
+          path: dist/*
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          print-hash: true
+          verbose: true
+
+      - name: Wait for TestPyPI to serve the new release
+        run: sleep 30
+
+      - name: Install smoke from published TestPyPI index
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: |
+          set -euo pipefail
+          python3 -m venv .testpypi-smoke
+          . .testpypi-smoke/bin/activate
+          for attempt in 1 2 3 4 5; do
+            if python -m pip install \
+              --index-url https://test.pypi.org/simple/ \
+              --extra-index-url https://pypi.org/simple/ \
+              "aiwf==${AIWF_VERSION}"; then
+              break
+            fi
+            if [[ "$attempt" -eq 5 ]]; then
+              echo "TestPyPI install smoke failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "Package not visible on TestPyPI yet; retrying in 30s (attempt ${attempt}/5)..."
+            sleep 30
+          done
+          reported_version="$(python -m aiwf --version)"
+          test "$reported_version" = "$AIWF_VERSION"
+          {
+            echo "## TestPyPI Install Smoke"
+            echo
+            echo "- package: `aiwf==${AIWF_VERSION}`"
+            echo "- index: `https://test.pypi.org/simple/`"
+            echo "- reported version: `${reported_version}`"
+          } >> "$GITHUB_STEP_SUMMARY"
