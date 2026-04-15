@@ -356,7 +356,9 @@ class WorkflowEngine:
                 return
         else:
             try:
-                stored_review_report = store.read_validated_artifact("review-report.json")
+                stored_review_report: ReviewReportContent = store.read_validated_artifact(
+                    "review-report.json", ReviewReportContent
+                )
             except ArtifactError as exc:
                 raise StateError(
                     f"Stored review-report.json is invalid: {exc.message}",

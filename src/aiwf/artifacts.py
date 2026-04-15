@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -92,7 +92,7 @@ class ArtifactStore:
                 error_code=ErrorCode.INVALID_ARTIFACT,
             )
         try:
-            return resolved_schema.model_validate(parsed)
+            return cast(ArtifactModelT, resolved_schema.model_validate(parsed))
         except ValidationError as exc:
             raise ArtifactError(
                 f"Artifact content failed validation: {self._format_validation_errors(exc)}",
