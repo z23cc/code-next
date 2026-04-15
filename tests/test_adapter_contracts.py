@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from aiwf.adapters import ADAPTER_SPECS, build_adapter, restore_host_contract
 from aiwf.adapters.base import AdapterSpec, HostCapabilities, HostContract, ReviewArtifactContract
 from aiwf.contracts import lint_contract_registry, lint_host_contract
+from aiwf.models import RunMeta
 
 
 def test_restore_host_contract_prefers_explicit_metadata() -> None:
@@ -160,3 +162,56 @@ def test_restore_host_contract_backfills_review_contract_for_item1_metadata() ->
             linked_report_artifact_field="prompt_file",
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "expected_contract"),
+    [
+        (
+            "run_metadata_legacy_adapter_auto.json",
+            HostContract(
+                adapter="claude",
+                mode="auto",
+                capabilities=HostCapabilities(
+                    supports_auto_execution=True,
+                    requires_explicit_review_handoff=False,
+                ),
+                review=ReviewArtifactContract(
+                    required_run_artifacts=("verify-report.json",),
+                    required_report_string_fields=("summary", "mode", "response_file"),
+                    required_report_list_fields=("issues",),
+                    expected_report_mode="auto",
+                    linked_report_artifact_field="response_file",
+                ),
+            ),
+        ),
+        (
+            "run_metadata_host_contract_no_review.json",
+            HostContract(
+                adapter="claude",
+                mode="manual",
+                capabilities=HostCapabilities(
+                    supports_auto_execution=True,
+                    requires_explicit_review_handoff=True,
+                ),
+                review=ReviewArtifactContract(
+                    required_run_artifacts=("verify-report.json",),
+                    required_report_string_fields=("summary", "mode", "prompt_file"),
+                    required_report_list_fields=("issues",),
+                    expected_report_mode="manual",
+                    linked_report_artifact_field="prompt_file",
+                ),
+            ),
+        ),
+    ],
+)
+def test_restore_host_contract_accepts_legacy_run_metadata_fixtures(
+    fixture_name: str,
+    expected_contract: HostContract,
+) -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / fixture_name
+    run_meta = RunMeta.model_validate(json.loads(fixture_path.read_text(encoding="utf-8")))
+
+    contract = restore_host_contract(run_meta.data)
+
+    assert contract == expected_contract

@@ -42,7 +42,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          args=(uv run python -m aiwf.release verify --dist dist --write-manifest dist/release-metadata.json)
+          args=(uv run python -m aiwf.release verify --dist dist --install-smoke --write-manifest dist/release-metadata.json)
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             args+=(--expect-tag "${RELEASE_TAG}")
           fi
@@ -63,3 +63,9 @@ jobs:
         with:
           name: aiwf-release-bundle
           path: dist/*
+
+      - name: Upload release metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiwf-release-metadata
+          path: dist/release-metadata.json

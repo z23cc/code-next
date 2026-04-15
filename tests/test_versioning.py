@@ -9,9 +9,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import aiwf.release as release_module
 from aiwf import __version__
 from aiwf.cli import app
-from aiwf.release import ReleaseValidationError, build_release_manifest, main as release_main
+from aiwf.release import RELEASE_METADATA_CONTRACT, ReleaseValidationError, build_release_manifest, main as release_main
 
 
 runner = CliRunner()
@@ -93,11 +94,13 @@ def test_cli_version_reports_package_version() -> None:
 def test_release_manifest_matches_repository_metadata() -> None:
     manifest = build_release_manifest(_project_root())
 
+    assert manifest["release_metadata_contract"] == RELEASE_METADATA_CONTRACT
     assert manifest["project"]["name"] == "aiwf"
     assert manifest["project"]["version"] == __version__
     assert manifest["project"]["tag"] == f"v{__version__}"
     assert manifest["changelog"]["latest_released_version"] == __version__
     assert manifest["changelog"]["path"] == "CHANGELOG.md"
+    assert manifest["verification"]["expected_tag"] == f"v{__version__}"
 
 
 def test_release_manifest_requires_current_version_heading_in_changelog(tmp_path: Path) -> None:
@@ -143,3 +146,50 @@ def test_release_manifest_collects_built_artifact_metadata(tmp_path: Path) -> No
     assert [artifact["type"] for artifact in manifest["artifacts"]] == ["sdist", "wheel"]
     assert {artifact["package_version"] for artifact in manifest["artifacts"]} == {"1.2.3"}
     assert all(len(artifact["sha256"]) == 64 for artifact in manifest["artifacts"])
+    assert manifest["verification"]["dist_dir"] == "dist"
+
+
+def test_release_manifest_requires_dist_for_install_smoke(tmp_path: Path) -> None:
+    _write_test_project(tmp_path, version="1.2.3")
+
+    with pytest.raises(ReleaseValidationError, match="Install smoke requires a distribution directory"):
+        build_release_manifest(tmp_path, install_smoke=True)
+
+
+def test_release_manifest_records_install_smoke_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_test_project(tmp_path, version="1.2.3")
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    _write_wheel(dist_dir / "aiwf-1.2.3-py3-none-any.whl", name="aiwf", version="1.2.3")
+    _write_sdist(dist_dir / "aiwf-1.2.3.tar.gz", name="aiwf", version="1.2.3")
+
+    smoke_calls: list[tuple[Path, str, str]] = []
+
+    def _fake_install_smoke(dist: Path, *, project_name: str, version: str) -> dict[str, object]:
+        smoke_calls.append((dist, project_name, version))
+        return {
+            "status": "passed",
+            "installer": "pip",
+            "wheel": "aiwf-1.2.3-py3-none-any.whl",
+            "commands": {
+                "install": "python -m pip install aiwf-1.2.3-py3-none-any.whl",
+                "version": "python -m aiwf --version",
+            },
+            "reported_version": version,
+        }
+
+    monkeypatch.setattr(release_module, "run_install_smoke", _fake_install_smoke)
+
+    manifest = build_release_manifest(tmp_path, dist_dir=dist_dir, expected_tag="v1.2.3", install_smoke=True)
+
+    assert smoke_calls == [(dist_dir, "aiwf", "1.2.3")]
+    assert manifest["verification"]["install_smoke"] == {
+        "status": "passed",
+        "installer": "pip",
+        "wheel": "aiwf-1.2.3-py3-none-any.whl",
+        "commands": {
+            "install": "python -m pip install aiwf-1.2.3-py3-none-any.whl",
+            "version": "python -m aiwf --version",
+        },
+        "reported_version": "1.2.3",
+    }

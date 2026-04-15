@@ -6,8 +6,11 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
+import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 import zipfile
 from email.parser import Parser
@@ -18,6 +21,8 @@ from typing import Any
 VERSION_HEADING_RE = re.compile(r"^##\s+([0-9]+\.[0-9]+\.[0-9]+)\s*$", re.MULTILINE)
 UNRELEASED_HEADING_RE = re.compile(r"^##\s+Unreleased\s*$", re.MULTILINE)
 VERSION_ASSIGNMENT_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$', re.MULTILINE)
+RELEASE_METADATA_CONTRACT = "aiwf-release-metadata-v2"
+INSTALL_SMOKE_TIMEOUT_SECONDS = 120
 
 
 class ReleaseValidationError(ValueError):
@@ -135,16 +140,8 @@ def read_sdist_metadata(path: Path) -> dict[str, str]:
     return {"metadata_path": primary_member.name, "name": name, "version": version}
 
 
-def collect_distribution_artifacts(
-    dist_dir: Path,
-    *,
-    project_name: str,
-    version: str,
-) -> list[dict[str, Any]]:
-    """Validate built wheel/sdist artifacts and return release metadata for them."""
-    if not dist_dir.is_dir():
-        raise ReleaseValidationError(f"Distribution directory does not exist: {dist_dir}")
-
+def _resolve_distribution_paths(dist_dir: Path, *, project_name: str, version: str) -> tuple[Path, Path]:
+    """Return the expected sdist and wheel paths for a built release."""
     filename_base = project_name.replace("-", "_")
     sdists = sorted(dist_dir.glob(f"{filename_base}-{version}.tar.gz"))
     wheels = sorted(dist_dir.glob(f"{filename_base}-{version}-*.whl"))
@@ -158,10 +155,29 @@ def collect_distribution_artifacts(
             f"Expected exactly one wheel for {project_name} {version} in {dist_dir}, found {len(wheels)}"
         )
 
+    return sdists[0], wheels[0]
+
+
+def collect_distribution_artifacts(
+    dist_dir: Path,
+    *,
+    project_name: str,
+    version: str,
+) -> list[dict[str, Any]]:
+    """Validate built wheel/sdist artifacts and return release metadata for them."""
+    if not dist_dir.is_dir():
+        raise ReleaseValidationError(f"Distribution directory does not exist: {dist_dir}")
+
+    sdist_path, wheel_path = _resolve_distribution_paths(
+        dist_dir,
+        project_name=project_name,
+        version=version,
+    )
+
     artifacts: list[dict[str, Any]] = []
     for kind, path, metadata_loader in (
-        ("sdist", sdists[0], read_sdist_metadata),
-        ("wheel", wheels[0], read_wheel_metadata),
+        ("sdist", sdist_path, read_sdist_metadata),
+        ("wheel", wheel_path, read_wheel_metadata),
     ):
         metadata = metadata_loader(path)
         if normalize_distribution_name(metadata["name"]) != normalize_distribution_name(project_name):
@@ -188,11 +204,108 @@ def collect_distribution_artifacts(
     return artifacts
 
 
+def _relative_to_project(project_root: Path, path: Path) -> str:
+    """Return a path relative to the project root when possible."""
+    try:
+        return str(path.relative_to(project_root))
+    except ValueError:
+        return str(path)
+
+
+def _run_checked(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess and convert execution failures into release validation errors."""
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=INSTALL_SMOKE_TIMEOUT_SECONDS,
+        )
+    except OSError as exc:
+        rendered = shlex.join(command)
+        raise ReleaseValidationError(f"Failed to execute install smoke command {rendered}: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        rendered = shlex.join(command)
+        raise ReleaseValidationError(
+            f"Install smoke command timed out after {INSTALL_SMOKE_TIMEOUT_SECONDS}s: {rendered}"
+        ) from exc
+
+
+def _stderr_excerpt(result: subprocess.CompletedProcess[str]) -> str:
+    """Return a short stderr/stdout excerpt for diagnostics."""
+    text = result.stderr.strip() or result.stdout.strip()
+    if not text:
+        return "no output"
+    lines = text.splitlines()
+    return " | ".join(lines[-5:])
+
+
+def run_install_smoke(dist_dir: Path, *, project_name: str, version: str) -> dict[str, Any]:
+    """Install the built wheel in an isolated virtualenv and verify the installed CLI."""
+    _, wheel_path = _resolve_distribution_paths(
+        dist_dir,
+        project_name=project_name,
+        version=version,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="aiwf-release-smoke-") as temp_dir:
+        venv_dir = Path(temp_dir) / "venv"
+        create_result = _run_checked([sys.executable, "-m", "venv", str(venv_dir)])
+        if create_result.returncode != 0:
+            raise ReleaseValidationError(
+                f"Install smoke failed to create virtualenv: {_stderr_excerpt(create_result)}"
+            )
+
+        bin_dir = venv_dir / ("Scripts" if sys.platform == "win32" else "bin")
+        python_name = "python.exe" if sys.platform == "win32" else "python"
+        python_executable = bin_dir / python_name
+
+        install_command = [
+            str(python_executable),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            str(wheel_path),
+        ]
+        install_result = _run_checked(install_command)
+        if install_result.returncode != 0:
+            raise ReleaseValidationError(
+                f"Install smoke failed to install {wheel_path.name}: {_stderr_excerpt(install_result)}"
+            )
+
+        version_command = [str(python_executable), "-m", "aiwf", "--version"]
+        version_result = _run_checked(version_command)
+        if version_result.returncode != 0:
+            raise ReleaseValidationError(
+                f"Install smoke failed to execute installed CLI: {_stderr_excerpt(version_result)}"
+            )
+
+        installed_version = version_result.stdout.strip()
+        if installed_version != version:
+            raise ReleaseValidationError(
+                f"Install smoke reported version {installed_version!r}, expected {version!r}"
+            )
+
+        return {
+            "status": "passed",
+            "installer": "pip",
+            "wheel": wheel_path.name,
+            "commands": {
+                "install": shlex.join(install_command),
+                "version": shlex.join(version_command),
+            },
+            "reported_version": installed_version,
+        }
+
+
 def build_release_manifest(
     project_root: Path,
     *,
     dist_dir: Path | None = None,
     expected_tag: str | None = None,
+    install_smoke: bool = False,
 ) -> dict[str, Any]:
     """Build validated release metadata for the current project state."""
     project = read_pyproject_metadata(project_root)
@@ -207,19 +320,35 @@ def build_release_manifest(
         raise ReleaseValidationError(
             f"Tag {expected_tag} does not match package version {project['version']}"
         )
+    if install_smoke and dist_dir is None:
+        raise ReleaseValidationError("Install smoke requires a distribution directory")
 
     manifest: dict[str, Any] = {
+        "release_metadata_contract": RELEASE_METADATA_CONTRACT,
         "project": {
             "name": project["name"],
             "version": project["version"],
             "tag": expected_version_tag,
         },
         "changelog": validate_changelog(project_root, project["version"]),
+        "verification": {
+            "expected_tag": expected_tag or expected_version_tag,
+        },
     }
 
     if dist_dir is not None:
+        manifest["verification"]["dist_dir"] = _relative_to_project(project_root, dist_dir)
         manifest["artifacts"] = collect_distribution_artifacts(
             dist_dir,
+            project_name=project["name"],
+            version=project["version"],
+        )
+    if install_smoke:
+        smoke_dist_dir = dist_dir
+        if smoke_dist_dir is None:
+            raise ReleaseValidationError("Install smoke requires a distribution directory")
+        manifest["verification"]["install_smoke"] = run_install_smoke(
+            smoke_dist_dir,
             project_name=project["name"],
             version=project["version"],
         )
@@ -247,6 +376,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dist", help="Distribution directory to validate.")
     parser.add_argument("--expect-tag", help="Release tag expected for this version, e.g. v1.2.3.")
     parser.add_argument(
+        "--install-smoke",
+        action="store_true",
+        help="Install the built wheel in an isolated virtualenv and verify `python -m aiwf --version`.",
+    )
+    parser.add_argument(
         "--write-manifest",
         help="Optional path to write validated release metadata JSON.",
     )
@@ -257,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.project_root).resolve(),
             dist_dir=Path(args.dist).resolve() if args.dist else None,
             expected_tag=args.expect_tag,
+            install_smoke=args.install_smoke,
         )
     except ReleaseValidationError as exc:
         print(f"release metadata error: {exc}", file=sys.stderr)
