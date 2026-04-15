@@ -16,6 +16,7 @@ from aiwf.adapters.base import HostContract
 from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
 from aiwf.compilers.codex import compile_codex
+from aiwf.compilers.rp import compile_rp
 from aiwf.contracts import assess_review_boundary, assess_review_evidence, lint_contract_registry, review_contract_fields
 from aiwf.doctor import render_doctor_report, run_doctor
 from aiwf.engine import WorkflowEngine
@@ -497,7 +498,7 @@ def compile_claude_command(
         raise typer.Exit(code=1) from exc
     console.print(
         "[green]compile completed[/green] "
-        f"bundle={result['bundle_path']} projection={result['projection_path']} "
+        f"bundle={result['bundle_path']} projection={result['projection_path']} install={result['install_surface_path']} "
         f"manifest={result['manifest_path']} drift={result['drift_status']}"
     )
 
@@ -515,6 +516,24 @@ def compile_codex_command(
         raise typer.Exit(code=1) from exc
     console.print(
         "[green]compile completed[/green] "
-        f"bundle={result['bundle_path']} projection={result['projection_path']} "
+        f"bundle={result['bundle_path']} projection={result['projection_path']} install={result['install_surface_path']} "
+        f"manifest={result['manifest_path']} drift={result['drift_status']}"
+    )
+
+
+@compile_app.command("rp")
+def compile_rp_command(
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    output: Annotated[Path, typer.Option("--output")] = Path(".rp/compiled"),
+) -> None:
+    """Compile `.ai/` sources into a RepoPrompt host projection and drift manifest."""
+    try:
+        result = compile_rp(ai_root, output)
+    except AiwfError as exc:
+        console.print(f"[red]compile failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        "[green]compile completed[/green] "
+        f"bundle={result['bundle_path']} projection={result['projection_path']} install={result['install_surface_path']} "
         f"manifest={result['manifest_path']} drift={result['drift_status']}"
     )

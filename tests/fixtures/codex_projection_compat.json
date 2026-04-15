@@ -39,7 +39,19 @@
   },
   "artifacts": {
     "bundle": "codex-bundle.md",
+    "install_surface": "install-surface.json",
     "manifest": "manifest.json"
+  },
+  "install_surface": {
+    "install_strategy": "use_compiled_output_directory",
+    "default_output_dir": ".codex/compiled",
+    "generated_asset_roles": [
+      "bundle",
+      "projection",
+      "install_surface",
+      "manifest"
+    ],
+    "external_assets": []
   },
   "commands": {
     "plan": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter codex",

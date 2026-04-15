@@ -16,7 +16,7 @@ from aiwf.models import utc_now
 
 
 BundleBuilder = Callable[["CompileContext"], str]
-ProjectionBuilder = Callable[["CompileContext", str], dict[str, object]]
+ProjectionBuilder = Callable[["CompileContext", str, dict[str, object]], dict[str, object]]
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,24 @@ class CompileContext:
 
 
 @dataclass(frozen=True)
+class ExternalAssetPolicy:
+    """Ownership policy for host assets outside the generated compile bundle."""
+
+    path: str
+    owner: str
+    managed_by_compiler: bool
+    rationale: str
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "owner": self.owner,
+            "managed_by_compiler": self.managed_by_compiler,
+            "rationale": self.rationale,
+        }
+
+
+@dataclass(frozen=True)
 class CompilerSpec:
     """Declarative compiler registry entry for a host projection."""
 
@@ -48,12 +66,15 @@ class CompilerSpec:
     host_display_name: str
     stored_runtime_key: str
     default_variant: HostMode
+    default_output_dir: str
     bundle_filename: str
     projection_filename: str
+    install_surface_filename: str
     bundle_manifest_key: str
     variants: Mapping[HostMode, HostContract]
     bundle_builder: BundleBuilder
     projection_builder: ProjectionBuilder
+    external_asset_policies: tuple[ExternalAssetPolicy, ...] = ()
 
 
 def compile_host_projection(spec: CompilerSpec, ai_root: str | Path, output_dir: str | Path) -> dict[str, Path | str]:
@@ -92,13 +113,23 @@ def compile_host_projection(spec: CompilerSpec, ai_root: str | Path, output_dir:
     compiled_markdown = spec.bundle_builder(context)
     bundle_sha256 = sha256_text(compiled_markdown)
 
-    projection = spec.projection_builder(context, bundle_sha256)
+    install_surface = build_install_surface_document(spec=spec, output_dir=output_path)
+    install_surface_text = json.dumps(install_surface, indent=2, ensure_ascii=False) + "\n"
+    install_surface_sha256 = sha256_text(install_surface_text)
+
+    projection = spec.projection_builder(context, bundle_sha256, install_surface)
     projection_text = json.dumps(projection, indent=2, ensure_ascii=False) + "\n"
     projection_sha256 = sha256_text(projection_text)
 
     manifest_path = output_path / "manifest.json"
     previous_manifest = load_existing_manifest(manifest_path, stage=spec.compiler_name)
-    drift = build_drift_report(previous_manifest, source_index, bundle_sha256, projection_sha256)
+    drift = build_drift_report(
+        previous_manifest,
+        source_index,
+        bundle_sha256,
+        projection_sha256,
+        install_surface_sha256,
+    )
 
     manifest = {
         "schema_version": 2,
@@ -113,6 +144,7 @@ def compile_host_projection(spec: CompilerSpec, ai_root: str | Path, output_dir:
         "files": {
             spec.bundle_manifest_key: spec.bundle_filename,
             "projection": spec.projection_filename,
+            "install_surface": spec.install_surface_filename,
             "manifest": "manifest.json",
         },
         "sources": {
@@ -124,18 +156,22 @@ def compile_host_projection(spec: CompilerSpec, ai_root: str | Path, output_dir:
         "hashes": {
             "bundle_sha256": bundle_sha256,
             "projection_sha256": projection_sha256,
+            "install_surface_sha256": install_surface_sha256,
         },
         "drift": drift,
     }
 
     bundle_path = output_path / spec.bundle_filename
     projection_path = output_path / spec.projection_filename
+    install_surface_path = output_path / spec.install_surface_filename
     bundle_path.write_text(compiled_markdown, encoding="utf-8")
     projection_path.write_text(projection_text, encoding="utf-8")
+    install_surface_path.write_text(install_surface_text, encoding="utf-8")
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return {
         "bundle_path": bundle_path,
         "projection_path": projection_path,
+        "install_surface_path": install_surface_path,
         "manifest_path": manifest_path,
         "drift_status": str(drift["status"]),
     }
@@ -147,6 +183,7 @@ def build_projection_document(
     source_ai_root: Path,
     source_index: list[dict[str, object]],
     bundle_sha256: str,
+    install_surface: Mapping[str, object],
     artifacts: Mapping[str, str],
     commands: Mapping[str, str],
     workflow_contract: Mapping[str, object],
@@ -164,6 +201,7 @@ def build_projection_document(
             "variants": {mode: contract.to_metadata() for mode, contract in spec.variants.items()},
         },
         "artifacts": dict(artifacts),
+        "install_surface": dict(install_surface),
         "commands": dict(commands),
         "workflow_contract": dict(workflow_contract),
         "projection_inputs": source_index,
@@ -231,6 +269,7 @@ def build_drift_report(
     source_index: list[dict[str, object]],
     bundle_sha256: str,
     projection_sha256: str,
+    install_surface_sha256: str,
 ) -> dict[str, object]:
     """Compare the current projection against a previous manifest baseline."""
     if not previous_manifest:
@@ -240,6 +279,7 @@ def build_drift_report(
             "source_changes": {"added": [], "removed": [], "changed": [], "unchanged_count": len(source_index)},
             "bundle_changed": False,
             "projection_changed": False,
+            "install_surface_changed": False,
         }
 
     previous_index = previous_manifest.get("source_index")
@@ -250,6 +290,7 @@ def build_drift_report(
             "source_changes": {"added": [], "removed": [], "changed": [], "unchanged_count": len(source_index)},
             "bundle_changed": False,
             "projection_changed": False,
+            "install_surface_changed": False,
             "notes": ["Previous manifest did not include compatible source fingerprints."],
         }
 
@@ -274,15 +315,24 @@ def build_drift_report(
             },
             "bundle_changed": False,
             "projection_changed": False,
+            "install_surface_changed": False,
             "notes": ["Previous manifest did not include compatible output hashes."],
         }
 
     previous_bundle_sha256 = previous_hashes.get("bundle_sha256")
     previous_projection_sha256 = previous_hashes.get("projection_sha256")
+    previous_install_surface_sha256 = previous_hashes.get("install_surface_sha256")
 
     bundle_changed = bool(previous_bundle_sha256 and previous_bundle_sha256 != bundle_sha256)
     projection_changed = bool(previous_projection_sha256 and previous_projection_sha256 != projection_sha256)
-    status = "changed" if added or removed or changed or bundle_changed or projection_changed else "clean"
+    install_surface_changed = bool(
+        previous_install_surface_sha256 and previous_install_surface_sha256 != install_surface_sha256
+    )
+    status = (
+        "changed"
+        if added or removed or changed or bundle_changed or projection_changed or install_surface_changed
+        else "clean"
+    )
 
     return {
         "status": status,
@@ -295,7 +345,79 @@ def build_drift_report(
         },
         "bundle_changed": bundle_changed,
         "projection_changed": projection_changed,
+        "install_surface_changed": install_surface_changed,
     }
+
+
+def build_install_surface_document(*, spec: CompilerSpec, output_dir: Path) -> dict[str, object]:
+    """Build a minimal installable host-bundle descriptor for compiled outputs."""
+    return {
+        "schema_version": 1,
+        "host": {
+            "key": spec.key,
+            "name": spec.host_name,
+            "display_name": spec.host_display_name,
+        },
+        "install_strategy": "use_compiled_output_directory",
+        "default_output_dir": spec.default_output_dir,
+        "resolved_output_dir": str(output_dir),
+        "generated_assets": [
+            {
+                "role": "bundle",
+                "relative_path": spec.bundle_filename,
+                "managed_by_compiler": True,
+            },
+            {
+                "role": "projection",
+                "relative_path": spec.projection_filename,
+                "managed_by_compiler": True,
+            },
+            {
+                "role": "install_surface",
+                "relative_path": spec.install_surface_filename,
+                "managed_by_compiler": True,
+            },
+            {
+                "role": "manifest",
+                "relative_path": "manifest.json",
+                "managed_by_compiler": True,
+            },
+        ],
+        "external_assets": [policy.to_metadata() for policy in spec.external_asset_policies],
+    }
+
+
+def render_install_surface_markdown(install_surface: Mapping[str, object]) -> list[str]:
+    """Render a concise markdown section describing the generated host bundle/install surface."""
+    lines = [
+        "## Host Bundle / Install Surface",
+        f"- install_strategy: `{install_surface.get('install_strategy', '-')}`",
+        f"- default_output_dir: `{install_surface.get('default_output_dir', '-')}`",
+        f"- resolved_output_dir: `{install_surface.get('resolved_output_dir', '-')}`",
+    ]
+    generated_assets = install_surface.get("generated_assets")
+    if isinstance(generated_assets, list) and generated_assets:
+        lines.append("- generated assets:")
+        for asset in generated_assets:
+            if not isinstance(asset, Mapping):
+                continue
+            role = asset.get("role", "-")
+            relative_path = asset.get("relative_path", "-")
+            lines.append(f"  - {role}: `{relative_path}`")
+    external_assets = install_surface.get("external_assets")
+    if isinstance(external_assets, list) and external_assets:
+        lines.append("- external assets (not compiler-managed):")
+        for asset in external_assets:
+            if not isinstance(asset, Mapping):
+                continue
+            path = asset.get("path", "-")
+            owner = asset.get("owner", "-")
+            rationale = asset.get("rationale", "-")
+            lines.append(f"  - `{path}` owner={owner} — {rationale}")
+    else:
+        lines.append("- external assets (not compiler-managed): none")
+    lines.append("")
+    return lines
 
 
 def fingerprint_map(entries: list[dict[str, object]] | list[Any]) -> dict[str, str]:

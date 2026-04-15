@@ -5,7 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from aiwf.adapters import resolve_adapter_contract
-from aiwf.compilers.base import CompileContext, CompilerSpec, build_projection_document, compile_host_projection
+from aiwf.compilers.base import (
+    CompileContext,
+    CompilerSpec,
+    ExternalAssetPolicy,
+    build_install_surface_document,
+    build_projection_document,
+    compile_host_projection,
+    render_install_surface_markdown,
+)
 from aiwf.loader import load_gate_set, load_policy, load_runbook
 
 
@@ -25,6 +33,7 @@ def compile_claude(ai_root: str | Path, output_dir: str | Path) -> dict[str, Pat
 def _build_compiled_markdown(context: CompileContext) -> str:
     manual_contract = CLAUDE_COMPILER_SPEC.variants["manual"]
     auto_contract = CLAUDE_COMPILER_SPEC.variants["auto"]
+    install_surface = build_install_surface_document(spec=CLAUDE_COMPILER_SPEC, output_dir=context.output_dir)
     sections: list[str] = [
         "# Claude Workflow Bundle",
         "",
@@ -32,6 +41,7 @@ def _build_compiled_markdown(context: CompileContext) -> str:
         "- intended_host: Claude Code",
         f"- host_projection: `{CLAUDE_COMPILER_SPEC.projection_filename}`",
         "- drift_manifest: `manifest.json`",
+        f"- install_surface: `{CLAUDE_COMPILER_SPEC.install_surface_filename}`",
         "",
         "## Claude Host Contract",
         f"- stored_runtime_key: `{CLAUDE_COMPILER_SPEC.stored_runtime_key}`",
@@ -54,6 +64,7 @@ def _build_compiled_markdown(context: CompileContext) -> str:
         CLAUDE_COMMANDS["resume"],
         "```",
         "",
+        *render_install_surface_markdown(install_surface),
         "## Projection Traceability Index",
         "| kind | logical_name | source | sha256 |",
         "| --- | --- | --- | --- |",
@@ -124,7 +135,11 @@ def _build_compiled_markdown(context: CompileContext) -> str:
     return "\n".join(sections)
 
 
-def _build_projection(context: CompileContext, bundle_sha256: str) -> dict[str, object]:
+def _build_projection(
+    context: CompileContext,
+    bundle_sha256: str,
+    install_surface: dict[str, object],
+) -> dict[str, object]:
     manual_contract = CLAUDE_COMPILER_SPEC.variants["manual"]
     auto_contract = CLAUDE_COMPILER_SPEC.variants["auto"]
     return build_projection_document(
@@ -132,8 +147,10 @@ def _build_projection(context: CompileContext, bundle_sha256: str) -> dict[str, 
         source_ai_root=context.ai_root,
         source_index=context.source_index,
         bundle_sha256=bundle_sha256,
+        install_surface=install_surface,
         artifacts={
             "bundle": CLAUDE_COMPILER_SPEC.bundle_filename,
+            "install_surface": CLAUDE_COMPILER_SPEC.install_surface_filename,
             "manifest": "manifest.json",
         },
         commands=CLAUDE_COMMANDS,
@@ -191,13 +208,15 @@ CLAUDE_COMPILER_SPEC = CompilerSpec(
     projection_name="claude-host-projection",
     variant_namespace="claude",
     compiler_name="aiwf.compile.claude",
-    projection_contract="claude-host-projection-v2",
+    projection_contract="claude-host-projection-v3",
     host_name="claude_code",
     host_display_name="Claude Code",
     stored_runtime_key="host_contract",
     default_variant="manual",
+    default_output_dir=".claude/compiled",
     bundle_filename="claude-bundle.md",
     projection_filename="claude-projection.json",
+    install_surface_filename="install-surface.json",
     bundle_manifest_key="claude_bundle",
     variants={
         "manual": resolve_adapter_contract("claude", auto=False),
@@ -205,4 +224,15 @@ CLAUDE_COMPILER_SPEC = CompilerSpec(
     },
     bundle_builder=_build_compiled_markdown,
     projection_builder=_build_projection,
+    external_asset_policies=(
+        ExternalAssetPolicy(
+            path=".claude/skills",
+            owner="handwritten",
+            managed_by_compiler=False,
+            rationale=(
+                "Claude skill prompts remain handwritten source assets; compile only owns generated "
+                "bundle artifacts under .claude/compiled."
+            ),
+        ),
+    ),
 )

@@ -1,17 +1,17 @@
 {
   "schema_version": 2,
-  "projection_name": "claude-host-projection",
+  "projection_name": "rp-host-projection",
   "host": {
-    "name": "claude_code",
-    "display_name": "Claude Code",
+    "name": "repoprompt",
+    "display_name": "RepoPrompt",
     "stored_runtime_key": "host_contract",
-    "default_variant": "claude/manual",
+    "default_variant": "rp/manual",
     "variants": {
       "manual": {
-        "adapter": "claude",
+        "adapter": "rp",
         "mode": "manual",
         "capabilities": {
-          "supports_auto_execution": true,
+          "supports_auto_execution": false,
           "requires_explicit_review_handoff": true
         },
         "review": {
@@ -30,13 +30,16 @@
           "linked_report_artifact_field": "prompt_file"
         },
         "native_runtime": {
-          "enabled": false,
-          "command_candidates": [],
-          "install_hint": null
+          "enabled": true,
+          "command_candidates": [
+            "rp",
+            "rp-cli"
+          ],
+          "install_hint": "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) to make RP native-ready; manual handoff remains supported."
         }
       },
       "auto": {
-        "adapter": "claude",
+        "adapter": "rp",
         "mode": "auto",
         "capabilities": {
           "supports_auto_execution": true,
@@ -58,54 +61,53 @@
           "linked_report_artifact_field": "response_file"
         },
         "native_runtime": {
-          "enabled": false,
-          "command_candidates": [],
-          "install_hint": null
+          "enabled": true,
+          "command_candidates": [
+            "rp",
+            "rp-cli"
+          ],
+          "install_hint": "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) to make RP native-ready; manual handoff remains supported."
         }
       }
     }
   },
   "artifacts": {
-    "bundle": "claude-bundle.md",
+    "bundle": "rp-bundle.md",
     "install_surface": "install-surface.json",
     "manifest": "manifest.json"
   },
   "install_surface": {
     "install_strategy": "use_compiled_output_directory",
-    "default_output_dir": ".claude/compiled",
+    "default_output_dir": ".rp/compiled",
     "generated_asset_roles": [
       "bundle",
       "projection",
       "install_surface",
       "manifest"
     ],
-    "external_assets": [
-      {
-        "path": ".claude/skills",
-        "owner": "handwritten",
-        "managed_by_compiler": false,
-        "rationale": "Claude skill prompts remain handwritten source assets; compile only owns generated bundle artifacts under .claude/compiled."
-      }
-    ]
+    "external_assets": []
   },
   "commands": {
-    "plan": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude",
-    "implement": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude",
+    "plan": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter rp",
+    "implement": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp",
     "review": "uv run aiwf run review --run-id <run_id>",
     "resume": "uv run aiwf resume <run_id>"
   },
   "workflow_contract": {
     "plan": {
-      "entrypoint": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude",
+      "entrypoint": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter rp",
       "primary_artifacts": [
         "context-pack.md",
         "exec-plan.md"
-      ]
+      ],
+      "auto_entrypoint": "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter rp --auto"
     },
     "implement": {
-      "entrypoint": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude",
-      "manual_handoff_artifact": "claude-implement-prompt.md",
-      "resume_boundary": "Use `uv run aiwf resume <run_id>` after manual implement handoff."
+      "entrypoint": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp",
+      "manual_handoff_artifact": "rp-agent-implement-prompt.md",
+      "auto_stage_output_artifact": "rp-agent-implement-response.md",
+      "resume_boundary": "Use `uv run aiwf resume <run_id>` after manual RepoPrompt implement handoff.",
+      "auto_entrypoint": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp --auto"
     },
     "review": {
       "entrypoint": "uv run aiwf run review --run-id <run_id>",
