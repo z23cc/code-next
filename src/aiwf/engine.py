@@ -13,6 +13,7 @@ from aiwf.gates import run_gates
 from aiwf.loader import load_gate_set, load_policy, load_runbook, load_task
 from aiwf.models import (
     EventRecord,
+    GateSet,
     RunArtifactRef,
     RunDiagnostics,
     RunGateEvidence,
@@ -21,10 +22,13 @@ from aiwf.models import (
     RunProvenance,
     RunProvenanceArtifact,
     RunReviewEvidence,
+    RunbookSpec,
     RunStatus,
     RunTimelineEntry,
     StageResult,
+    StageSpec,
     TaskSpec,
+    VerifyReport,
     WorkReceipt,
 )
 from aiwf.state import RunStateManager
@@ -32,6 +36,8 @@ from aiwf.state import RunStateManager
 
 class WorkflowEngine:
     """Coordinate task loading, adapter execution, state, and artifacts."""
+
+    _SUPPORTED_STAGE_NAMES = ("discover", "plan", "implement", "review")
 
     def __init__(
         self,
@@ -49,6 +55,7 @@ class WorkflowEngine:
         self.state_manager = state_manager or RunStateManager(self.ai_root)
         self.host_contract = host_contract or adapter.host_contract
         self.adapter_resolver = adapter_resolver
+        self._active_runbook: RunbookSpec | None = None
         if self.adapter.host_contract != self.host_contract:
             raise ValueError("Configured adapter does not match the provided host contract")
 
@@ -256,6 +263,7 @@ class WorkflowEngine:
             self._record_stage_result(run_id, result)
             self.state_manager.update_run(run_id, last_completed_stage="implement", data=self._workflow_data("implement"))
             if result.status is RunStatus.blocked:
+                self._assert_pause_allowed("implement", RunStatus.blocked, run_dir=run_dir)
                 self.state_manager.transition(run_id, RunStatus.blocked, stage="implement")
                 return
             self._ensure_stage_passed(result)
@@ -263,7 +271,7 @@ class WorkflowEngine:
 
         if start_after_stage in {"implement", "gates"}:
             gate_set = load_gate_set(self.ai_root / "gates" / f"{task.gates}.yaml")
-            report = run_gates(gate_set, self.repo_root)
+            report = self._run_gates_with_retry(gate_set)
             store.write_verify_report(report)
             self.state_manager.update_run(run_id, last_completed_stage="gates", data=self._workflow_data("implement"))
 
@@ -284,6 +292,20 @@ class WorkflowEngine:
                 )
                 return
 
+            if not self._stage_required("review"):
+                self._write_receipt(
+                    store,
+                    run_id,
+                    RunStatus.passed,
+                    "Implementation workflow completed successfully.",
+                    ["context-pack.md", "exec-plan.md", "verify-report.json", "work-receipt.json"],
+                    notes=["Review stage skipped by runbook strategy."],
+                )
+                self.state_manager.transition(run_id, RunStatus.passed, stage="gates")
+                return
+
+            if self._requires_explicit_review_handoff():
+                self._assert_pause_allowed("implement", RunStatus.needs_review, run_dir=run_dir)
             self.state_manager.transition(run_id, RunStatus.needs_review, stage="gates")
             if self._requires_explicit_review_handoff():
                 return
@@ -327,6 +349,7 @@ class WorkflowEngine:
             store.write_review_report(review_report)
             self.state_manager.update_run(run_id, last_completed_stage="review", data=self._workflow_data(workflow_name))
             if self._requires_explicit_review_handoff(review_report):
+                self._assert_pause_allowed("review", RunStatus.blocked, run_dir=run_dir)
                 self.state_manager.transition(run_id, RunStatus.blocked, stage="review")
                 return
         else:
@@ -810,8 +833,135 @@ class WorkflowEngine:
         return artifact_name.strip() if isinstance(artifact_name, str) and artifact_name.strip() else None
 
     def _load_supporting_specs(self, task: TaskSpec) -> None:
-        load_runbook(self.ai_root / "runbooks" / f"{task.runbook}.md")
+        runbook_path = self.ai_root / "runbooks" / f"{task.runbook}.md"
+        runbook = load_runbook(runbook_path)
+        self._validate_runbook_strategy(runbook, runbook_path)
+        self._active_runbook = runbook
         load_policy(self.ai_root / "policies" / f"{task.policy}.md")
+
+    def _validate_runbook_strategy(self, runbook: RunbookSpec, runbook_path: Path) -> None:
+        # Stage presence is part of the minimal strategy contract here; the engine
+        # still owns the canonical discover -> plan -> implement -> review progression.
+        stage_map = {stage.name: stage for stage in runbook.stages}
+        missing = [stage_name for stage_name in self._SUPPORTED_STAGE_NAMES if stage_name not in stage_map]
+        if missing:
+            raise StateError(
+                f"Runbook is missing required stage definitions: {', '.join(missing)}",
+                path=runbook_path,
+                stage="load_runbook_strategy",
+            )
+
+        unsupported = [stage.name for stage in runbook.stages if stage.name not in self._SUPPORTED_STAGE_NAMES]
+        if unsupported:
+            raise StateError(
+                f"Runbook declares unsupported stages for the minimal strategy layer: {', '.join(unsupported)}",
+                path=runbook_path,
+                stage="load_runbook_strategy",
+            )
+
+        for stage in runbook.stages:
+            if stage.name in {"discover", "plan"}:
+                self._require_stage_required(stage, runbook_path)
+                self._require_zero_retry_limit(stage, runbook_path)
+                self._require_no_pause_on(stage, runbook_path)
+                continue
+
+            if stage.name == "implement":
+                self._require_stage_required(stage, runbook_path)
+                unsupported_pause = sorted(set(stage.pause_on) - {"blocked", "needs_review"})
+                if unsupported_pause:
+                    raise StateError(
+                        f"Implement stage pause_on contains unsupported statuses: {', '.join(unsupported_pause)}",
+                        path=runbook_path,
+                        stage="load_runbook_strategy",
+                    )
+                continue
+
+            if stage.name == "review":
+                self._require_zero_retry_limit(stage, runbook_path)
+                unsupported_pause = sorted(set(stage.pause_on) - {"blocked"})
+                if unsupported_pause:
+                    raise StateError(
+                        f"Review stage pause_on contains unsupported statuses: {', '.join(unsupported_pause)}",
+                        path=runbook_path,
+                        stage="load_runbook_strategy",
+                    )
+                if not stage.required and stage.pause_on:
+                    raise StateError(
+                        "Optional review stage cannot declare pause_on boundaries",
+                        path=runbook_path,
+                        stage="load_runbook_strategy",
+                    )
+
+    def _require_stage_required(self, stage: StageSpec, runbook_path: Path) -> None:
+        if not stage.required:
+            raise StateError(
+                f"Stage {stage.name!r} cannot be optional in the minimal strategy layer",
+                path=runbook_path,
+                stage="load_runbook_strategy",
+            )
+
+    def _require_zero_retry_limit(self, stage: StageSpec, runbook_path: Path) -> None:
+        if stage.retry_limit != 0:
+            raise StateError(
+                f"Stage {stage.name!r} does not support retry_limit in the minimal strategy layer",
+                path=runbook_path,
+                stage="load_runbook_strategy",
+            )
+
+    def _require_no_pause_on(self, stage: StageSpec, runbook_path: Path) -> None:
+        if stage.pause_on:
+            raise StateError(
+                f"Stage {stage.name!r} does not support pause_on in the minimal strategy layer",
+                path=runbook_path,
+                stage="load_runbook_strategy",
+            )
+
+    def _stage_spec(self, stage_name: str) -> StageSpec | None:
+        if self._active_runbook is None:
+            return None
+        for stage in self._active_runbook.stages:
+            if stage.name == stage_name:
+                return stage
+        return None
+
+    def _stage_required(self, stage_name: str) -> bool:
+        stage = self._stage_spec(stage_name)
+        return True if stage is None else stage.required
+
+    def _stage_retry_limit(self, stage_name: str) -> int:
+        stage = self._stage_spec(stage_name)
+        return 0 if stage is None else stage.retry_limit
+
+    def _stage_pause_targets(self, stage_name: str) -> set[RunStatus]:
+        stage = self._stage_spec(stage_name)
+        if stage is not None and stage.pause_on:
+            return {RunStatus(status) for status in stage.pause_on}
+        # When pause_on is left unset, preserve the legacy engine pause boundaries
+        # so existing/default runbooks do not need to declare them explicitly.
+        if stage_name == "implement":
+            return {RunStatus.blocked, RunStatus.needs_review}
+        if stage_name == "review":
+            return {RunStatus.blocked}
+        return set()
+
+    def _assert_pause_allowed(self, stage_name: str, status: RunStatus, *, run_dir: Path) -> None:
+        if status in self._stage_pause_targets(stage_name):
+            return
+        raise StateError(
+            f"Runbook strategy does not allow {status.value!r} pause at stage {stage_name!r}",
+            path=run_dir,
+            stage=stage_name,
+        )
+
+    def _run_gates_with_retry(self, gate_set: GateSet) -> VerifyReport:
+        # retry_limit is only interpreted for implement-stage gate verification.
+        report = run_gates(gate_set, self.repo_root)
+        for _ in range(self._stage_retry_limit("implement")):
+            if report.passed:
+                break
+            report = run_gates(gate_set, self.repo_root)
+        return report
 
     def _load_task_from_meta(self, meta: RunMeta) -> TaskSpec:
         if not meta.task_path:
