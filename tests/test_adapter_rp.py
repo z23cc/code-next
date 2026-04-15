@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from aiwf.adapters.rp_agent import RpAgentAdapter
-from aiwf.exceptions import AdapterError
+from aiwf.exceptions import AdapterError, ErrorCode
 from aiwf.models import RunStatus, TaskSpec
 
 
@@ -91,6 +91,89 @@ def test_rp_agent_adapter_auto_mode_uses_subprocess_output(tmp_path: Path) -> No
     assert review["mode"] == "auto"
     assert review["response_excerpt"] == "stdin:yes"
     assert (run_dir / "rp-agent-review-response.md").read_text(encoding="utf-8") == "stdin:yes"
+
+
+def test_rp_agent_adapter_auto_mode_uses_protocol_envelopes_when_supported(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    runtime_script = _write_fake_rp_runtime(tmp_path)
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        auto=True,
+        rp_command=[sys.executable, str(runtime_script), "protocol-success"],
+    )
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+    review = adapter.review(task, run_dir)
+
+    assert plan == "protocol:plan:plan:repoprompt-adapter-task:no-run"
+    assert result.status is RunStatus.passed
+    assert (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8") == (
+        "protocol:execute:implement:repoprompt-adapter-task:test-run"
+    )
+    assert review["response_excerpt"] == "protocol:review:review:repoprompt-adapter-task:test-run"
+    assert (run_dir / "rp-agent-review-response.md").read_text(encoding="utf-8") == (
+        "protocol:review:review:repoprompt-adapter-task:test-run"
+    )
+
+
+def test_rp_agent_adapter_auto_mode_maps_partial_protocol_response(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    runtime_script = _write_fake_rp_runtime(tmp_path)
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        auto=True,
+        rp_command=[sys.executable, str(runtime_script), "protocol-partial"],
+    )
+
+    with pytest.raises(AdapterError) as exc_info:
+        adapter.execute(task, "# plan", run_dir)
+
+    assert exc_info.value.error_code is ErrorCode.ADAPTER_FAILURE
+    assert "[EXECUTION_INTERRUPTED]" in str(exc_info.value)
+    assert "Partial result: partial implementation" in str(exc_info.value)
+    assert "stage=implement" in str(exc_info.value)
+
+
+def test_rp_agent_adapter_auto_mode_falls_back_to_legacy_when_probe_fails(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    runtime_script = _write_fake_rp_runtime(tmp_path)
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        auto=True,
+        rp_command=[sys.executable, str(runtime_script), "legacy"],
+    )
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+    review = adapter.review(task, run_dir)
+
+    assert plan == "legacy:raw"
+    assert result.status is RunStatus.passed
+    assert (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8") == "legacy:raw"
+    assert review["response_excerpt"] == "legacy:raw"
+
+
+def test_rp_agent_adapter_auto_mode_falls_back_to_legacy_on_unsupported_version(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    runtime_script = _write_fake_rp_runtime(tmp_path)
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        auto=True,
+        rp_command=[sys.executable, str(runtime_script), "protocol-version-fallback"],
+    )
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+    review = adapter.review(task, run_dir)
+
+    assert plan == "legacy:raw"
+    assert result.status is RunStatus.passed
+    assert (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8") == "legacy:raw"
+    assert review["response_excerpt"] == "legacy:raw"
 
 
 def test_rp_agent_adapter_auto_mode_raises_when_runtime_missing(tmp_path: Path) -> None:
@@ -234,3 +317,82 @@ def _create_workspace(tmp_path: Path) -> tuple[Path, Path, TaskSpec]:
         body="Implement the RepoPrompt adapter test workflow.",
     )
     return repo_root, run_dir, task
+
+
+def _write_fake_rp_runtime(tmp_path: Path) -> Path:
+    script_path = tmp_path / "fake_rp_runtime.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import json",
+                "import sys",
+                "",
+                "mode = sys.argv[1]",
+                "",
+                "if '--aiwf-protocol-version' in sys.argv[2:]:",
+                "    if mode.startswith('protocol-'):",
+                "        print(json.dumps({'protocol': 'aiwf-rp-native', 'version': 1, 'capabilities': []}))",
+                "        raise SystemExit(0)",
+                "    print('legacy probe unsupported')",
+                "    raise SystemExit(1)",
+                "",
+                "raw = sys.stdin.read()",
+                "if mode == 'protocol-success':",
+                "    payload = json.loads(raw)",
+                "    context = payload.get('context', {})",
+                "    content = (",
+                "        f\"protocol:{payload.get('request_type')}:{payload.get('stage')}:\"",
+                "        f\"{context.get('task_slug', 'missing')}:{context.get('run_id', 'no-run')}\"",
+                "    )",
+                "    print(json.dumps({",
+                "        'protocol': 'aiwf-rp-native',",
+                "        'version': 1,",
+                "        'status': 'ok',",
+                "        'content': content,",
+                "        'metadata': {},",
+                "        'diagnostics': None,",
+                "    }))",
+                "elif mode == 'protocol-partial':",
+                "    print(json.dumps({",
+                "        'protocol': 'aiwf-rp-native',",
+                "        'version': 1,",
+                "        'status': 'partial',",
+                "        'content': 'partial implementation',",
+                "        'error': {",
+                "            'code': 'EXECUTION_INTERRUPTED',",
+                "            'message': 'Interrupted mid-run',",
+                "            'retriable': True,",
+                "            'detail': {},",
+                "        },",
+                "        'metadata': {},",
+                "        'diagnostics': None,",
+                "    }))",
+                "elif mode == 'protocol-version-fallback':",
+                "    if raw.lstrip().startswith('{'):",
+                "        print(json.dumps({",
+                "            'protocol': 'aiwf-rp-native',",
+                "            'version': 1,",
+                "            'status': 'error',",
+                "            'content': None,",
+                "            'error': {",
+                "                'code': 'UNSUPPORTED_VERSION',",
+                "                'message': 'Runtime requires a different protocol version.',",
+                "                'retriable': False,",
+                "                'detail': {'supported_version': 2},",
+                "            },",
+                "            'metadata': {},",
+                "            'diagnostics': None,",
+                "        }))",
+                "    else:",
+                "        print('legacy:raw')",
+                "else:",
+                "    prefix = 'json' if raw.lstrip().startswith('{') else 'raw'",
+                "    print(f'legacy:{prefix}')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return script_path

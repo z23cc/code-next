@@ -16,6 +16,14 @@ from aiwf.models import RunStatus, StageResult, TaskSpec
 # Safety-net exclusions applied before `.gitignore` rules.
 # These intentionally cannot be re-included via negation patterns.
 _MAX_REVIEW_SUMMARY_ITEMS = 8
+_RP_PROTOCOL_NAME = "aiwf-rp-native"
+_RP_PROTOCOL_VERSION = 1
+_RP_PROTOCOL_PROBE_ARGUMENT = "--aiwf-protocol-version"
+_RP_REQUEST_TYPE_BY_STAGE = {
+    "plan": "plan",
+    "implement": "execute",
+    "review": "review",
+}
 
 
 _SKIPPED_PATH_PARTS = {
@@ -108,6 +116,8 @@ class RpAgentAdapter:
         self.auto = self.host_contract.auto
         self.rp_command = list(rp_command) if rp_command is not None else None
         self.rp_timeout = rp_timeout
+        self._selected_rp_command: tuple[str, ...] | None = None
+        self._selected_protocol_version: int | None = None
 
     def discover(self, task: TaskSpec, run_dir: Path) -> str:
         """Build a RepoPrompt-oriented local context pack without invoking an external host."""
@@ -147,7 +157,7 @@ class RpAgentAdapter:
         """Return a RepoPrompt planning brief or native runtime output."""
         prompt = self._build_plan_prompt(task, context)
         if self.auto:
-            return self._run_rp(prompt, stage="plan")
+            return self._run_rp(prompt, stage="plan", task=task)
         return "\n".join(
             [
                 f"# RepoPrompt Agent Plan for {task.title}",
@@ -166,7 +176,7 @@ class RpAgentAdapter:
         """Write a manual handoff brief or execute via a native RepoPrompt runtime."""
         prompt = self._build_execute_prompt(task, plan, run_dir)
         if self.auto:
-            response = self._run_rp(prompt, stage="implement", path=run_dir)
+            response = self._run_rp(prompt, stage="implement", path=run_dir, task=task)
             response_path = run_dir / "rp-agent-implement-response.md"
             response_path.write_text(response, encoding="utf-8")
             return StageResult(
@@ -193,7 +203,7 @@ class RpAgentAdapter:
         prompt = self._build_review_prompt(task, run_dir, evidence_summary=evidence_summary)
         evidence_files = self._review_evidence_files(run_dir)
         if self.auto:
-            response = self._run_rp(prompt, stage="review", path=run_dir)
+            response = self._run_rp(prompt, stage="review", path=run_dir, task=task)
             response_path = run_dir / "rp-agent-review-response.md"
             response_path.write_text(response, encoding="utf-8")
             return {
@@ -225,53 +235,52 @@ class RpAgentAdapter:
             "evidence_summary": evidence_summary,
         }
 
-    def _run_rp(self, prompt: str, *, stage: str, path: Path | None = None) -> str:
+    def _run_rp(
+        self,
+        prompt: str,
+        *,
+        stage: str,
+        path: Path | None = None,
+        task: TaskSpec | None = None,
+    ) -> str:
+        command, protocol_version = self._resolve_rp_runtime(stage=stage, path=path)
+        runtime_input = prompt
+        if protocol_version is not None:
+            runtime_input = json.dumps(
+                self._build_protocol_request(prompt, stage=stage, path=path, task=task, version=protocol_version),
+                ensure_ascii=False,
+            )
+
+        completed = self._invoke_rp_runtime(command, runtime_input, stage=stage, path=path)
+        if protocol_version is not None:
+            payload = self._load_protocol_payload(completed.stdout)
+            if payload is not None:
+                if self._should_fallback_to_legacy(payload):
+                    self._selected_protocol_version = None
+                    return self._handle_legacy_rp_result(
+                        self._invoke_rp_runtime(command, prompt, stage=stage, path=path),
+                        stage=stage,
+                        path=path,
+                    )
+                return self._handle_protocol_response(payload, stage=stage, path=path)
+        return self._handle_legacy_rp_result(completed, stage=stage, path=path)
+
+    def _resolve_rp_runtime(self, *, stage: str, path: Path | None = None) -> tuple[list[str], int | None]:
+        if self._selected_rp_command is not None:
+            return list(self._selected_rp_command), self._selected_protocol_version
+
         commands = [self.rp_command] if self.rp_command is not None else [
             [candidate] for candidate in self.host_contract.native_runtime.command_candidates
         ]
         missing_runtime = False
         for command in commands:
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=self.repo_root,
-                    input=prompt,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=self.rp_timeout,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise AdapterError(
-                    "RepoPrompt native runtime timed out",
-                    path=path or self.repo_root,
-                    stage=stage,
-                    error_code=ErrorCode.ADAPTER_TIMEOUT,
-                ) from exc
-            except FileNotFoundError:
+            runtime_available, protocol_version = self._probe_rp_protocol(command)
+            if not runtime_available:
                 missing_runtime = True
                 continue
-            except OSError as exc:
-                raise AdapterError(
-                    "Failed to invoke RepoPrompt native runtime",
-                    path=path or self.repo_root,
-                    stage=stage,
-                    error_code=ErrorCode.ADAPTER_FAILURE,
-                ) from exc
-
-            if completed.returncode != 0:
-                message = (
-                    completed.stderr.strip()
-                    or completed.stdout.strip()
-                    or "RepoPrompt native runtime returned a failure"
-                )
-                raise AdapterError(
-                    message,
-                    path=path or self.repo_root,
-                    stage=stage,
-                    error_code=ErrorCode.ADAPTER_FAILURE,
-                )
-            return completed.stdout.strip()
+            self._selected_rp_command = tuple(command)
+            self._selected_protocol_version = protocol_version
+            return list(self._selected_rp_command), self._selected_protocol_version
 
         if missing_runtime:
             raise AdapterError(
@@ -286,6 +295,196 @@ class RpAgentAdapter:
             stage=stage,
             error_code=ErrorCode.ADAPTER_UNAVAILABLE,
         )
+
+    def _probe_rp_protocol(self, command: Sequence[str]) -> tuple[bool, int | None]:
+        try:
+            completed = subprocess.run(
+                [*command, _RP_PROTOCOL_PROBE_ARGUMENT],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=min(self.rp_timeout, 10),
+            )
+        except FileNotFoundError:
+            return False, None
+        except (OSError, subprocess.TimeoutExpired):
+            return True, None
+
+        payload = self._load_protocol_payload(completed.stdout)
+        if completed.returncode == 0 and payload is not None:
+            return True, _RP_PROTOCOL_VERSION
+        return True, None
+
+    def _invoke_rp_runtime(
+        self,
+        command: Sequence[str],
+        runtime_input: str,
+        *,
+        stage: str,
+        path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                list(command),
+                cwd=self.repo_root,
+                input=runtime_input,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.rp_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AdapterError(
+                "RepoPrompt native runtime timed out",
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_TIMEOUT,
+            ) from exc
+        except FileNotFoundError as exc:
+            raise AdapterError(
+                "RepoPrompt native runtime is not available",
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_UNAVAILABLE,
+            ) from exc
+        except OSError as exc:
+            raise AdapterError(
+                "Failed to invoke RepoPrompt native runtime",
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_FAILURE,
+            ) from exc
+
+    def _build_protocol_request(
+        self,
+        prompt: str,
+        *,
+        stage: str,
+        path: Path | None = None,
+        task: TaskSpec | None = None,
+        version: int,
+    ) -> dict[str, Any]:
+        context: dict[str, object] = {
+            "adapter": "rp",
+            "mode": "auto",
+        }
+        if task is not None:
+            context["task_title"] = task.title
+            if task.slug is not None:
+                context["task_slug"] = task.slug
+        if path is not None:
+            run_dir = path if path.is_dir() else path.parent
+            try:
+                relative_run_dir = run_dir.relative_to(self.repo_root)
+                context["run_dir"] = relative_run_dir.as_posix()
+            except ValueError:
+                context["run_dir"] = str(run_dir)
+            context["run_id"] = run_dir.name
+        return {
+            "protocol": _RP_PROTOCOL_NAME,
+            "version": version,
+            "request_type": _RP_REQUEST_TYPE_BY_STAGE.get(stage, stage),
+            "stage": stage,
+            "prompt": prompt,
+            "context": context,
+            "options": {"timeout_seconds": self.rp_timeout},
+            "metadata": {},
+        }
+
+    def _load_protocol_payload(self, raw_output: str) -> dict[str, Any] | None:
+        stripped = raw_output.strip()
+        if not stripped:
+            return None
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("protocol") != _RP_PROTOCOL_NAME:
+            return None
+        version = payload.get("version")
+        if not isinstance(version, int) or version < _RP_PROTOCOL_VERSION:
+            return None
+        return payload
+
+    def _should_fallback_to_legacy(self, payload: dict[str, Any]) -> bool:
+        if payload.get("status") != "error":
+            return False
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return False
+        return error.get("code") == "UNSUPPORTED_VERSION"
+
+    def _handle_protocol_response(self, payload: dict[str, Any], *, stage: str, path: Path | None = None) -> str:
+        status = payload.get("status")
+        content = payload.get("content")
+        if status == "ok":
+            if not isinstance(content, str):
+                raise AdapterError(
+                    "RepoPrompt native runtime returned an invalid protocol response",
+                    path=path or self.repo_root,
+                    stage=stage,
+                    error_code=ErrorCode.ADAPTER_FAILURE,
+                )
+            return content.strip()
+        if status not in {"error", "partial"}:
+            raise AdapterError(
+                "RepoPrompt native runtime returned an invalid protocol status",
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_FAILURE,
+            )
+
+        error = payload.get("error")
+        runtime_code = None
+        runtime_message = "RepoPrompt native runtime returned an error"
+        if isinstance(error, dict):
+            code_value = error.get("code")
+            message_value = error.get("message")
+            if isinstance(code_value, str) and code_value.strip():
+                runtime_code = code_value.strip()
+            if isinstance(message_value, str) and message_value.strip():
+                runtime_message = message_value.strip()
+        message_parts = [runtime_message]
+        if runtime_code is not None:
+            message_parts.insert(0, f"[{runtime_code}]")
+        partial_content = content.strip() if isinstance(content, str) and content.strip() else None
+        if status == "partial" and partial_content is not None:
+            message_parts.append(f"Partial result: {partial_content}")
+        raise AdapterError(
+            " ".join(message_parts),
+            path=path or self.repo_root,
+            stage=stage,
+            error_code=self._map_protocol_error_code(runtime_code),
+        )
+
+    def _map_protocol_error_code(self, runtime_code: str | None) -> ErrorCode:
+        if runtime_code == "EXECUTION_TIMEOUT":
+            return ErrorCode.ADAPTER_TIMEOUT
+        return ErrorCode.ADAPTER_FAILURE
+
+    def _handle_legacy_rp_result(
+        self,
+        completed: subprocess.CompletedProcess[str],
+        *,
+        stage: str,
+        path: Path | None = None,
+    ) -> str:
+        if completed.returncode != 0:
+            message = (
+                completed.stderr.strip()
+                or completed.stdout.strip()
+                or "RepoPrompt native runtime returned a failure"
+            )
+            raise AdapterError(
+                message,
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_FAILURE,
+            )
+        return completed.stdout.strip()
 
     def _build_plan_prompt(self, task: TaskSpec, context: str) -> str:
         return "\n".join(
