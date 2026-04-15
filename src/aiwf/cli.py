@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
 
@@ -21,6 +24,7 @@ from aiwf.contracts import assess_review_boundary, assess_review_evidence, lint_
 from aiwf.doctor import render_doctor_report, run_doctor
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AiwfError
+from aiwf.models import RunMeta, RunStatus
 from aiwf.state import RunStateManager
 
 app = typer.Typer(
@@ -175,6 +179,118 @@ def _list_run_artifact_names(ai_root: Path, run_id: str) -> set[str]:
 def _format_csv(values: tuple[str, ...] | list[str] | set[str]) -> str:
     flattened = sorted(value for value in values if value)
     return ",".join(flattened) if flattened else "-"
+
+
+@dataclass(frozen=True)
+class _RunRecord:
+    run_id: str
+    run_dir: Path
+    status: RunStatus
+    workflow: str
+    adapter: str
+    created_at: datetime
+    updated_at: datetime
+    last_completed_stage: str | None
+
+
+def _extract_run_workflow(meta: RunMeta) -> str:
+    workflow = str(meta.data.get("workflow", "")).strip()
+    return workflow or "-"
+
+
+def _extract_run_adapter(meta: RunMeta) -> str:
+    host_contract = meta.data.get("host_contract")
+    if isinstance(host_contract, Mapping):
+        adapter = str(host_contract.get("adapter", "")).strip()
+        if adapter:
+            return adapter
+    return "-"
+
+
+def _enumerate_runs(ai_root: Path) -> list[_RunRecord]:
+    runs_dir = ai_root / "runs"
+    if not runs_dir.exists():
+        return []
+    if not runs_dir.is_dir():
+        raise AiwfError("Run root is not a directory", path=runs_dir, stage="list_runs")
+
+    state_manager = RunStateManager(ai_root)
+    records: list[_RunRecord] = []
+    for run_dir in runs_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+        run_id = run_dir.name
+        try:
+            meta = state_manager.load_run(run_id)
+        except AiwfError as exc:
+            raise AiwfError(f"Unable to load run metadata for {run_id}", path=run_dir, stage="list_runs") from exc
+        records.append(
+            _RunRecord(
+                run_id=meta.run_id,
+                run_dir=run_dir,
+                status=meta.status,
+                workflow=_extract_run_workflow(meta),
+                adapter=_extract_run_adapter(meta),
+                created_at=meta.created_at,
+                updated_at=meta.updated_at,
+                last_completed_stage=meta.last_completed_stage,
+            )
+        )
+
+    records.sort(key=lambda entry: (entry.created_at, entry.run_id), reverse=True)
+    return records
+
+
+def _parse_status_filter(raw: str | None, *, default: tuple[RunStatus, ...] = ()) -> set[RunStatus]:
+    if raw is None:
+        return set(default)
+    tokens = [token.strip() for token in raw.split(",") if token.strip()]
+    if not tokens:
+        return set(default)
+
+    statuses: set[RunStatus] = set()
+    for token in tokens:
+        try:
+            statuses.add(RunStatus(token))
+        except ValueError as exc:
+            allowed = ", ".join(status.value for status in RunStatus)
+            raise AiwfError(f"Unknown run status '{token}'. Allowed values: {allowed}") from exc
+    return statuses
+
+
+def _parse_value_filter(raw: str | None) -> set[str]:
+    if raw is None:
+        return set()
+    return {token.strip() for token in raw.split(",") if token.strip()}
+
+
+def _filter_run_records(
+    records: list[_RunRecord],
+    *,
+    statuses: set[RunStatus],
+    workflows: set[str],
+    adapters: set[str],
+) -> list[_RunRecord]:
+    filtered = records
+    if statuses:
+        filtered = [record for record in filtered if record.status in statuses]
+    if workflows:
+        filtered = [record for record in filtered if record.workflow in workflows]
+    if adapters:
+        filtered = [record for record in filtered if record.adapter in adapters]
+    return filtered
+
+
+def _serialize_run_record(record: _RunRecord) -> dict[str, Any]:
+    return {
+        "run_id": record.run_id,
+        "status": record.status.value,
+        "workflow": record.workflow,
+        "adapter": record.adapter,
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+        "last_completed_stage": record.last_completed_stage,
+    }
 
 
 def _build_inspection_payload(ai_root: Path, run_id: str) -> dict[str, Any]:
@@ -448,6 +564,132 @@ def inspect_run(
             typer.echo(json.dumps({"ok": False, "run_id": run_id, "error": str(exc)}, indent=2, ensure_ascii=False))
         else:
             console.print(f"[red]inspect failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("list")
+def list_runs(
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="Comma-separated status filter.")
+    ] = None,
+    workflow: Annotated[
+        str | None,
+        typer.Option("--workflow", help="Comma-separated workflow filter.")
+    ] = None,
+    adapter: Annotated[
+        str | None,
+        typer.Option("--adapter", help="Comma-separated adapter filter.")
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="Maximum number of runs to show.")] = 20,
+    json_output: Annotated[bool, typer.Option("--json", help="Render run list as JSON.")] = False,
+) -> None:
+    """List workflow runs from `.ai/runs/` with optional filters."""
+    try:
+        records = _enumerate_runs(ai_root)
+        filtered = _filter_run_records(
+            records,
+            statuses=_parse_status_filter(status),
+            workflows=_parse_value_filter(workflow),
+            adapters=_parse_value_filter(adapter),
+        )
+        filtered = filtered[:limit]
+        payload = [_serialize_run_record(record) for record in filtered]
+        if json_output:
+            typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+        if not payload:
+            typer.echo("No runs found.")
+            return
+        typer.echo("run_id\tstatus\tworkflow\tadapter\tcreated_at\tlast_completed_stage")
+        for record in payload:
+            typer.echo(
+                "\t".join(
+                    [
+                        str(record["run_id"]),
+                        str(record["status"]),
+                        str(record["workflow"]),
+                        str(record["adapter"]),
+                        str(record["created_at"]),
+                        str(record["last_completed_stage"] or "-"),
+                    ]
+                )
+            )
+    except AiwfError as exc:
+        if json_output:
+            typer.echo(json.dumps({"ok": False, "error": str(exc)}, indent=2, ensure_ascii=False))
+        else:
+            console.print(f"[red]list failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("clean")
+def clean_runs(
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    keep: Annotated[int, typer.Option("--keep", min=0, help="Keep N most recent runs per workflow.")] = 10,
+    status: Annotated[
+        str | None,
+        typer.Option(
+            "--status",
+            help="Comma-separated statuses eligible for cleanup. Defaults to passed,canceled.",
+        ),
+    ] = None,
+    workflow: Annotated[
+        str | None,
+        typer.Option("--workflow", help="Comma-separated workflow filter.")
+    ] = None,
+    adapter: Annotated[
+        str | None,
+        typer.Option("--adapter", help="Comma-separated adapter filter.")
+    ] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview runs that would be deleted.")] = False,
+) -> None:
+    """Delete old run directories using safe defaults."""
+    try:
+        records = _enumerate_runs(ai_root)
+        filtered = _filter_run_records(
+            records,
+            statuses=_parse_status_filter(status, default=(RunStatus.passed, RunStatus.canceled)),
+            workflows=_parse_value_filter(workflow),
+            adapters=_parse_value_filter(adapter),
+        )
+
+        grouped: dict[str, list[_RunRecord]] = {}
+        for record in filtered:
+            grouped.setdefault(record.workflow, []).append(record)
+
+        deletable: list[_RunRecord] = []
+        for workflow_records in grouped.values():
+            workflow_records.sort(key=lambda entry: (entry.created_at, entry.run_id), reverse=True)
+            deletable.extend(workflow_records[keep:])
+
+        deletable.sort(key=lambda entry: (entry.created_at, entry.run_id), reverse=True)
+
+        if not deletable:
+            console.print("No runs matched cleanup criteria.")
+            return
+
+        action_prefix = "Would delete" if dry_run else "Deleting"
+        console.print(f"{action_prefix} {len(deletable)} run(s).")
+        for record in deletable:
+            console.print(
+                f"- {record.run_id} status={record.status.value} workflow={record.workflow} "
+                f"adapter={record.adapter}"
+            )
+
+        if dry_run:
+            return
+
+        for record in deletable:
+            try:
+                shutil.rmtree(record.run_dir)
+            except OSError as exc:
+                raise AiwfError("Failed to delete run directory", path=record.run_dir, stage="clean_runs") from exc
+
+        console.print(f"Deleted {len(deletable)} run(s).")
+    except AiwfError as exc:
+        console.print(f"[red]clean failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
 

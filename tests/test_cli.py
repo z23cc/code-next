@@ -10,6 +10,7 @@ from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactCon
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.cli import app
 from aiwf.engine import WorkflowEngine
+from aiwf.models import RunStatus, TaskSpec
 from aiwf.state import RunStateManager
 
 
@@ -1074,6 +1075,157 @@ def test_cli_inspect_json_reports_missing_run_errors(tmp_path: Path) -> None:
     assert payload["ok"] is False
     assert payload["run_id"] == "missing-run"
     assert "missing-run" in payload["error"]
+
+
+def test_cli_list_command_shows_human_readable_columns(tmp_path: Path) -> None:
+    _, ai_root, _ = _create_ai_workspace(tmp_path)
+    run_id = _seed_run(ai_root, workflow="implement", status=RunStatus.passed, adapter="stub")
+
+    result = runner.invoke(app, ["list", "--ai-root", str(ai_root), "--limit", "10"])
+
+    assert result.exit_code == 0
+    assert "run_id\tstatus\tworkflow\tadapter\tcreated_at\tlast_completed_stage" in result.stdout
+    assert run_id in result.stdout
+    assert "\tpassed\timplement\tstub\t" in result.stdout
+
+
+def test_cli_list_command_supports_json_output_and_status_filter(tmp_path: Path) -> None:
+    _, ai_root, _ = _create_ai_workspace(tmp_path)
+    kept_run_id = _seed_run(ai_root, workflow="plan", status=RunStatus.passed, adapter="claude")
+    _seed_run(ai_root, workflow="plan", status=RunStatus.failed, adapter="rp")
+
+    result = runner.invoke(
+        app,
+        [
+            "list",
+            "--ai-root",
+            str(ai_root),
+            "--status",
+            "passed",
+            "--json",
+            "--limit",
+            "10",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, list)
+    assert [entry["run_id"] for entry in payload] == [kept_run_id]
+    assert payload[0]["status"] == "passed"
+    assert payload[0]["workflow"] == "plan"
+    assert payload[0]["adapter"] == "claude"
+
+
+def test_cli_clean_command_dry_run_preserves_runs(tmp_path: Path) -> None:
+    _, ai_root, _ = _create_ai_workspace(tmp_path)
+    for _ in range(3):
+        _seed_run(ai_root, workflow="implement", status=RunStatus.passed, adapter="stub")
+
+    before = {path.name for path in (ai_root / "runs").iterdir() if path.is_dir()}
+
+    result = runner.invoke(
+        app,
+        [
+            "clean",
+            "--ai-root",
+            str(ai_root),
+            "--keep",
+            "1",
+            "--dry-run",
+        ],
+    )
+
+    after = {path.name for path in (ai_root / "runs").iterdir() if path.is_dir()}
+    assert result.exit_code == 0
+    assert before == after
+    assert "Would delete 2 run(s)." in result.stdout
+
+
+def test_cli_clean_command_uses_safe_default_statuses(tmp_path: Path) -> None:
+    _, ai_root, _ = _create_ai_workspace(tmp_path)
+    running_run = _seed_run(ai_root, workflow="implement", status=RunStatus.running, adapter="stub")
+    blocked_run = _seed_run(ai_root, workflow="implement", status=RunStatus.blocked, adapter="stub")
+    passed_run = _seed_run(ai_root, workflow="implement", status=RunStatus.passed, adapter="stub")
+
+    result = runner.invoke(
+        app,
+        [
+            "clean",
+            "--ai-root",
+            str(ai_root),
+            "--keep",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    runs_dir = ai_root / "runs"
+    assert (runs_dir / running_run).exists()
+    assert (runs_dir / blocked_run).exists()
+    assert not (runs_dir / passed_run).exists()
+
+
+def test_cli_clean_command_supports_status_and_workflow_filters(tmp_path: Path) -> None:
+    _, ai_root, _ = _create_ai_workspace(tmp_path)
+    failed_plan_run = _seed_run(ai_root, workflow="plan", status=RunStatus.failed, adapter="claude")
+    failed_implement_run = _seed_run(ai_root, workflow="implement", status=RunStatus.failed, adapter="claude")
+
+    result = runner.invoke(
+        app,
+        [
+            "clean",
+            "--ai-root",
+            str(ai_root),
+            "--status",
+            "failed",
+            "--workflow",
+            "plan",
+            "--keep",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    runs_dir = ai_root / "runs"
+    assert not (runs_dir / failed_plan_run).exists()
+    assert (runs_dir / failed_implement_run).exists()
+
+
+def _seed_run(
+    ai_root: Path,
+    *,
+    workflow: str,
+    status: RunStatus,
+    adapter: str,
+) -> str:
+    state = RunStateManager(ai_root)
+    run_id = state.init_run(
+        TaskSpec(
+            title=f"{workflow} {status.value}",
+            runbook="default",
+            gates="default",
+            policy="repo-policy",
+        )
+    )
+
+    if status != RunStatus.queued:
+        state.transition(run_id, RunStatus.running, stage="discover")
+        if status != RunStatus.running:
+            state.transition(run_id, status, stage="review")
+
+    state.update_run(
+        run_id,
+        last_completed_stage="review",
+        data={
+            "workflow": workflow,
+            "host_contract": {
+                "adapter": adapter,
+                "mode": "manual",
+            },
+        },
+    )
+    return run_id
 
 
 def _create_ai_workspace(
