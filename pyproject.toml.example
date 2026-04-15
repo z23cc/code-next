@@ -1,6 +1,6 @@
 [project]
 name = "aiwf"
-version = "0.1.0"
+version = "0.0.1"
 description = "Python workflow kernel for RepoPrompt / Claude Code / Codex runbooks"
 requires-python = ">=3.11"
 dependencies = [
