@@ -151,6 +151,14 @@ uv run aiwf compile claude
 - 所有 run 都打印 `run_id`
 - 失败时指出 artifact 或日志位置
 
+### 5.2 `compile claude` 最小投影契约
+
+`compile claude` 不应只做简单 bundle 导出；最小可行版本至少应输出：
+
+- 一个 Claude 可直接消费的 markdown bundle
+- 一个显式宿主投影文件（命令、artifact、workflow 边界）
+- 一个带 source fingerprint 与 drift 信息的 manifest
+
 ## 6. 运行目录契约
 
 每次运行都创建：

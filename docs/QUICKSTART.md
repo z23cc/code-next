@@ -66,7 +66,14 @@ uv run aiwf compile claude --output .claude/compiled
 生成内容包括：
 
 - `.claude/compiled/claude-bundle.md`
+- `.claude/compiled/claude-projection.json`
 - `.claude/compiled/manifest.json`
+
+其中：
+
+- `claude-bundle.md` 是 Claude 可直接阅读的合并包
+- `claude-projection.json` 是 Claude 宿主投影契约
+- `manifest.json` 会记录 source fingerprint 与上一次编译相比的 drift 状态
 
 ## 7. Claude Code 技能入口
 

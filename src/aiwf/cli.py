@@ -164,7 +164,7 @@ def compile_claude_command(
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     output: Annotated[Path, typer.Option("--output")] = Path(".claude/compiled"),
 ) -> None:
-    """Compile `.ai/` sources into a Claude-friendly bundle."""
+    """Compile `.ai/` sources into a Claude host projection and drift manifest."""
     try:
         result = compile_claude(ai_root, output)
     except AiwfError as exc:
@@ -172,5 +172,6 @@ def compile_claude_command(
         raise typer.Exit(code=1) from exc
     console.print(
         "[green]compile completed[/green] "
-        f"bundle={result['bundle_path']} manifest={result['manifest_path']}"
+        f"bundle={result['bundle_path']} projection={result['projection_path']} "
+        f"manifest={result['manifest_path']} drift={result['drift_status']}"
     )

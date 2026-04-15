@@ -49,6 +49,7 @@ uv run aiwf compile claude --output .claude/compiled
 - `--auto` 会尝试调用本机 `claude` CLI。
 - `run review` 现在面向已有 run：先让 implement run 到达 `needs_review`，再用 `--run-id` 启动 review。
 - `resume` 会恢复 run 中已存储的 `adapter` / `auto` 设置，而不是要求再次手动指定。
+- `compile claude` 会生成 Claude 宿主投影文件与 drift-aware manifest，而不只是简单 bundle 导出。
 
 ## 产物契约
 
@@ -82,3 +83,13 @@ uv run aiwf compile claude --output .claude/compiled
 - `/rp-review`
 
 这些技能最终调用 `aiwf` CLI，并把关键结果落盘到 `.ai/runs/`。
+
+## Claude 编译投影契约
+
+`uv run aiwf compile claude --output .claude/compiled` 现在会生成：
+
+- `.claude/compiled/claude-bundle.md`：Claude 可读的合并说明与 traceability index
+- `.claude/compiled/claude-projection.json`：显式宿主投影契约（命令、artifact、workflow 边界）
+- `.claude/compiled/manifest.json`：带 source fingerprint / output hash / drift 状态的编译清单
+
+重复编译同一输出目录时，`manifest.json` 会基于上一版 manifest 标记 `initial` / `clean` / `changed`，帮助发现 `.ai` 真源与 Claude 投影之间的漂移。
