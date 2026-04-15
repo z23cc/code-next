@@ -25,3 +25,4 @@ venv/
 
 # Planning exports (local-only oracle artifacts)
 prompt-exports/
+claude_code_phase2_enhancement_planning.md
