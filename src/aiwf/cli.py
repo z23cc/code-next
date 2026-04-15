@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
@@ -15,6 +16,7 @@ from aiwf.adapters.base import HostContract
 from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
 from aiwf.contracts import assess_review_boundary, assess_review_evidence, lint_contract_registry, review_contract_fields
+from aiwf.doctor import render_doctor_report, run_doctor
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AiwfError
 from aiwf.state import RunStateManager
@@ -398,6 +400,22 @@ def contract_lint() -> None:
     if failed:
         raise typer.Exit(code=1)
     console.print(f"[green]contract lint completed[/green] contracts={len(results)} adapters={len(ADAPTER_SPECS)}")
+
+
+@app.command("doctor")
+def doctor_command(
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
+    json_output: Annotated[bool, typer.Option("--json", help="Render doctor output as JSON.")] = False,
+) -> None:
+    """Inspect workspace structure, gate commands, and host/tool availability."""
+    report = run_doctor(ai_root=ai_root, repo_root=repo_root)
+    if json_output:
+        typer.echo(json.dumps(report.to_json(), indent=2, ensure_ascii=False))
+    else:
+        console.print(render_doctor_report(report), markup=False)
+    if not report.ok:
+        raise typer.Exit(code=1)
 
 
 @compile_app.command("claude")
