@@ -102,6 +102,23 @@ def test_run_review_requires_contract_declared_verify_report_artifact(tmp_path: 
         engine.run_review(run_id)
 
 
+def test_run_review_rejects_malformed_verify_report_content_at_review_boundary(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    engine.resume(run_id)
+    verify_report = ai_root / "runs" / run_id / "verify-report.json"
+    verify_report.write_text(json.dumps({"gate_set": "default", "cwd": str(repo_root), "results": []}), encoding="utf-8")
+
+    with pytest.raises(StateError, match="Run review artifact 'verify-report.json' is invalid: Artifact content failed validation: passed"):
+        engine.run_review(run_id)
+
+
 def test_run_review_fails_when_adapter_returns_review_report_missing_linked_prompt_artifact(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
     engine = WorkflowEngine(
@@ -138,6 +155,34 @@ def test_resume_review_fails_when_persisted_linked_review_evidence_artifact_is_m
 
     with pytest.raises(StateError, match="Review evidence artifact 'claude-review-prompt.md'"):
         engine.resume(run_id)
+
+
+def test_run_review_rejects_malformed_review_report_content_before_persisting(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    engine.resume(run_id)
+
+    def bad_review(task, run_dir):  # type: ignore[no-untyped-def]
+        prompt_path = run_dir / "claude-review-prompt.md"
+        prompt_path.write_text("# review\n", encoding="utf-8")
+        return {
+            "summary": "Manual Claude review prompt written",
+            "issues": [],
+            "mode": "manual",
+            "prompt_file": prompt_path.name,
+            "evidence_files": "not-a-list",
+        }
+
+    engine.adapter.review = bad_review  # type: ignore[method-assign]
+
+    with pytest.raises(StateError, match="Review report content is invalid: .*evidence_files"):
+        engine.run_review(run_id)
 
 
 def test_manual_claude_implement_stops_after_prompt_handoff(tmp_path: Path) -> None:
@@ -228,6 +273,27 @@ def test_manual_claude_resume_after_review_handoff_finalizes_run(tmp_path: Path)
     assert meta.status is RunStatus.passed
     assert meta.last_completed_stage == "review"
     assert receipt["status"] == "passed"
+
+
+def test_resume_review_rejects_invalid_persisted_review_report_content(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    engine.resume(run_id)
+    engine.run_review(run_id)
+    review_report = ai_root / "runs" / run_id / "review-report.json"
+    review_report.write_text(
+        json.dumps({"summary": "Manual Claude review prompt written", "issues": "not-a-list", "mode": "manual", "prompt_file": "claude-review-prompt.md"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StateError, match="Stored review-report.json is invalid: Artifact content failed validation: issues"):
+        engine.resume(run_id)
 
 
 def test_auto_claude_run_implement_persists_passed_runtime_surfaces(tmp_path: Path) -> None:

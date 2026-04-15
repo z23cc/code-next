@@ -4,13 +4,27 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from aiwf.exceptions import ArtifactError
-from aiwf.models import EventRecord
+from aiwf.models import (
+    EventRecord,
+    ReviewReportContent,
+    VerifyReportContent,
+    WorkReceiptContent,
+)
 from aiwf.state import RunStateManager
+
+
+ArtifactModelT = TypeVar("ArtifactModelT", bound=BaseModel)
+
+_VALIDATED_ARTIFACT_SCHEMAS: dict[str, type[BaseModel]] = {
+    "verify-report.json": VerifyReportContent,
+    "review-report.json": ReviewReportContent,
+    "work-receipt.json": WorkReceiptContent,
+}
 
 
 class ArtifactStore:
@@ -53,31 +67,42 @@ class ArtifactStore:
     def read_artifact(self, name: str) -> str | dict[str, Any]:
         """Read a stored artifact by filename."""
         artifact_path = self.run_dir / name
-        try:
-            content = artifact_path.read_text(encoding="utf-8")
-        except FileNotFoundError as exc:
-            raise ArtifactError("Artifact does not exist", path=artifact_path, stage="read_artifact") from exc
-        except OSError as exc:
-            raise ArtifactError("Failed to read artifact", path=artifact_path, stage="read_artifact") from exc
+        content = self._read_artifact_text(artifact_path, stage="read_artifact")
 
         if artifact_path.suffix == ".json":
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError as exc:
-                raise ArtifactError(
-                    "Artifact JSON is invalid",
-                    path=artifact_path,
-                    stage="read_artifact",
-                ) from exc
-            if not isinstance(parsed, dict):
-                raise ArtifactError(
-                    "Artifact JSON must be an object",
-                    path=artifact_path,
-                    stage="read_artifact",
-                )
-            return parsed
+            return self._parse_json_artifact(content, artifact_path, stage="read_artifact")
 
         return content
+
+    def read_validated_artifact(
+        self,
+        name: str,
+        schema_cls: type[ArtifactModelT] | None = None,
+    ) -> ArtifactModelT:
+        """Read and validate a known JSON artifact against a registered or supplied schema."""
+        artifact_path = self.run_dir / name
+        content = self._read_artifact_text(artifact_path, stage="read_validated_artifact")
+        parsed = self._parse_json_artifact(content, artifact_path, stage="read_validated_artifact")
+        resolved_schema = schema_cls or self.validation_schema_for(name)
+        if resolved_schema is None:
+            raise ArtifactError(
+                f"Artifact {name!r} does not have a registered validation schema",
+                path=artifact_path,
+                stage="read_validated_artifact",
+            )
+        try:
+            return resolved_schema.model_validate(parsed)
+        except ValidationError as exc:
+            raise ArtifactError(
+                f"Artifact content failed validation: {self._format_validation_errors(exc)}",
+                path=artifact_path,
+                stage="read_validated_artifact",
+            ) from exc
+
+    @classmethod
+    def validation_schema_for(cls, name: str) -> type[BaseModel] | None:
+        """Return the registered validation schema for a known artifact filename."""
+        return _VALIDATED_ARTIFACT_SCHEMAS.get(name)
 
     def _write_text_artifact(self, filename: str, content: str) -> Path:
         artifact_path = self.run_dir / filename
@@ -100,6 +125,31 @@ class ArtifactStore:
             raise ArtifactError("Failed to write artifact", path=artifact_path, stage="write_artifact") from exc
         self._record_artifact_written(filename)
         return artifact_path
+
+    def _read_artifact_text(self, artifact_path: Path, *, stage: str) -> str:
+        try:
+            return artifact_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise ArtifactError("Artifact does not exist", path=artifact_path, stage=stage) from exc
+        except OSError as exc:
+            raise ArtifactError("Failed to read artifact", path=artifact_path, stage=stage) from exc
+
+    def _parse_json_artifact(self, content: str, artifact_path: Path, *, stage: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ArtifactError("Artifact JSON is invalid", path=artifact_path, stage=stage) from exc
+        if not isinstance(parsed, dict):
+            raise ArtifactError("Artifact JSON must be an object", path=artifact_path, stage=stage)
+        return parsed
+
+    def _format_validation_errors(self, exc: ValidationError) -> str:
+        details: list[str] = []
+        for error in exc.errors(include_url=False):
+            location = ".".join(str(part) for part in error.get("loc", ()))
+            message = str(error.get("msg", "Validation error"))
+            details.append(f"{location}: {message}" if location else message)
+        return "; ".join(details)
 
     def _record_artifact_written(self, filename: str) -> None:
         self._state_manager.append_event(

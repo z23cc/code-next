@@ -7,7 +7,7 @@ from enum import Enum
 from re import sub
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -303,3 +303,132 @@ class VerifyReport(ModelBase):
     started_at: datetime = Field(default_factory=utc_now)
     finished_at: datetime = Field(default_factory=utc_now)
     results: list[GateResult] = Field(default_factory=list)
+
+
+class ArtifactSchemaBase(BaseModel):
+    """Strict runtime-validation model base for persisted artifact content."""
+
+    model_config = ConfigDict(use_enum_values=False)
+
+
+class GateResultContent(ArtifactSchemaBase):
+    """Strict artifact schema for a single gate result payload."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    name: StrictStr
+    command: StrictStr
+    passed: StrictBool
+    returncode: StrictInt | None = None
+    stdout: StrictStr = ""
+    stderr: StrictStr = ""
+    timed_out: StrictBool = False
+    duration_seconds: StrictFloat | StrictInt = 0.0
+
+    @field_validator("name", "command")
+    @classmethod
+    def validate_non_empty_string(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class VerifyReportContent(ArtifactSchemaBase):
+    """Strict artifact schema for `verify-report.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    gate_set: StrictStr
+    cwd: StrictStr
+    passed: StrictBool
+    started_at: datetime
+    finished_at: datetime
+    results: list[GateResultContent] = Field(default_factory=list)
+
+    @field_validator("gate_set", "cwd")
+    @classmethod
+    def validate_non_empty_string(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class ReviewEvidenceSummaryContent(ArtifactSchemaBase):
+    """Strict artifact schema for optional review evidence summaries."""
+
+    model_config = ConfigDict(extra="allow", use_enum_values=False)
+
+    verify: StrictStr | None = None
+    gate_results: list[StrictStr] = Field(default_factory=list)
+    diagnostics: StrictStr | None = None
+    provenance: StrictStr | None = None
+    changed_files: list[StrictStr] = Field(default_factory=list)
+    diff_summary: list[StrictStr] = Field(default_factory=list)
+
+    @field_validator("verify", "diagnostics", "provenance")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class ReviewReportContent(ArtifactSchemaBase):
+    """Strict artifact schema for `review-report.json` with host-specific extensions allowed."""
+
+    model_config = ConfigDict(extra="allow", use_enum_values=False)
+
+    summary: StrictStr
+    issues: list[Any] = Field(default_factory=list)
+    mode: StrictStr | None = None
+    prompt_file: StrictStr | None = None
+    response_file: StrictStr | None = None
+    response_excerpt: StrictStr | None = None
+    verify_report_file: StrictStr | None = None
+    diagnostics_file: StrictStr | None = None
+    provenance_file: StrictStr | None = None
+    evidence_files: list[StrictStr] = Field(default_factory=list)
+    evidence_summary: ReviewEvidenceSummaryContent | None = None
+    run_dir: StrictStr | None = None
+
+    @field_validator(
+        "summary",
+        "mode",
+        "prompt_file",
+        "response_file",
+        "verify_report_file",
+        "diagnostics_file",
+        "provenance_file",
+        "run_dir",
+    )
+    @classmethod
+    def validate_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class WorkReceiptContent(ArtifactSchemaBase):
+    """Strict artifact schema for `work-receipt.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    run_id: StrictStr
+    status: RunStatus
+    summary: StrictStr = ""
+    artifacts: list[StrictStr] = Field(default_factory=list)
+    risks: list[StrictStr] = Field(default_factory=list)
+    notes: list[StrictStr] = Field(default_factory=list)
+    started_at: datetime | None = None
+    finished_at: datetime
+
+    @field_validator("run_id")
+    @classmethod
+    def validate_run_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value

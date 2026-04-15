@@ -8,6 +8,7 @@ import pytest
 from aiwf.artifacts import ArtifactStore
 from aiwf.exceptions import ArtifactError
 from aiwf.models import (
+    ReviewReportContent,
     RunDiagnostics,
     RunGateEvidence,
     RunHostDiagnostics,
@@ -17,7 +18,9 @@ from aiwf.models import (
     RunStatus,
     TaskSpec,
     VerifyReport,
+    VerifyReportContent,
     WorkReceipt,
+    WorkReceiptContent,
 )
 from aiwf.state import RunStateManager
 
@@ -74,6 +77,80 @@ def test_read_artifact_raises_for_missing_artifact(tmp_path: Path) -> None:
         store.read_artifact("missing.md")
 
     assert "path=" in str(exc_info.value)
+
+
+def test_read_validated_artifact_returns_typed_known_artifacts(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Validated Artifacts", body="Read typed known artifacts."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+
+    store.write_verify_report(VerifyReport(gate_set="default", cwd=str(tmp_path), passed=True, results=[]))
+    store.write_review_report({"summary": "Looks good", "issues": [], "mode": "manual", "prompt_file": "review.md"})
+    store.write_work_receipt(WorkReceipt(run_id=run_id, status=RunStatus.passed, summary="Completed milestone two."))
+
+    verify_report = store.read_validated_artifact("verify-report.json")
+    review_report = store.read_validated_artifact("review-report.json")
+    work_receipt = store.read_validated_artifact("work-receipt.json")
+
+    assert isinstance(verify_report, VerifyReportContent)
+    assert isinstance(review_report, ReviewReportContent)
+    assert isinstance(work_receipt, WorkReceiptContent)
+    assert verify_report.passed is True
+    assert review_report.summary == "Looks good"
+    assert work_receipt.status is RunStatus.passed
+
+
+def test_read_validated_artifact_rejects_malformed_verify_report_with_field_errors(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Bad Verify Report", body="Reject malformed verify-report content."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+    (run_dir / "verify-report.json").write_text(json.dumps({"gate_set": "default", "cwd": str(tmp_path), "results": []}), encoding="utf-8")
+
+    with pytest.raises(ArtifactError) as exc_info:
+        store.read_validated_artifact("verify-report.json")
+
+    message = str(exc_info.value)
+    assert "Artifact content failed validation" in message
+    assert "passed" in message
+    assert "stage=read_validated_artifact" in message
+
+
+def test_read_validated_artifact_rejects_malformed_review_report_with_field_errors(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Bad Review Report", body="Reject malformed review-report content."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+    (run_dir / "review-report.json").write_text(
+        json.dumps({"summary": "Looks good", "issues": "not-a-list", "mode": "manual", "prompt_file": "review.md"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ArtifactError) as exc_info:
+        store.read_validated_artifact("review-report.json")
+
+    message = str(exc_info.value)
+    assert "Artifact content failed validation" in message
+    assert "issues" in message
+
+
+def test_read_validated_artifact_rejects_malformed_work_receipt_with_field_errors(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Bad Receipt", body="Reject malformed work-receipt content."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+    (run_dir / "work-receipt.json").write_text(
+        json.dumps({"run_id": run_id, "status": "passed", "summary": "ok", "artifacts": "not-a-list", "notes": [], "risks": [], "finished_at": "2026-04-16T00:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ArtifactError) as exc_info:
+        store.read_validated_artifact("work-receipt.json")
+
+    message = str(exc_info.value)
+    assert "Artifact content failed validation" in message
+    assert "artifacts" in message
 
 
 def test_artifact_store_writes_and_reads_run_diagnostics(tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ from aiwf.models import (
     RunMeta,
     RunProvenance,
     RunProvenanceArtifact,
+    ReviewReportContent,
     RunReviewEvidence,
     RunbookSpec,
     RunStatus,
@@ -353,10 +354,15 @@ class WorkflowEngine:
                 self.state_manager.transition(run_id, RunStatus.blocked, stage="review")
                 return
         else:
-            stored_review_report = store.read_artifact("review-report.json")
-            if not isinstance(stored_review_report, dict):
-                raise StateError("Stored review-report.json must be a JSON object", path=run_dir / "review-report.json", stage="review")
-            review_report = stored_review_report
+            try:
+                stored_review_report = store.read_validated_artifact("review-report.json")
+            except ArtifactError as exc:
+                raise StateError(
+                    f"Stored review-report.json is invalid: {exc.message}",
+                    path=run_dir / "review-report.json",
+                    stage="review",
+                ) from exc
+            review_report = stored_review_report.model_dump(mode="python")
             self._validate_review_report(review_report, run_dir)
 
         self._write_receipt(
@@ -440,10 +446,19 @@ class WorkflowEngine:
     def _require_review_artifacts(self, store: ArtifactStore) -> None:
         for artifact_name in self.host_contract.review.required_run_artifacts:
             try:
-                store.read_artifact(artifact_name)
+                if ArtifactStore.validation_schema_for(artifact_name) is not None:
+                    store.read_validated_artifact(artifact_name)
+                else:
+                    store.read_artifact(artifact_name)
             except ArtifactError as exc:
+                if exc.message == "Artifact does not exist":
+                    raise StateError(
+                        f"Run is missing required review artifact {artifact_name!r}",
+                        path=store.run_dir / artifact_name,
+                        stage="review",
+                    ) from exc
                 raise StateError(
-                    f"Run is missing required review artifact {artifact_name!r}",
+                    f"Run review artifact {artifact_name!r} is invalid: {exc.message}",
                     path=store.run_dir / artifact_name,
                     stage="review",
                 ) from exc
@@ -462,6 +477,16 @@ class WorkflowEngine:
         return expected
 
     def _validate_review_report(self, review_report: dict[str, object], run_dir: Path) -> None:
+        try:
+            ReviewReportContent.model_validate(review_report)
+        except Exception as exc:
+            detail = str(exc).strip().replace("\n", "; ")
+            raise StateError(
+                f"Review report content is invalid: {detail}",
+                path=run_dir / "review-report.json",
+                stage="review",
+            ) from exc
+
         review_contract = self.host_contract.review
 
         for field_name in review_contract.required_report_string_fields:
