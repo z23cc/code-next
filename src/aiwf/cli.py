@@ -6,7 +6,7 @@ import json
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
 
@@ -41,6 +41,8 @@ console = Console()
 
 
 AdapterName = Literal["claude", "rp", "codex", "stub"]
+_INTERNAL_RUN_FILES = {"run.json", "events.ndjson", "run-diagnostics.json", "run-provenance.json"}
+_DIFF_FIELDS = ("workflow", "status", "last_completed_stage", "error_code", "error", "adapter", "mode")
 
 
 def _version_callback(value: bool) -> None:
@@ -296,7 +298,216 @@ def _serialize_run_record(record: _RunRecord) -> dict[str, Any]:
     }
 
 
-def _build_inspection_payload(ai_root: Path, run_id: str) -> dict[str, Any]:
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _extract_run_mode(meta: RunMeta) -> str | None:
+    host_contract = meta.data.get("host_contract")
+    if isinstance(host_contract, Mapping):
+        mode = str(host_contract.get("mode", "")).strip()
+        if mode:
+            return mode
+    return None
+
+
+def _run_field_values(meta: RunMeta) -> dict[str, Any]:
+    return {
+        "workflow": _extract_run_workflow(meta),
+        "status": meta.status.value,
+        "last_completed_stage": meta.last_completed_stage,
+        "error_code": meta.error_code.value if meta.error_code is not None else None,
+        "error": meta.error,
+        "adapter": _extract_run_adapter(meta),
+        "mode": _extract_run_mode(meta),
+    }
+
+
+def _stored_diagnostics_field_values(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    host = diagnostics.get("host")
+    return {
+        "workflow": diagnostics.get("workflow"),
+        "status": diagnostics.get("status"),
+        "last_completed_stage": diagnostics.get("last_completed_stage"),
+        "error_code": diagnostics.get("error_code"),
+        "error": diagnostics.get("error"),
+        "adapter": host.get("adapter") if isinstance(host, Mapping) else None,
+        "mode": host.get("mode") if isinstance(host, Mapping) else None,
+    }
+
+
+def _build_field_changes(
+    from_values: Mapping[str, Any],
+    to_values: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    changes: dict[str, dict[str, Any]] = {}
+    for field in _DIFF_FIELDS:
+        from_value = from_values.get(field)
+        to_value = to_values.get(field)
+        if from_value != to_value:
+            changes[field] = {"from": from_value, "to": to_value}
+    return changes
+
+
+def _provenance_artifact_map(provenance: object) -> dict[str, dict[str, Any]]:
+    artifact_map: dict[str, dict[str, Any]] = {}
+    if not isinstance(provenance, Mapping):
+        return artifact_map
+    artifact_index = provenance.get("artifact_index")
+    if not isinstance(artifact_index, list):
+        return artifact_map
+    for artifact in artifact_index:
+        if not isinstance(artifact, Mapping):
+            continue
+        name = str(artifact.get("name", "")).strip()
+        if not name:
+            continue
+        artifact_map[name] = {
+            "name": name,
+            "path": artifact.get("path"),
+            "stage": artifact.get("stage"),
+            "category": artifact.get("category"),
+        }
+    return artifact_map
+
+
+def _collect_live_artifacts(ai_root: Path, run_id: str, provenance: object) -> dict[str, dict[str, Any]]:
+    run_dir = ai_root / "runs" / run_id
+    artifact_refs = _provenance_artifact_map(provenance)
+    try:
+        paths = sorted(path for path in run_dir.iterdir() if path.is_file() and path.name not in _INTERNAL_RUN_FILES)
+    except OSError as exc:
+        raise AiwfError(f"Unable to inspect artifacts for run {run_id}: {exc}") from exc
+
+    artifacts: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        try:
+            stats = path.stat()
+        except OSError as exc:
+            raise AiwfError(f"Unable to inspect artifact {path.name} for run {run_id}: {exc}") from exc
+        artifact_ref = artifact_refs.get(path.name, {})
+        artifacts[path.name] = {
+            "name": path.name,
+            "path": str(path),
+            "size_bytes": stats.st_size,
+            "modified_at": datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc).isoformat(),
+            "stage": artifact_ref.get("stage"),
+            "category": artifact_ref.get("category"),
+        }
+    return artifacts
+
+
+def _baseline_artifact_names(diagnostics: Mapping[str, Any], provenance: object) -> set[str]:
+    artifact_names = {
+        name
+        for name in _provenance_artifact_map(provenance)
+        if name and name not in _INTERNAL_RUN_FILES
+    }
+    if artifact_names:
+        return artifact_names
+
+    key_artifacts = diagnostics.get("key_artifacts")
+    if not isinstance(key_artifacts, list):
+        return set()
+    names: set[str] = set()
+    for artifact in key_artifacts:
+        if not isinstance(artifact, Mapping):
+            continue
+        name = str(artifact.get("name", "")).strip()
+        if name and name not in _INTERNAL_RUN_FILES:
+            names.add(name)
+    return names
+
+
+def _removed_artifact_entry(ai_root: Path, run_id: str, artifact_name: str, provenance: object) -> dict[str, Any]:
+    artifact_ref = _provenance_artifact_map(provenance).get(artifact_name, {})
+    return {
+        "name": artifact_name,
+        "path": artifact_ref.get("path") or str(_artifact_path(ai_root, run_id, artifact_name)),
+        "stage": artifact_ref.get("stage"),
+        "category": artifact_ref.get("category"),
+        "size_bytes": None,
+        "modified_at": None,
+    }
+
+
+def _build_current_diff(ai_root: Path, run_id: str, diagnostics: Mapping[str, Any], provenance: object) -> dict[str, Any]:
+    state_manager = RunStateManager(ai_root)
+    meta = state_manager.load_run(run_id)
+    live_artifacts = _collect_live_artifacts(ai_root, run_id, provenance)
+    live_artifact_names = set(live_artifacts)
+    baseline_artifact_names = _baseline_artifact_names(diagnostics, provenance)
+    baseline_generated_at = _parse_iso_datetime(diagnostics.get("generated_at"))
+
+    modified: list[dict[str, Any]] = []
+    if baseline_generated_at is not None:
+        for artifact_name in sorted(live_artifact_names & baseline_artifact_names):
+            modified_at = _parse_iso_datetime(live_artifacts[artifact_name].get("modified_at"))
+            if modified_at is not None and modified_at > baseline_generated_at:
+                modified.append(dict(live_artifacts[artifact_name]))
+
+    added = [dict(live_artifacts[name]) for name in sorted(live_artifact_names - baseline_artifact_names)]
+    removed = [_removed_artifact_entry(ai_root, run_id, name, provenance) for name in sorted(baseline_artifact_names - live_artifact_names)]
+    field_changes = _build_field_changes(_stored_diagnostics_field_values(diagnostics), _run_field_values(meta))
+
+    return {
+        "mode": "current",
+        "from_label": "stored",
+        "to_label": "current",
+        "baseline_generated_at": diagnostics.get("generated_at"),
+        "field_changes": field_changes,
+        "artifact_changes": {
+            "added": added,
+            "removed": removed,
+            "modified": modified,
+        },
+        "has_changes": bool(field_changes or added or removed or modified),
+    }
+
+
+def _build_run_to_run_diff(ai_root: Path, run_id: str, other_run_id: str, provenance: object) -> dict[str, Any]:
+    state_manager = RunStateManager(ai_root)
+    subject_meta = state_manager.load_run(run_id)
+    other_meta = state_manager.load_run(other_run_id)
+    try:
+        other_payload = _build_inspection_payload(ai_root, other_run_id)
+    except AiwfError as exc:
+        raise AiwfError(f"Cannot diff against run {other_run_id}: {exc}") from exc
+    other_provenance = other_payload.get("provenance")
+
+    subject_artifacts = _collect_live_artifacts(ai_root, run_id, provenance)
+    other_artifacts = _collect_live_artifacts(ai_root, other_run_id, other_provenance)
+    subject_names = set(subject_artifacts)
+    other_names = set(other_artifacts)
+
+    added = [dict(other_artifacts[name]) for name in sorted(other_names - subject_names)]
+    removed = [dict(subject_artifacts[name]) for name in sorted(subject_names - other_names)]
+    field_changes = _build_field_changes(_run_field_values(subject_meta), _run_field_values(other_meta))
+
+    return {
+        "mode": "run_to_run",
+        "from_label": run_id,
+        "to_label": other_run_id,
+        "compare_run_id": other_run_id,
+        "field_changes": field_changes,
+        "artifact_changes": {
+            "added": added,
+            "removed": removed,
+            "modified": [],
+        },
+        "has_changes": bool(field_changes or added or removed),
+    }
+
+
+def _build_inspection_payload(ai_root: Path, run_id: str, *, diff: bool = False, diff_run: str | None = None) -> dict[str, Any]:
     diagnostics = _load_run_surface(ai_root, run_id, "run-diagnostics.json")
     provenance = _load_optional_run_surface(ai_root, run_id, "run-provenance.json")
     review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
@@ -322,41 +533,120 @@ def _build_inspection_payload(ai_root: Path, run_id: str) -> dict[str, Any]:
         payload["review_contract"] = None
         payload["review_boundary"] = None
         payload["review_evidence"] = None
-        return payload
+    else:
+        artifact_names = _list_run_artifact_names(ai_root, run_id)
+        review_contract = resolved_contract.review
+        review_boundary = assess_review_boundary(resolved_contract, available_artifact_names=artifact_names)
+        review_evidence = assess_review_evidence(
+            resolved_contract,
+            review_report if isinstance(review_report, Mapping) else None,
+            available_artifact_names=artifact_names,
+        )
 
-    artifact_names = _list_run_artifact_names(ai_root, run_id)
-    review_contract = resolved_contract.review
-    review_boundary = assess_review_boundary(resolved_contract, available_artifact_names=artifact_names)
-    review_evidence = assess_review_evidence(
-        resolved_contract,
-        review_report if isinstance(review_report, Mapping) else None,
-        available_artifact_names=artifact_names,
-    )
-
-    payload["host_contract"] = resolved_contract.to_metadata()
-    payload["review_contract"] = {
-        "required_run_artifacts": list(review_contract.required_run_artifacts),
-        "required_report_fields": list(review_contract_fields(review_contract)),
-        "expected_mode": review_contract.expected_report_mode,
-        "linked_field": review_contract.linked_report_artifact_field,
-    }
-    payload["review_boundary"] = {
-        "ready": review_boundary.ready,
-        "missing_required_artifacts": list(review_boundary.missing_required_artifacts),
-    }
-    payload["review_evidence"] = {
-        "status": review_evidence.status,
-        "mode": review_evidence.mode,
-        "missing_report_fields": list(review_evidence.missing_report_fields),
-        "missing_linked_artifacts": list(review_evidence.missing_linked_artifacts),
-        "linked_artifacts": list(review_evidence.linked_artifacts),
-        "mode_mismatch": review_evidence.mode_mismatch,
-    }
+        payload["host_contract"] = resolved_contract.to_metadata()
+        payload["review_contract"] = {
+            "required_run_artifacts": list(review_contract.required_run_artifacts),
+            "required_report_fields": list(review_contract_fields(review_contract)),
+            "expected_mode": review_contract.expected_report_mode,
+            "linked_field": review_contract.linked_report_artifact_field,
+        }
+        payload["review_boundary"] = {
+            "ready": review_boundary.ready,
+            "missing_required_artifacts": list(review_boundary.missing_required_artifacts),
+        }
+        payload["review_evidence"] = {
+            "status": review_evidence.status,
+            "mode": review_evidence.mode,
+            "missing_report_fields": list(review_evidence.missing_report_fields),
+            "missing_linked_artifacts": list(review_evidence.missing_linked_artifacts),
+            "linked_artifacts": list(review_evidence.linked_artifacts),
+            "mode_mismatch": review_evidence.mode_mismatch,
+        }
+    if diff_run is not None:
+        payload["diff"] = _build_run_to_run_diff(ai_root, run_id, diff_run, provenance)
+    elif diff:
+        payload["diff"] = _build_current_diff(ai_root, run_id, diagnostics, provenance)
     return payload
 
 
-def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> None:
-    payload = _build_inspection_payload(ai_root, run_id)
+def _format_diff_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _print_diff_artifact(kind: str, artifact: Mapping[str, Any]) -> None:
+    name = str(artifact.get("name", "")).strip() or "-"
+    stage = artifact.get("stage")
+    category = artifact.get("category")
+    stage_label = stage.strip() if isinstance(stage, str) and stage.strip() else "-"
+    category_label = category.strip() if isinstance(category, str) and category.strip() else "-"
+    details = [f"[{stage_label}/{category_label}] {name}"]
+    size_bytes = artifact.get("size_bytes")
+    if isinstance(size_bytes, int):
+        details.append(f"size_bytes={size_bytes}")
+    modified_at = artifact.get("modified_at")
+    if isinstance(modified_at, str) and modified_at.strip():
+        details.append(f"modified_at={modified_at}")
+    console.print(f"- {kind} {' '.join(details)}")
+
+
+def _print_inspection_diff(payload: Mapping[str, Any]) -> None:
+    diff = payload.get("diff")
+    if not isinstance(diff, Mapping):
+        return
+
+    mode = str(diff.get("mode", "")).strip()
+    if mode == "run_to_run":
+        console.print(f"diff=run_to_run compare_run={diff.get('to_label') or '-'}")
+    else:
+        console.print(f"diff={'changes_detected' if diff.get('has_changes') else 'no_changes'} baseline_generated_at={diff.get('baseline_generated_at') or '-'}")
+
+    field_changes = diff.get("field_changes")
+    if isinstance(field_changes, Mapping) and field_changes:
+        console.print("diff_field_changes:")
+        for field in _DIFF_FIELDS:
+            change = field_changes.get(field)
+            if not isinstance(change, Mapping):
+                continue
+            console.print(
+                f"- {field}: {_format_diff_value(change.get('from'))} -> {_format_diff_value(change.get('to'))}"
+            )
+
+    artifact_changes = diff.get("artifact_changes")
+    if not isinstance(artifact_changes, Mapping):
+        return
+
+    added = artifact_changes.get("added")
+    removed = artifact_changes.get("removed")
+    modified = artifact_changes.get("modified")
+    if any(isinstance(items, list) and items for items in (added, removed, modified)):
+        console.print("diff_artifact_changes:")
+    if isinstance(added, list):
+        for artifact in added:
+            if isinstance(artifact, Mapping):
+                _print_diff_artifact("added", artifact)
+    if isinstance(removed, list):
+        for artifact in removed:
+            if isinstance(artifact, Mapping):
+                _print_diff_artifact("removed", artifact)
+    if isinstance(modified, list):
+        for artifact in modified:
+            if isinstance(artifact, Mapping):
+                _print_diff_artifact("modified", artifact)
+
+
+def _print_inspection(
+    ai_root: Path,
+    run_id: str,
+    *,
+    verbose: bool = False,
+    diff: bool = False,
+    diff_run: str | None = None,
+) -> None:
+    payload = _build_inspection_payload(ai_root, run_id, diff=diff, diff_run=diff_run)
     diagnostics = payload["diagnostics"]
     provenance = payload["provenance"]
 
@@ -436,6 +726,8 @@ def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> N
                 f"supports_auto_execution={supports_auto} "
                 f"requires_explicit_review_handoff={explicit_review}"
             )
+
+    _print_inspection_diff(payload)
 
     next_actions = diagnostics.get("next_actions")
     if isinstance(next_actions, list) and next_actions:
@@ -557,14 +849,18 @@ def inspect_run(
     run_id: str,
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     verbose: Annotated[bool, typer.Option("--verbose", help="Show artifact index and detailed provenance links.")] = False,
+    diff: Annotated[bool, typer.Option("--diff", help="Show delta versus the current live run metadata/artifact state.")] = False,
+    diff_run: Annotated[str | None, typer.Option("--diff-run", help="Compare this run to another run's status/artifact metadata.")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Render inspect output as JSON.")] = False,
 ) -> None:
     """Inspect diagnostics and provenance for an existing run."""
     try:
+        if diff and diff_run is not None:
+            raise AiwfError("Cannot use --diff and --diff-run together")
         if json_output:
-            typer.echo(json.dumps(_build_inspection_payload(ai_root, run_id), indent=2, ensure_ascii=False))
+            typer.echo(json.dumps(_build_inspection_payload(ai_root, run_id, diff=diff, diff_run=diff_run), indent=2, ensure_ascii=False))
         else:
-            _print_inspection(ai_root, run_id, verbose=verbose)
+            _print_inspection(ai_root, run_id, verbose=verbose, diff=diff, diff_run=diff_run)
     except AiwfError as exc:
         if json_output:
             typer.echo(json.dumps({"ok": False, "run_id": run_id, "error": str(exc)}, indent=2, ensure_ascii=False))

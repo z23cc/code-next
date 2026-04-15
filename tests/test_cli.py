@@ -10,6 +10,7 @@ from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactCon
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.cli import app
 from aiwf.engine import WorkflowEngine
+from aiwf.exceptions import ErrorCode
 from aiwf.models import RunStatus, TaskSpec
 from aiwf.state import RunStateManager
 
@@ -925,6 +926,205 @@ def test_cli_inspect_surfaces_structured_error_codes_for_failed_runs(tmp_path: P
     payload = json.loads(inspect_json_result.stdout)
     assert payload["diagnostics"]["status"] == "failed"
     assert payload["diagnostics"]["error_code"] == "GATE_FAILURE"
+
+
+def test_cli_inspect_diff_reports_no_changes_for_fresh_run(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--diff",
+            "--json",
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    payload = json.loads(inspect_result.stdout)
+    assert payload["diff"]["mode"] == "current"
+    assert payload["diff"]["has_changes"] is False
+    assert payload["diff"]["field_changes"] == {}
+    assert payload["diff"]["artifact_changes"] == {"added": [], "removed": [], "modified": []}
+
+
+def test_cli_inspect_diff_reports_status_and_artifact_deltas(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    run_dir = ai_root / "runs" / run_id
+    (run_dir / "manual-note.md").write_text("operator note\n", encoding="utf-8")
+    RunStateManager(ai_root).transition(
+        run_id,
+        RunStatus.failed,
+        stage="implement",
+        error="manual intervention required",
+        error_code=ErrorCode.STATE_VIOLATION,
+    )
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--diff",
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    assert "diff=changes_detected" in inspect_result.stdout
+    assert "diff_field_changes:" in inspect_result.stdout
+    assert "- status: blocked -> failed" in inspect_result.stdout
+    assert "manual-note.md" in inspect_result.stdout
+
+    inspect_json_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--diff",
+            "--json",
+        ],
+    )
+    assert inspect_json_result.exit_code == 0
+    payload = json.loads(inspect_json_result.stdout)
+    assert payload["diff"]["mode"] == "current"
+    assert payload["diff"]["has_changes"] is True
+    assert payload["diff"]["field_changes"]["status"] == {"from": "blocked", "to": "failed"}
+    assert payload["diff"]["field_changes"]["error_code"] == {"from": None, "to": "STATE_VIOLATION"}
+    assert [artifact["name"] for artifact in payload["diff"]["artifact_changes"]["added"]] == ["manual-note.md"]
+
+
+def test_cli_inspect_diff_run_reports_run_to_run_delta(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    blocked_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert blocked_result.exit_code == 0
+    blocked_run_id = next((ai_root / "runs").iterdir()).name
+
+    auto_engine = WorkflowEngine(
+        ClaudeCodeAdapter(
+            repo_root=repo_root,
+            auto=True,
+            claude_command=[
+                sys.executable,
+                "-c",
+                "import sys; print('stdin:' + ('yes' if sys.stdin.read() else 'no'))",
+            ],
+        ),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+    passed_run_id = auto_engine.run_implement(task_path)
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            blocked_run_id,
+            "--ai-root",
+            str(ai_root),
+            "--diff-run",
+            passed_run_id,
+            "--json",
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    payload = json.loads(inspect_result.stdout)
+    assert payload["diff"]["mode"] == "run_to_run"
+    assert payload["diff"]["compare_run_id"] == passed_run_id
+    assert payload["diff"]["field_changes"]["status"] == {"from": "blocked", "to": "passed"}
+    added_names = {artifact["name"] for artifact in payload["diff"]["artifact_changes"]["added"]}
+    removed_names = {artifact["name"] for artifact in payload["diff"]["artifact_changes"]["removed"]}
+    assert {"verify-report.json", "review-report.json", "work-receipt.json"} <= added_names
+    assert "claude-implement-prompt.md" in removed_names
+
+
+def test_cli_inspect_rejects_diff_and_diff_run_together(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--diff",
+            "--diff-run",
+            run_id,
+        ],
+    )
+
+    assert inspect_result.exit_code == 1
+    assert "Cannot use --diff and --diff-run together" in inspect_result.stdout
 
 
 def test_cli_inspect_json_includes_review_report_evidence_summary_for_rp_runs(tmp_path: Path) -> None:
