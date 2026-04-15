@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 from aiwf.engine import WorkflowEngine
 from aiwf.models import RunStatus
@@ -41,17 +42,98 @@ def test_run_implement_completes_full_stub_workflow(tmp_path: Path) -> None:
     assert (run_dir / "review-report.json").exists()
 
 
-def test_run_review_writes_review_artifacts(tmp_path: Path) -> None:
+def test_run_review_operates_on_existing_run_and_blocks_for_manual_claude(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
-    engine = WorkflowEngine(StubRunnerAdapter(), ai_root=ai_root, repo_root=repo_root)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        adapter_name="claude",
+        adapter_auto=False,
+    )
 
-    run_id = engine.run_review(task_path)
+    run_id = engine.run_implement(task_path)
+    engine.resume(run_id)
+    reviewed_run_id = engine.run_review(run_id)
     run_dir = ai_root / "runs" / run_id
     meta = RunStateManager(ai_root).load_run(run_id)
 
-    assert meta.status is RunStatus.passed
+    assert reviewed_run_id == run_id
+    assert meta.status is RunStatus.blocked
+    assert meta.last_completed_stage == "review"
     assert (run_dir / "review-report.json").exists()
-    assert (run_dir / "work-receipt.json").exists()
+    assert (run_dir / "claude-review-prompt.md").exists()
+    assert not (run_dir / "work-receipt.json").exists()
+
+
+def test_manual_claude_implement_stops_after_prompt_handoff(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        adapter_name="claude",
+        adapter_auto=False,
+    )
+
+    run_id = engine.run_implement(task_path)
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+
+    assert meta.status is RunStatus.blocked
+    assert meta.last_completed_stage == "implement"
+    assert (run_dir / "claude-implement-prompt.md").exists()
+    assert not (run_dir / "verify-report.json").exists()
+    assert not (run_dir / "review-report.json").exists()
+    assert not (run_dir / "work-receipt.json").exists()
+
+
+def test_manual_claude_resume_stops_at_needs_review_after_passing_gates(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        adapter_name="claude",
+        adapter_auto=False,
+    )
+
+    run_id = engine.run_implement(task_path)
+    resumed_run_id = engine.resume(run_id)
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+    verify_report = json.loads((run_dir / "verify-report.json").read_text(encoding="utf-8"))
+
+    assert resumed_run_id == run_id
+    assert meta.status is RunStatus.needs_review
+    assert meta.last_completed_stage == "gates"
+    assert verify_report["passed"] is True
+    assert not (run_dir / "review-report.json").exists()
+    assert not (run_dir / "work-receipt.json").exists()
+
+
+def test_manual_claude_resume_after_review_handoff_finalizes_run(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(repo_root=repo_root, auto=False),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        adapter_name="claude",
+        adapter_auto=False,
+    )
+
+    run_id = engine.run_implement(task_path)
+    engine.resume(run_id)
+    engine.run_review(run_id)
+    resumed_run_id = engine.resume(run_id)
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+    receipt = json.loads((run_dir / "work-receipt.json").read_text(encoding="utf-8"))
+
+    assert resumed_run_id == run_id
+    assert meta.status is RunStatus.passed
+    assert meta.last_completed_stage == "review"
+    assert receipt["status"] == "passed"
 
 
 def test_failed_gate_run_can_resume_after_gate_fix(tmp_path: Path) -> None:

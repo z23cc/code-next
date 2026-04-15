@@ -31,16 +31,30 @@ uv run aiwf run plan --task .ai/tasks/<your-task>.md --adapter claude
 uv run aiwf run implement --task .ai/tasks/<your-task>.md --adapter claude
 ```
 
-如果 gates 失败，修复后可继续：
+在默认手动 Claude 模式下，这一步通常会先停在 `blocked`：
+
+- 查看 `.ai/runs/<run_id>/claude-implement-prompt.md`
+- 完成实现工作后继续执行：
 
 ```bash
 uv run aiwf resume <run_id>
 ```
 
+如果 gates 通过，run 会停在 `needs_review`，等待显式 review。
+如果 gates 失败，修复后同样使用 `uv run aiwf resume <run_id>` 继续。
+
 ## 5. 复核阶段
 
+对已经到达 `needs_review` 的 run 执行：
+
 ```bash
-uv run aiwf run review --task .ai/tasks/<your-task>.md --adapter claude
+uv run aiwf run review --run-id <run_id>
+```
+
+在手动 Claude 模式下，review 也可能先停在 `blocked`，此时查看 `.ai/runs/<run_id>/claude-review-prompt.md`，完成复核后再执行：
+
+```bash
+uv run aiwf resume <run_id>
 ```
 
 ## 6. 编译 Claude 输入包

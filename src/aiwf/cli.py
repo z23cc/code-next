@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Callable, Literal
+from typing import Annotated, Callable, Literal, cast
 
 import typer
 from rich.console import Console
@@ -75,6 +75,17 @@ def _build_engine(
     )
 
 
+def _resolve_run_execution(ai_root: Path, run_id: str) -> tuple[AdapterName, bool]:
+    meta = RunStateManager(ai_root).load_run(run_id)
+    adapter_name = str(meta.data.get("adapter", "")).strip()
+    auto = meta.data.get("auto")
+    if adapter_name not in {"claude", "stub"}:
+        raise AiwfError(f"Run {run_id} does not include a valid stored adapter")
+    if not isinstance(auto, bool):
+        raise AiwfError(f"Run {run_id} does not include a valid stored auto setting")
+    return cast(AdapterName, adapter_name), auto
+
+
 def _execute_command(action: str, ai_root: Path, func: Callable[[], str]) -> None:
     try:
         run_id = func()
@@ -85,7 +96,10 @@ def _execute_command(action: str, ai_root: Path, func: Callable[[], str]) -> Non
     if final_status == "failed":
         console.print(f"[red]{action} finished with failed status[/red] run_id={run_id}")
         raise typer.Exit(code=1)
-    console.print(f"[green]{action} completed[/green] run_id={run_id}")
+    if final_status == "passed":
+        console.print(f"[green]{action} completed[/green] run_id={run_id}")
+        return
+    console.print(f"[yellow]{action} stopped[/yellow] run_id={run_id} status={final_status}")
 
 
 @run_app.command("plan")
@@ -116,15 +130,14 @@ def run_implement(
 
 @run_app.command("review")
 def run_review(
-    task: Annotated[Path, typer.Option("--task", exists=True, dir_okay=False, readable=True)],
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing run to review.")],
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
-    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "claude",
-    auto: Annotated[bool, typer.Option("--auto", help="Use the Claude CLI for subprocess execution.")] = False,
 ) -> None:
-    """Run the review workflow."""
-    engine = _build_engine(ai_root, repo_root, adapter_name=adapter, auto=auto)
-    _execute_command("review", ai_root, lambda: engine.run_review(task))
+    """Run review against an existing run using its stored adapter settings."""
+    adapter_name, auto = _resolve_run_execution(ai_root, run_id)
+    engine = _build_engine(ai_root, repo_root, adapter_name=adapter_name, auto=auto)
+    _execute_command("review", ai_root, lambda: engine.run_review(run_id))
 
 
 @app.command("resume")
@@ -132,14 +145,10 @@ def resume(
     run_id: str,
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
-    adapter: Annotated[AdapterName | None, typer.Option("--adapter")] = None,
-    auto: Annotated[bool, typer.Option("--auto", help="Use the Claude CLI for subprocess execution.")] = False,
 ) -> None:
-    """Resume a failed, blocked, or needs-review workflow run."""
-    stored_meta = RunStateManager(ai_root).load_run(run_id)
-    stored_adapter = str(stored_meta.data.get("adapter", "claude"))
-    resolved_adapter: AdapterName = adapter or ("claude" if stored_adapter == "claude" else "stub")
-    engine = _build_engine(ai_root, repo_root, adapter_name=resolved_adapter, auto=auto)
+    """Resume a failed, blocked, or needs-review workflow run with its stored adapter settings."""
+    adapter_name, auto = _resolve_run_execution(ai_root, run_id)
+    engine = _build_engine(ai_root, repo_root, adapter_name=adapter_name, auto=auto)
     _execute_command("resume", ai_root, lambda: engine.resume(run_id))
 
 

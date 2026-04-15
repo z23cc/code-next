@@ -83,32 +83,43 @@ class WorkflowEngine:
             self._handle_run_failure(run_id, store, "implement", exc)
             raise
 
-    def run_review(self, task_path: str | Path) -> str:
-        """Run the stub-backed review workflow."""
-        task_file = Path(task_path)
-        task = load_task(task_file)
+    def run_review(self, run_id: str) -> str:
+        """Run review against an existing implementation run and its artifacts."""
+        meta = self.state_manager.load_run(run_id)
+        workflow = str(meta.data.get("workflow", "")).strip()
+        if workflow != "implement":
+            raise StateError("Review requires an existing implementation run", path=meta.run_dir, stage="review")
+        if meta.status is not RunStatus.needs_review:
+            raise StateError(
+                f"Run in status {meta.status.value} is not ready for review",
+                path=meta.run_dir,
+                stage="review",
+            )
+        if meta.last_completed_stage not in {"gates", "review"}:
+            raise StateError("Run has not reached the review boundary", path=meta.run_dir, stage="review")
+
+        self._restore_execution_metadata(meta)
+        task = self._load_task_from_meta(meta)
         self._load_supporting_specs(task)
-        run_id = self.state_manager.init_run(task, task_path=task_file)
-        run_dir = self._run_dir(run_id)
+        run_dir = Path(meta.run_dir)
         store = ArtifactStore(run_dir, state_manager=self.state_manager)
-        self.state_manager.update_run(run_id, data=self._workflow_data("review"))
+        self._require_review_artifacts(run_dir)
 
         try:
-            self.state_manager.transition(run_id, RunStatus.running, stage="review")
-            review_report = self.adapter.review(task, run_dir)
-            store.write_review_report(review_report)
-            self.state_manager.update_run(run_id, last_completed_stage="review", data=self._workflow_data("review"))
-            self._write_receipt(
-                store,
+            self.state_manager.transition(run_id, RunStatus.running, stage="review", data=self._workflow_data(workflow))
+            self._resume_review(
+                task,
                 run_id,
-                RunStatus.passed,
-                "Review workflow completed successfully.",
-                ["review-report.json", "work-receipt.json"],
+                run_dir,
+                store,
+                meta.last_completed_stage,
+                workflow_name=workflow,
+                success_summary="Review workflow completed successfully.",
+                success_artifacts=["review-report.json", "work-receipt.json"],
             )
-            self.state_manager.transition(run_id, RunStatus.passed, stage="review")
             return run_id
         except Exception as exc:
-            self._handle_run_failure(run_id, store, "review", exc)
+            self._handle_run_failure(run_id, store, workflow, exc)
             raise
 
     def resume(self, run_id: str) -> str:
@@ -124,11 +135,12 @@ class WorkflowEngine:
                 stage="resume",
             )
 
+        self._restore_execution_metadata(meta)
         task = self._load_task_from_meta(meta)
         self._load_supporting_specs(task)
         run_dir = Path(meta.run_dir)
         store = ArtifactStore(run_dir, state_manager=self.state_manager)
-        self.state_manager.transition(run_id, RunStatus.running, stage="resume", data={"workflow": workflow})
+        self.state_manager.transition(run_id, RunStatus.running, stage="resume", data=self._workflow_data(workflow))
 
         try:
             if workflow == "plan":
@@ -136,7 +148,16 @@ class WorkflowEngine:
             elif workflow == "implement":
                 self._resume_implement(task, run_id, run_dir, store, meta.last_completed_stage)
             else:
-                self._resume_review(task, run_id, run_dir, store, meta.last_completed_stage)
+                self._resume_review(
+                    task,
+                    run_id,
+                    run_dir,
+                    store,
+                    meta.last_completed_stage,
+                    workflow_name=workflow,
+                    success_summary="Review workflow completed successfully.",
+                    success_artifacts=["review-report.json", "work-receipt.json"],
+                )
             return run_id
         except Exception as exc:
             self._handle_run_failure(run_id, store, workflow, exc)
@@ -201,9 +222,11 @@ class WorkflowEngine:
 
         if start_after_stage == "plan":
             result = self.adapter.execute(task, plan_content, run_dir)
-            self._ensure_stage_passed(result)
             self.state_manager.update_run(run_id, last_completed_stage="implement", data=self._workflow_data("implement"))
-            self.state_manager.transition(run_id, RunStatus.blocked, stage="implement")
+            if result.status is RunStatus.blocked:
+                self.state_manager.transition(run_id, RunStatus.blocked, stage="implement")
+                return
+            self._ensure_stage_passed(result)
             start_after_stage = "implement"
 
         if start_after_stage in {"implement", "gates"}:
@@ -230,18 +253,20 @@ class WorkflowEngine:
                 return
 
             self.state_manager.transition(run_id, RunStatus.needs_review, stage="gates")
+            if self._requires_explicit_review_handoff():
+                return
             start_after_stage = "gates"
 
-        if start_after_stage == "gates":
-            review_report = self.adapter.review(task, run_dir)
-            store.write_review_report(review_report)
-            self.state_manager.update_run(run_id, last_completed_stage="review", data=self._workflow_data("implement"))
-            self._write_receipt(
-                store,
+        if start_after_stage in {"gates", "review"}:
+            self._resume_review(
+                task,
                 run_id,
-                RunStatus.passed,
-                "Implementation workflow completed successfully.",
-                [
+                run_dir,
+                store,
+                start_after_stage,
+                workflow_name="implement",
+                success_summary="Implementation workflow completed successfully.",
+                success_artifacts=[
                     "context-pack.md",
                     "exec-plan.md",
                     "verify-report.json",
@@ -249,7 +274,6 @@ class WorkflowEngine:
                     "work-receipt.json",
                 ],
             )
-            self.state_manager.transition(run_id, RunStatus.passed, stage="review")
 
     def _resume_review(
         self,
@@ -258,18 +282,27 @@ class WorkflowEngine:
         run_dir: Path,
         store: ArtifactStore,
         last_completed_stage: str | None,
+        *,
+        workflow_name: str,
+        success_summary: str,
+        success_artifacts: list[str],
     ) -> None:
         if last_completed_stage != "review":
             review_report = self.adapter.review(task, run_dir)
             store.write_review_report(review_report)
-            self.state_manager.update_run(run_id, last_completed_stage="review", data=self._workflow_data("review"))
+            self.state_manager.update_run(run_id, last_completed_stage="review", data=self._workflow_data(workflow_name))
+            if self._requires_explicit_review_handoff(review_report):
+                self.state_manager.transition(run_id, RunStatus.blocked, stage="review")
+                return
+        else:
+            store.read_artifact("review-report.json")
 
         self._write_receipt(
             store,
             run_id,
             RunStatus.passed,
-            "Review workflow completed successfully.",
-            ["review-report.json", "work-receipt.json"],
+            success_summary,
+            success_artifacts,
         )
         self.state_manager.transition(run_id, RunStatus.passed, stage="review")
 
@@ -319,6 +352,28 @@ class WorkflowEngine:
             "adapter": self.adapter_name,
             "auto": self.adapter_auto,
         }
+
+    def _restore_execution_metadata(self, meta: RunMeta) -> None:
+        adapter_name = str(meta.data.get("adapter", "")).strip()
+        auto = meta.data.get("auto")
+        if adapter_name not in {"claude", "stub"}:
+            raise StateError("Run does not include a valid stored adapter", path=meta.run_dir, stage="resume")
+        if not isinstance(auto, bool):
+            raise StateError("Run does not include a valid stored auto setting", path=meta.run_dir, stage="resume")
+        self.adapter_name = adapter_name
+        self.adapter_auto = auto
+
+    def _require_review_artifacts(self, run_dir: Path) -> None:
+        verify_report = run_dir / "verify-report.json"
+        if not verify_report.exists():
+            raise StateError("Run is missing verify-report.json required for review", path=verify_report, stage="review")
+
+    def _requires_explicit_review_handoff(self, review_report: dict[str, object] | None = None) -> bool:
+        if self.adapter_name != "claude" or self.adapter_auto:
+            return False
+        if review_report is None:
+            return True
+        return str(review_report.get("mode", "")).strip() == "manual"
 
     def _load_supporting_specs(self, task: TaskSpec) -> None:
         load_runbook(self.ai_root / "runbooks" / f"{task.runbook}.md")

@@ -8,7 +8,7 @@ Use this skill to run the AIWF planning workflow for a task file.
 2. Run:
 
    ```bash
-   aiwf run plan --task <task-path> --adapter claude
+   uv run aiwf run plan --task <task-path> --adapter claude
    ```
 
 3. Report the `run_id`.

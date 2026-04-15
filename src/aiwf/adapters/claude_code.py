@@ -101,8 +101,8 @@ class ClaudeCodeAdapter:
         prompt_path.write_text(prompt, encoding="utf-8")
         return StageResult(
             stage="implement",
-            status=RunStatus.passed,
-            summary=f"Manual Claude implementation prompt written for {task.title}",
+            status=RunStatus.blocked,
+            summary=f"Manual Claude implementation handoff prompt written for {task.title}",
             outputs=[prompt_path.name],
             metadata={"mode": "manual", "prompt_file": prompt_path.name},
         )

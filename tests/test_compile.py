@@ -25,6 +25,8 @@ def test_compile_claude_writes_bundle_and_manifest(tmp_path: Path) -> None:
     assert "## Runbooks" in bundle
     assert "## Gates" in bundle
     assert "## Suggested Commands" in bundle
+    assert "uv run aiwf run review --run-id <run_id>" in bundle
+    assert "uv run aiwf resume <run_id>" in bundle
     assert "- discover: no description" in bundle
     assert manifest["sources"]["runbooks"] == ["default.md"]
     assert manifest["sources"]["gates"] == ["default.yaml"]

@@ -37,7 +37,7 @@ uv sync --extra dev
 ```bash
 uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude
 uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude
-uv run aiwf run review --task .ai/tasks/<task>.md --adapter claude
+uv run aiwf run review --run-id <run_id>
 uv run aiwf resume <run_id>
 uv run aiwf compile claude --output .claude/compiled
 ```
@@ -47,10 +47,12 @@ uv run aiwf compile claude --output .claude/compiled
 - `--adapter claude` 为默认值，走 Claude Code 手动优先模式。
 - `--adapter stub` 适合测试和本地调试。
 - `--auto` 会尝试调用本机 `claude` CLI。
+- `run review` 现在面向已有 run：先让 implement run 到达 `needs_review`，再用 `--run-id` 启动 review。
+- `resume` 会恢复 run 中已存储的 `adapter` / `auto` 设置，而不是要求再次手动指定。
 
 ## 产物契约
 
-每次运行会创建：
+每次运行都会创建 run 目录与状态文件；其余 artifacts 会按当前阶段逐步出现：
 
 ```text
 .ai/runs/<run_id>/
@@ -58,9 +60,11 @@ uv run aiwf compile claude --output .claude/compiled
   events.ndjson
   context-pack.md
   exec-plan.md
-  verify-report.json
-  review-report.json
-  work-receipt.json
+  claude-implement-prompt.md      # manual Claude implement handoff only
+  verify-report.json              # after gates run
+  claude-review-prompt.md         # manual Claude review handoff only
+  review-report.json              # after review step runs
+  work-receipt.json               # terminal summary only
 ```
 
 ## 默认 gates

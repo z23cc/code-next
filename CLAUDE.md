@@ -31,7 +31,7 @@
 本项目的真源在 `.ai/`，而不是 `.claude/`。
 
 - `.ai/policies/`：项目策略、评审规则
-- `.ai/runbooks/`：runbook 语义
+- `.ai/runbooks/`：工作流契约说明与阶段边界
 - `.ai/gates/`：确定性校验命令
 - `.ai/tasks/`：任务输入
 - `.ai/runs/`：每次运行的状态与产物
@@ -112,9 +112,11 @@ src/aiwf/
 2. 再读任务文件与相关 runbook
 3. 优先最小改动，不做无关重构
 4. 先产出计划，再做实现
-5. 实现完成后必须跑 gates
-6. 所有关键决定写入 artifact
-7. 如果上下文过大，拆分任务，不要把过多设计塞进一次回答
+5. 对手动 Claude 模式，要把 prompt 文件视为人工 handoff 边界，而不是视为实现或 review 已经终态完成
+6. 实现完成后必须跑 gates
+7. review 现在基于既有 run 与 artifacts，通过 `run review --run-id <run_id>` 进入
+8. 所有关键决定写入 artifact
+9. 如果上下文过大，拆分任务，不要把过多设计塞进一次回答
 
 ## 编辑原则
 
@@ -132,8 +134,9 @@ src/aiwf/
 1. 目标文件已经修改完毕
 2. gates 运行完成，结果已记录
 3. 必要 artifact 已落盘
-4. 变更范围与任务范围一致
-5. 关键风险与剩余问题已在 `work-receipt.json` 中说明
+4. run 已到达终态；如果仍处于 `blocked` 或 `needs_review`，说明只是到达 handoff 边界，不算完成
+5. 变更范围与任务范围一致
+6. 关键风险与剩余问题已在 `work-receipt.json` 中说明
 
 ## 技能使用建议
 

@@ -71,10 +71,10 @@ def _build_compiled_markdown(
         "",
         "## Suggested Commands",
         "```bash",
-        "aiwf run plan --task .ai/tasks/<task>.md --adapter claude",
-        "aiwf run implement --task .ai/tasks/<task>.md --adapter claude",
-        "aiwf run review --task .ai/tasks/<task>.md --adapter claude",
-        "aiwf resume <run_id>",
+        "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude",
+        "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude",
+        "uv run aiwf run review --run-id <run_id>",
+        "uv run aiwf resume <run_id>",
         "```",
     ]
 

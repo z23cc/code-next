@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -59,27 +58,57 @@ def test_cli_run_implement_command_succeeds(tmp_path: Path) -> None:
     assert "implement completed" in result.stdout
 
 
-def test_cli_run_review_command_succeeds(tmp_path: Path) -> None:
+def test_cli_run_review_command_uses_existing_run(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
 
-    result = runner.invoke(
+    implement_result = runner.invoke(
         app,
         [
             "run",
-            "review",
+            "implement",
             "--task",
             str(task_path),
             "--ai-root",
             str(ai_root),
             "--repo-root",
             str(repo_root),
-            "--adapter",
-            "stub",
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    gates_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert gates_result.exit_code == 0
+    assert "status=needs_review" in gates_result.stdout
+
+    review_result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
         ],
     )
 
-    assert result.exit_code == 0
-    assert "review completed" in result.stdout
+    assert review_result.exit_code == 0
+    assert "status=blocked" in review_result.stdout
+    assert (ai_root / "runs" / run_id / "review-report.json").exists()
+    assert (ai_root / "runs" / run_id / "claude-review-prompt.md").exists()
 
 
 def test_cli_resume_command_succeeds_after_gate_fix(tmp_path: Path) -> None:
@@ -116,8 +145,6 @@ def test_cli_resume_command_succeeds_after_gate_fix(tmp_path: Path) -> None:
             str(ai_root),
             "--repo-root",
             str(repo_root),
-            "--adapter",
-            "stub",
         ],
     )
 
@@ -208,10 +235,12 @@ def test_cli_resume_uses_stored_claude_adapter_when_not_provided(tmp_path: Path)
         ],
     )
 
-    assert implement_result.exit_code == 1
+    assert implement_result.exit_code == 0
+    assert "status=blocked" in implement_result.stdout
     run_id = next((ai_root / "runs").iterdir()).name
     meta = RunStateManager(ai_root).load_run(run_id)
     assert meta.data["adapter"] == "claude"
+    assert meta.status.value == "blocked"
 
     (ai_root / "gates" / "default.yaml").write_text(
         _gates_yaml(_python_print_command("fixed")),
@@ -231,8 +260,157 @@ def test_cli_resume_uses_stored_claude_adapter_when_not_provided(tmp_path: Path)
     )
 
     assert resume_result.exit_code == 0
-    review_report = json.loads((ai_root / "runs" / run_id / "review-report.json").read_text(encoding="utf-8"))
-    assert review_report["summary"].startswith("Manual Claude review prompt")
+    assert "status=needs_review" in resume_result.stdout
+    review_result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert review_result.exit_code == 0
+    assert "status=blocked" in review_result.stdout
+
+    final_resume = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert final_resume.exit_code == 0
+    assert "resume completed" in final_resume.stdout
+    resumed_meta = RunStateManager(ai_root).load_run(run_id)
+    assert resumed_meta.status.value == "passed"
+    assert (ai_root / "runs" / run_id / "review-report.json").exists()
+
+
+def test_cli_review_builds_engine_from_stored_run_metadata(tmp_path: Path, monkeypatch) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    gates_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert gates_result.exit_code == 0
+    state_manager = RunStateManager(ai_root)
+    state_manager.update_run(run_id, data={"adapter": "claude", "auto": True})
+
+    seen: list[tuple[str, bool]] = []
+
+    class FakeEngine:
+        def run_review(self, captured_run_id: str) -> str:
+            assert captured_run_id == run_id
+            return captured_run_id
+
+    def fake_build_engine(ai_root_arg: Path, repo_root_arg: Path, *, adapter_name: str, auto: bool = False) -> FakeEngine:
+        assert ai_root_arg == ai_root
+        assert repo_root_arg == repo_root
+        seen.append((adapter_name, auto))
+        return FakeEngine()
+
+    monkeypatch.setattr("aiwf.cli._build_engine", fake_build_engine)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen == [("claude", True)]
+
+
+def test_cli_resume_builds_engine_from_stored_run_metadata(tmp_path: Path, monkeypatch) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    state_manager = RunStateManager(ai_root)
+    state_manager.update_run(run_id, data={"adapter": "claude", "auto": True})
+
+    seen: list[tuple[str, bool]] = []
+
+    class FakeEngine:
+        def resume(self, captured_run_id: str) -> str:
+            assert captured_run_id == run_id
+            return captured_run_id
+
+    def fake_build_engine(ai_root_arg: Path, repo_root_arg: Path, *, adapter_name: str, auto: bool = False) -> FakeEngine:
+        assert ai_root_arg == ai_root
+        assert repo_root_arg == repo_root
+        seen.append((adapter_name, auto))
+        return FakeEngine()
+
+    monkeypatch.setattr("aiwf.cli._build_engine", fake_build_engine)
+
+    result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen == [("claude", True)]
 
 
 def _create_ai_workspace(

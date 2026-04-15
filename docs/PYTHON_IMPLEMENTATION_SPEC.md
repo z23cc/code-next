@@ -10,7 +10,7 @@
 
 ### 2.1 真源优先
 所有流程语义应来自 `.ai/`，而不是硬编码在 Python 里。  
-Python 代码负责“解释 runbook 与状态”，不是把所有工作流规则写死。
+当前阶段中，Python 代码仍拥有主要的 `plan / implement / review / resume` 控制流；runbook 更偏向可校验的工作流契约说明与阶段边界描述，而不是单独驱动全部分支与状态迁移。
 
 ### 2.2 文件协议优先
 第一阶段不依赖数据库。  
@@ -112,7 +112,7 @@ tests/
 
 - `run_plan(task_path)`
 - `run_implement(task_path)`
-- `run_review(task_path | run_id)`
+- `run_review(run_id)`
 - `resume(run_id)`
 
 ### 4.7 `adapters/base.py`
@@ -131,18 +131,18 @@ tests/
 - 把 prompt / 输入文件路径交给 Claude Code
 - 将标准输出解析为 artifact 内容或结果摘要
 
-如果任务环境不适合直接自动执行，也可以先把该适配器实现为 “生成交互 prompt + 记录 receipt” 的半自动版本。
+如果任务环境不适合直接自动执行，也可以先把该适配器实现为“生成交互 prompt 并在 run 边界停下等待人工继续”的半自动版本。
 
 ## 5. CLI 设计
 
 建议使用 `typer`，命令面如下：
 
 ```bash
-aiwf run plan --task .ai/tasks/example.md
-aiwf run implement --task .ai/tasks/example.md
-aiwf run review --task .ai/tasks/example.md
-aiwf resume <run_id>
-aiwf compile claude
+uv run aiwf run plan --task .ai/tasks/example.md
+uv run aiwf run implement --task .ai/tasks/example.md
+uv run aiwf run review --run-id <run_id>
+uv run aiwf resume <run_id>
+uv run aiwf compile claude
 ```
 
 ### 5.1 CLI 输出原则
@@ -190,15 +190,17 @@ aiwf compile claude
 3. discover
 4. plan（可复用已有 plan）
 5. execute
-6. run gates
-7. review（第一阶段可选为本地静态 review）
-8. 写入 receipt
+6. 如果是手动 Claude 模式，可在实现 handoff prompt 处先停为 `blocked`
+7. run gates
+8. gates 通过后进入 `needs_review`
+9. 由显式 review 步骤继续，而不是自动把 prompt 生成视为 review 完成
 
 ### `review`
-1. 读取 task 或 run
-2. 收集 diff / artifacts
+1. 读取既有 run 与 artifacts（不是重新从 task 启动一条独立 review run）
+2. 收集 verify-report / diff / review 上下文
 3. 做独立 review
 4. 输出 `review-report.json`
+5. 手动 Claude 模式下可再次停在 `blocked`，由后续 `resume(run_id)` 完成终态收口
 
 ## 8. 第一阶段的现实取舍
 
@@ -246,7 +248,7 @@ aiwf compile claude
 - task / runbook / gate 可以独立加载
 - `run.json` 始终可读
 - gate 失败时状态正确落盘
-- `work-receipt.json` 总能生成
+- 终态 run 会生成 `work-receipt.json`，非终态 handoff run 不应伪造 receipt
 - 异常信息包含路径与阶段
 - 测试覆盖至少包含 happy path 与一个 failure path
 
@@ -263,7 +265,7 @@ aiwf compile claude
 第一版交付应能完成这个 demo：
 
 1. 读取 `.ai/tasks/TEMPLATE.md` 改造出的真实任务
-2. `aiwf run plan --task ...` 成功创建 run 目录
+2. `uv run aiwf run plan --task ...` 成功创建 run 目录
 3. `context-pack.md` 与 `exec-plan.md` 被写出
-4. `aiwf run implement --task ...` 成功执行 gates
-5. `work-receipt.json` 被写出并标记最终状态
+4. `uv run aiwf run implement --task ...` 能正确经历 handoff / gates / needs_review 边界
+5. `uv run aiwf run review --run-id ...` 与 `uv run aiwf resume <run_id>` 能把 review 终态正确收口，并写出 `work-receipt.json`

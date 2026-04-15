@@ -21,7 +21,7 @@ def test_claude_adapter_manual_mode_generates_expected_outputs(tmp_path: Path) -
 
     assert "Claude Context Pack" in context
     assert "Suggested Claude Prompt" in plan
-    assert result.status is RunStatus.passed
+    assert result.status is RunStatus.blocked
     assert result.metadata["mode"] == "manual"
     assert (run_dir / "claude-implement-prompt.md").exists()
     assert review["mode"] == "manual"
