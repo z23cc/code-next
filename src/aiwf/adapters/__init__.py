@@ -15,7 +15,7 @@ from aiwf.adapters.base import (
 )
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.adapters.codex import CodexAdapter
-from aiwf.adapters.rp_agent import RP_MANUAL_CONTRACT, RpAgentAdapter
+from aiwf.adapters.rp_agent import RP_AUTO_CONTRACT, RP_MANUAL_CONTRACT, RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 
 
@@ -78,6 +78,7 @@ ADAPTER_SPECS: dict[str, AdapterSpec] = {
         name="rp",
         variants={
             "manual": RP_MANUAL_CONTRACT,
+            "auto": RP_AUTO_CONTRACT,
         },
         factory=_build_rp_adapter,
     ),

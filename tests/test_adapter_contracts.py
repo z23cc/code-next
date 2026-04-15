@@ -80,10 +80,36 @@ def test_restore_host_contract_accepts_legacy_metadata() -> None:
 
 def test_build_adapter_rejects_unsupported_auto_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not support auto mode"):
-        build_adapter("rp", tmp_path, auto=True)
-
-    with pytest.raises(ValueError, match="does not support auto mode"):
         build_adapter("codex", tmp_path, auto=True)
+
+
+def test_build_adapter_supports_rp_auto_mode(tmp_path: Path) -> None:
+    adapter, contract = build_adapter("rp", tmp_path, auto=True)
+
+    assert contract == HostContract(
+        adapter="rp",
+        mode="auto",
+        capabilities=HostCapabilities(
+            supports_auto_execution=True,
+            requires_explicit_review_handoff=False,
+        ),
+        review=ReviewArtifactContract(
+            required_run_artifacts=("verify-report.json",),
+            required_report_string_fields=("summary", "mode", "response_file"),
+            required_report_list_fields=("issues",),
+            expected_report_mode="auto",
+            linked_report_artifact_field="response_file",
+        ),
+        native_runtime=NativeRuntimeContract(
+            enabled=True,
+            command_candidates=("rp", "rp-cli"),
+            install_hint=(
+                "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
+                "to make RP native-ready; manual handoff remains supported."
+            ),
+        ),
+    )
+    assert adapter.host_contract == contract
 
 
 def test_builtin_adapter_contracts_pass_lint() -> None:
@@ -174,6 +200,45 @@ def test_restore_host_contract_backfills_review_contract_for_item1_metadata() ->
             required_report_list_fields=("issues",),
             expected_report_mode="manual",
             linked_report_artifact_field="prompt_file",
+        ),
+    )
+
+
+def test_restore_host_contract_backfills_rp_auto_contract_defaults() -> None:
+    contract = restore_host_contract(
+        {
+            "host_contract": {
+                "adapter": "rp",
+                "mode": "auto",
+                "capabilities": {
+                    "supports_auto_execution": True,
+                    "requires_explicit_review_handoff": False,
+                },
+            }
+        }
+    )
+
+    assert contract == HostContract(
+        adapter="rp",
+        mode="auto",
+        capabilities=HostCapabilities(
+            supports_auto_execution=True,
+            requires_explicit_review_handoff=False,
+        ),
+        review=ReviewArtifactContract(
+            required_run_artifacts=("verify-report.json",),
+            required_report_string_fields=("summary", "mode", "response_file"),
+            required_report_list_fields=("issues",),
+            expected_report_mode="auto",
+            linked_report_artifact_field="response_file",
+        ),
+        native_runtime=NativeRuntimeContract(
+            enabled=True,
+            command_candidates=("rp", "rp-cli"),
+            install_hint=(
+                "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
+                "to make RP native-ready; manual handoff remains supported."
+            ),
         ),
     )
 

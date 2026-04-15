@@ -6,7 +6,7 @@ import fnmatch
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from aiwf.adapters.base import HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
 from aiwf.exceptions import AdapterError
@@ -63,24 +63,51 @@ RP_MANUAL_CONTRACT = HostContract(
     native_runtime=RP_NATIVE_RUNTIME,
 )
 
+RP_AUTO_CONTRACT = HostContract(
+    adapter="rp",
+    mode="auto",
+    capabilities=HostCapabilities(
+        supports_auto_execution=True,
+        requires_explicit_review_handoff=False,
+    ),
+    review=ReviewArtifactContract(
+        required_run_artifacts=("verify-report.json",),
+        required_report_string_fields=("summary", "mode", "response_file"),
+        required_report_list_fields=("issues",),
+        expected_report_mode="auto",
+        linked_report_artifact_field="response_file",
+    ),
+    native_runtime=RP_NATIVE_RUNTIME,
+)
+
 
 class RpAgentAdapter:
-    """Manual-first RepoPrompt adapter with native-runtime contract scaffolding."""
+    """RepoPrompt adapter with manual fallback and a minimal native execution path."""
 
     def __init__(
         self,
         repo_root: str | Path = ".",
         *,
+        auto: bool | None = None,
         host_contract: HostContract | None = None,
+        rp_command: Sequence[str] | None = None,
         max_snapshot_entries: int = 60,
+        rp_timeout: int = 300,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.max_snapshot_entries = max_snapshot_entries
-        self.host_contract = host_contract or RP_MANUAL_CONTRACT
+        if host_contract is None:
+            host_contract = RP_AUTO_CONTRACT if auto else RP_MANUAL_CONTRACT
+        elif auto is not None and auto != host_contract.auto:
+            raise ValueError("RpAgentAdapter auto flag does not match supplied host contract")
+        self.host_contract = host_contract
         if self.host_contract.adapter != "rp":
             raise ValueError("RpAgentAdapter requires an rp host contract")
-        if self.host_contract.mode != "manual":
-            raise ValueError("RpAgentAdapter currently supports manual mode only")
+        if self.host_contract.mode not in {"manual", "auto"}:
+            raise ValueError("RpAgentAdapter only supports manual or auto host contracts")
+        self.auto = self.host_contract.auto
+        self.rp_command = list(rp_command) if rp_command is not None else None
+        self.rp_timeout = rp_timeout
 
     def discover(self, task: TaskSpec, run_dir: Path) -> str:
         """Build a RepoPrompt-oriented local context pack without invoking an external host."""
@@ -117,8 +144,10 @@ class RpAgentAdapter:
         )
 
     def plan(self, task: TaskSpec, context: str) -> str:
-        """Return a manual-friendly RepoPrompt planning brief."""
+        """Return a RepoPrompt planning brief or native runtime output."""
         prompt = self._build_plan_prompt(task, context)
+        if self.auto:
+            return self._run_rp(prompt, stage="plan")
         return "\n".join(
             [
                 f"# RepoPrompt Agent Plan for {task.title}",
@@ -134,8 +163,20 @@ class RpAgentAdapter:
         )
 
     def execute(self, task: TaskSpec, plan: str, run_dir: Path) -> StageResult:
-        """Write an implementation handoff brief and block for external agent execution."""
+        """Write a manual handoff brief or execute via a native RepoPrompt runtime."""
         prompt = self._build_execute_prompt(task, plan, run_dir)
+        if self.auto:
+            response = self._run_rp(prompt, stage="implement", path=run_dir)
+            response_path = run_dir / "rp-agent-implement-response.md"
+            response_path.write_text(response, encoding="utf-8")
+            return StageResult(
+                stage="implement",
+                status=RunStatus.passed,
+                summary=f"RepoPrompt native execution completed for {task.title}",
+                outputs=[response_path.name],
+                metadata={"mode": "auto", "response_file": response_path.name},
+            )
+
         prompt_path = run_dir / "rp-agent-implement-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
         return StageResult(
@@ -147,12 +188,29 @@ class RpAgentAdapter:
         )
 
     def review(self, task: TaskSpec, run_dir: Path) -> dict[str, object]:
-        """Write a review handoff brief and block for external agent review."""
+        """Write a manual review handoff brief or execute native review."""
         evidence_summary = self._build_review_evidence_summary(run_dir)
         prompt = self._build_review_prompt(task, run_dir, evidence_summary=evidence_summary)
+        evidence_files = self._review_evidence_files(run_dir)
+        if self.auto:
+            response = self._run_rp(prompt, stage="review", path=run_dir)
+            response_path = run_dir / "rp-agent-review-response.md"
+            response_path.write_text(response, encoding="utf-8")
+            return {
+                "summary": f"RepoPrompt native review completed for {task.title}",
+                "issues": [],
+                "mode": "auto",
+                "response_file": response_path.name,
+                "response_excerpt": response.splitlines()[0] if response else "",
+                "verify_report_file": "verify-report.json",
+                "diagnostics_file": "run-diagnostics.json",
+                "provenance_file": "run-provenance.json",
+                "evidence_files": evidence_files,
+                "evidence_summary": evidence_summary,
+            }
+
         prompt_path = run_dir / "rp-agent-review-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
-        evidence_files = self._review_evidence_files(run_dir)
         return {
             # Contract-required fields validated by the shared review contract.
             "summary": f"RepoPrompt review handoff prompt written for {task.title}",
@@ -166,6 +224,43 @@ class RpAgentAdapter:
             "evidence_files": evidence_files,
             "evidence_summary": evidence_summary,
         }
+
+    def _run_rp(self, prompt: str, *, stage: str, path: Path | None = None) -> str:
+        commands = [self.rp_command] if self.rp_command is not None else [
+            [candidate] for candidate in self.host_contract.native_runtime.command_candidates
+        ]
+        missing_runtime = False
+        for command in commands:
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=self.repo_root,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self.rp_timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise AdapterError("RepoPrompt native runtime timed out", path=path or self.repo_root, stage=stage) from exc
+            except FileNotFoundError:
+                missing_runtime = True
+                continue
+            except OSError as exc:
+                raise AdapterError("Failed to invoke RepoPrompt native runtime", path=path or self.repo_root, stage=stage) from exc
+
+            if completed.returncode != 0:
+                message = (
+                    completed.stderr.strip()
+                    or completed.stdout.strip()
+                    or "RepoPrompt native runtime returned a failure"
+                )
+                raise AdapterError(message, path=path or self.repo_root, stage=stage)
+            return completed.stdout.strip()
+
+        if missing_runtime:
+            raise AdapterError("RepoPrompt native runtime is not available", path=path or self.repo_root, stage=stage)
+        raise AdapterError("RepoPrompt native runtime is not configured", path=path or self.repo_root, stage=stage)
 
     def _build_plan_prompt(self, task: TaskSpec, context: str) -> str:
         return "\n".join(

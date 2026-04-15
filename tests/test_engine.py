@@ -357,6 +357,50 @@ def test_auto_claude_failed_implement_persists_failed_runtime_surfaces(tmp_path:
     assert "boom" in receipt["summary"]
 
 
+def test_auto_rp_run_implement_completes_native_path(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        RpAgentAdapter(
+            repo_root=repo_root,
+            auto=True,
+            rp_command=[sys.executable, "-c", "import sys; print('stdin:' + ('yes' if sys.stdin.read() else 'no'))"],
+        ),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+    diagnostics = json.loads((run_dir / "run-diagnostics.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "run-provenance.json").read_text(encoding="utf-8"))
+    review_report = json.loads((run_dir / "review-report.json").read_text(encoding="utf-8"))
+
+    assert meta.status is RunStatus.passed
+    assert meta.last_completed_stage == "review"
+    assert (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8") == "stdin:yes"
+    assert (run_dir / "rp-agent-review-response.md").read_text(encoding="utf-8") == "stdin:yes"
+    assert not (run_dir / "rp-agent-implement-prompt.md").exists()
+    assert not (run_dir / "rp-agent-review-prompt.md").exists()
+
+    assert diagnostics["status"] == "passed"
+    assert diagnostics["host"]["adapter"] == "rp"
+    assert diagnostics["host"]["mode"] == "auto"
+    assert diagnostics["host"]["supports_auto_execution"] is True
+    assert diagnostics["host"]["requires_explicit_review_handoff"] is False
+    assert diagnostics["reviewable"] is False
+    assert diagnostics["resumable"] is False
+
+    assert provenance["host"]["adapter"] == "rp"
+    assert provenance["host"]["mode"] == "auto"
+    assert provenance["review_evidence"]["mode"] == "auto"
+    assert provenance["review_evidence"]["linked_artifacts"][0]["name"] == "rp-agent-review-response.md"
+
+    assert review_report["mode"] == "auto"
+    assert review_report["response_file"] == "rp-agent-review-response.md"
+    assert review_report["response_excerpt"] == "stdin:yes"
+
+
 def test_manual_rp_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
     engine = WorkflowEngine(

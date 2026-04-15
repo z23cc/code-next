@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,49 @@ def test_rp_agent_adapter_generates_manual_handoff_outputs(tmp_path: Path) -> No
     assert "verify: gate_set=default passed=True" in prompt_text
     assert "diagnostics: status=needs_review reviewable=True resumable=False" in prompt_text
     assert "provenance: gate_report=" in prompt_text
+
+
+def test_rp_agent_adapter_auto_mode_uses_subprocess_output(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        auto=True,
+        rp_command=[sys.executable, "-c", "import sys; print('stdin:' + ('yes' if sys.stdin.read() else 'no'))"],
+    )
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+    review = adapter.review(task, run_dir)
+
+    assert adapter.host_contract.adapter == "rp"
+    assert adapter.host_contract.mode == "auto"
+    assert adapter.host_contract.capabilities.supports_auto_execution is True
+    assert adapter.host_contract.capabilities.requires_explicit_review_handoff is False
+    assert adapter.host_contract.review.required_run_artifacts == ("verify-report.json",)
+    assert adapter.host_contract.review.expected_report_mode == "auto"
+    assert adapter.host_contract.review.linked_report_artifact_field == "response_file"
+    assert plan == "stdin:yes"
+    assert result.status is RunStatus.passed
+    assert result.metadata["mode"] == "auto"
+    assert (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8") == "stdin:yes"
+    assert review["mode"] == "auto"
+    assert review["response_excerpt"] == "stdin:yes"
+    assert (run_dir / "rp-agent-review-response.md").read_text(encoding="utf-8") == "stdin:yes"
+
+
+def test_rp_agent_adapter_auto_mode_raises_when_runtime_missing(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        auto=True,
+        rp_command=["missing-rp-native-runtime-for-aiwf-tests"],
+    )
+
+    with pytest.raises(AdapterError) as exc_info:
+        adapter.execute(task, "# plan", run_dir)
+
+    assert "stage=implement" in str(exc_info.value)
 
 
 def test_rp_agent_adapter_review_includes_compact_gate_and_change_evidence(tmp_path: Path, monkeypatch) -> None:
