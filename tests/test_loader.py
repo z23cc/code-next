@@ -22,7 +22,12 @@ def test_load_seed_files_from_repo() -> None:
     assert [stage.name for stage in runbook.stages] == ["discover", "plan", "implement", "review"]
     assert all(stage.required is True for stage in runbook.stages)
     assert all(stage.retry_limit == 0 for stage in runbook.stages)
-    assert all(stage.pause_on == [] for stage in runbook.stages)
+    assert [stage.pause_on for stage in runbook.stages] == [
+        [],
+        [],
+        ["blocked", "needs_review"],
+        ["blocked"],
+    ]
     assert [gate.name for gate in gate_set.gates] == ["lint", "typecheck", "test"]
     assert "aiwf" in policy.lower()
 
