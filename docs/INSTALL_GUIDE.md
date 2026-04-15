@@ -147,6 +147,8 @@ uv run aiwf run review --run-id <run_id>
 
 review contract 也会从 manual 的 `prompt_file` 切换到 auto 的 `response_file`。
 
+> **Protocol note:** The structured I/O protocol between `aiwf` and the RP native runtime is specified in `docs/RP_NATIVE_PROTOCOL.md`. Legacy text-mode runtimes remain fully supported.
+
 ### 3.5 RP bundle 给谁看
 
 - 人工操作者：直接读 `rp-bundle.md`

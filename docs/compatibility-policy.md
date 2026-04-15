@@ -92,6 +92,8 @@ Do not remove accepted-on-read support for a persisted run shape until all of th
 
 Practical consequence: deleting support for `adapter` + `auto` or for partial `host_contract` payloads is a breaking change.
 
+Note: For `NativeRuntimeContract` evolution related to the RP native I/O protocol, see `docs/RP_NATIVE_PROTOCOL.md`.
+
 ## 2. Stable projection and install-surface contract
 
 The stable compiled projection surface is the JSON contract protected by `tests/test_compile.py` and the `tests/fixtures/*projection_compat.json` files.
