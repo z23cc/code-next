@@ -144,6 +144,94 @@ class WorkReceipt(ModelBase):
     finished_at: datetime = Field(default_factory=utc_now)
 
 
+class RunArtifactRef(ModelBase):
+    """A key artifact reference surfaced in run diagnostics."""
+
+    name: str
+    path: str
+
+
+class RunTimelineEntry(ModelBase):
+    """A timeline entry summarizing a meaningful run event."""
+
+    ts: datetime
+    event: str
+    stage: str | None = None
+    status: RunStatus | None = None
+
+
+class RunHostDiagnostics(ModelBase):
+    """Host contract summary relevant to operator action."""
+
+    adapter: str
+    mode: str
+    supports_auto_execution: bool
+    requires_explicit_review_handoff: bool
+
+
+class RunDiagnostics(ModelBase):
+    """Structured diagnostics/explainability surface for a workflow run."""
+
+    run_id: str
+    workflow: str
+    status: RunStatus
+    last_completed_stage: str | None = None
+    status_reason: str
+    resumable: bool = False
+    reviewable: bool = False
+    resume_command: str | None = None
+    review_command: str | None = None
+    next_actions: list[str] = Field(default_factory=list)
+    error: str | None = None
+    host: RunHostDiagnostics
+    key_artifacts: list[RunArtifactRef] = Field(default_factory=list)
+    stage_timeline: list[RunTimelineEntry] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
+class RunProvenanceArtifact(ModelBase):
+    """A navigable artifact index entry with stage/category provenance."""
+
+    name: str
+    path: str
+    stage: str | None = None
+    category: str
+    related_artifacts: list[str] = Field(default_factory=list)
+
+
+class RunGateEvidence(ModelBase):
+    """Gate evidence references surfaced for later operator tooling."""
+
+    report: RunArtifactRef | None = None
+    gate_set: str | None = None
+    passed: bool | None = None
+
+
+class RunReviewEvidence(ModelBase):
+    """Review evidence references surfaced from the host contract/report."""
+
+    report: RunArtifactRef | None = None
+    mode: str | None = None
+    linked_report_artifact_field: str | None = None
+    linked_artifacts: list[RunArtifactRef] = Field(default_factory=list)
+    required_run_artifacts: list[str] = Field(default_factory=list)
+    available_required_artifacts: list[RunArtifactRef] = Field(default_factory=list)
+
+
+class RunProvenance(ModelBase):
+    """Run-level artifact/evidence navigation surface."""
+
+    run_id: str
+    workflow: str
+    status: RunStatus
+    last_completed_stage: str | None = None
+    host: RunHostDiagnostics
+    artifact_index: list[RunProvenanceArtifact] = Field(default_factory=list)
+    gate_evidence: RunGateEvidence = Field(default_factory=RunGateEvidence)
+    review_evidence: RunReviewEvidence = Field(default_factory=RunReviewEvidence)
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
 class StageResult(ModelBase):
     """Result object returned by a single workflow stage."""
 

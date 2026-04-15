@@ -153,6 +153,7 @@ uv run aiwf run plan --task .ai/tasks/example.md
 uv run aiwf run implement --task .ai/tasks/example.md
 uv run aiwf run review --run-id <run_id>
 uv run aiwf resume <run_id>
+uv run aiwf inspect <run_id>
 uv run aiwf compile claude
 ```
 
@@ -161,6 +162,11 @@ uv run aiwf compile claude
 - 不隐藏关键失败信息
 - 所有 run 都打印 `run_id`
 - 失败时指出 artifact 或日志位置
+- 非终态（`blocked` / `needs_review` / `failed`）时，至少应给出：
+  - status reason
+  - next action hint
+  - `run-diagnostics.json` / `run-provenance.json` 路径
+  - 一个稳定的 inspection 命令（如 `aiwf inspect <run_id>`）
 
 ### 5.2 `compile claude` 最小投影契约
 
@@ -183,6 +189,8 @@ uv run aiwf compile claude
   verify-report.json
   review-report.json
   work-receipt.json
+  run-diagnostics.json
+  run-provenance.json
 ```
 
 其中：
@@ -190,6 +198,8 @@ uv run aiwf compile claude
 - `events.ndjson` 是 append-only 事件流
 - `work-receipt.json` 是最终摘要
 - `run.json.data.host_contract` 是恢复运行时宿主边界的真源
+- `run-diagnostics.json` 是面向运行时解释的状态摘要，至少包含：status / reason / next actions / key artifact refs / host summary
+- `run-provenance.json` 是面向运行时导航的 evidence surface，至少包含：artifact index、gate evidence、review evidence、linked artifacts
 - 手动宿主的 handoff prompt / 自动宿主的 response artifact 会按宿主契约选择性出现
 
 ## 7. 最小可行流程

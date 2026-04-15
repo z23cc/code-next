@@ -61,7 +61,7 @@ class StubRunnerAdapter:
             stage="implement",
             status=RunStatus.passed,
             summary=f"Stub implementation completed for {task.title}",
-            outputs=["verify-report.json", "review-report.json", "work-receipt.json"],
+            outputs=[],
             metadata={"plan_excerpt": plan.splitlines()[0] if plan else "", "run_dir": str(run_dir)},
         )
 

@@ -42,6 +42,14 @@ class ArtifactStore:
         """Persist `work-receipt.json`."""
         return self._write_json_artifact("work-receipt.json", receipt)
 
+    def write_run_diagnostics(self, diagnostics: BaseModel | dict[str, Any]) -> Path:
+        """Persist `run-diagnostics.json`."""
+        return self._write_json_artifact("run-diagnostics.json", diagnostics)
+
+    def write_run_provenance(self, provenance: BaseModel | dict[str, Any]) -> Path:
+        """Persist `run-provenance.json`."""
+        return self._write_json_artifact("run-provenance.json", provenance)
+
     def read_artifact(self, name: str) -> str | dict[str, Any]:
         """Read a stored artifact by filename."""
         artifact_path = self.run_dir / name

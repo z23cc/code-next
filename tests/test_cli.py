@@ -108,6 +108,8 @@ def test_cli_run_review_command_uses_existing_run(tmp_path: Path) -> None:
 
     assert review_result.exit_code == 0
     assert "status=blocked" in review_result.stdout
+    assert "diagnostics=" in review_result.stdout
+    assert "provenance=" in review_result.stdout
     assert (ai_root / "runs" / run_id / "review-report.json").exists()
     assert (ai_root / "runs" / run_id / "claude-review-prompt.md").exists()
 
@@ -239,6 +241,8 @@ def test_cli_resume_uses_stored_claude_adapter_when_not_provided(tmp_path: Path)
 
     assert implement_result.exit_code == 0
     assert "status=blocked" in implement_result.stdout
+    assert "reason=Run is blocked at implement" in implement_result.stdout
+    assert "inspect=uv run aiwf inspect" in implement_result.stdout
     run_id = next((ai_root / "runs").iterdir()).name
     meta = RunStateManager(ai_root).load_run(run_id)
     assert meta.data["host_contract"]["adapter"] == "claude"
@@ -264,6 +268,7 @@ def test_cli_resume_uses_stored_claude_adapter_when_not_provided(tmp_path: Path)
 
     assert resume_result.exit_code == 0
     assert "status=needs_review" in resume_result.stdout
+    assert "diagnostics=" in resume_result.stdout
     review_result = runner.invoke(
         app,
         [
@@ -280,6 +285,7 @@ def test_cli_resume_uses_stored_claude_adapter_when_not_provided(tmp_path: Path)
 
     assert review_result.exit_code == 0
     assert "status=blocked" in review_result.stdout
+    assert "provenance=" in review_result.stdout
 
     final_resume = runner.invoke(
         app,
@@ -321,6 +327,7 @@ def test_cli_rp_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path)
 
     assert implement_result.exit_code == 0
     assert "status=blocked" in implement_result.stdout
+    assert "inspect=uv run aiwf inspect" in implement_result.stdout
     run_id = next((ai_root / "runs").iterdir()).name
     meta = RunStateManager(ai_root).load_run(run_id)
     assert meta.data["host_contract"]["adapter"] == "rp"
@@ -358,6 +365,7 @@ def test_cli_rp_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path)
 
     assert review_result.exit_code == 0
     assert "status=blocked" in review_result.stdout
+    assert "inspect=uv run aiwf inspect" in review_result.stdout
     assert (ai_root / "runs" / run_id / "rp-agent-review-prompt.md").exists()
 
     final_resume = runner.invoke(
@@ -591,6 +599,128 @@ def test_cli_rejects_auto_when_adapter_contract_does_not_support_it(tmp_path: Pa
 
     assert result.exit_code == 1
     assert "does not support auto mode" in result.stdout
+
+
+def test_cli_inspect_command_surfaces_diagnostics_and_provenance(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    assert f"run_id={run_id}" in inspect_result.stdout
+    assert "reason=Run is blocked at implement" in inspect_result.stdout
+    assert "host=adapter=claude mode=manual" in inspect_result.stdout
+    assert "next_actions:" in inspect_result.stdout
+    assert "artifacts:" in inspect_result.stdout
+    assert "claude-implement-prompt.md" in inspect_result.stdout
+    assert "diagnostics=" in inspect_result.stdout
+    assert "provenance=" in inspect_result.stdout
+
+
+def test_cli_inspect_command_surfaces_gate_and_review_evidence(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    gates_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert gates_result.exit_code == 0
+
+    review_result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert review_result.exit_code == 0
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    assert "gate_evidence=gate_set=default passed=True" in inspect_result.stdout
+    assert "review_evidence=mode=manual" in inspect_result.stdout
+    assert "review_links:" in inspect_result.stdout
+    assert "claude-review-prompt.md" in inspect_result.stdout
+
+
+def test_cli_inspect_command_fails_for_missing_run(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "inspect",
+            "missing-run",
+            "--ai-root",
+            str(tmp_path / ".ai"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "inspect failed:" in result.stdout
+    assert "missing-run" in result.stdout
 
 
 def _create_ai_workspace(

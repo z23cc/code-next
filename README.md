@@ -39,6 +39,7 @@ uv run aiwf run plan --task .ai/tasks/<task>.md --adapter claude
 uv run aiwf run implement --task .ai/tasks/<task>.md --adapter claude
 uv run aiwf run review --run-id <run_id>
 uv run aiwf resume <run_id>
+uv run aiwf inspect <run_id>
 uv run aiwf compile claude --output .claude/compiled
 ```
 
@@ -49,6 +50,7 @@ uv run aiwf compile claude --output .claude/compiled
 - `--auto` 会在所选 adapter 的显式宿主契约支持时启用自动模式；当前 Claude 支持，RP / stub 不支持。
 - `run review` 现在面向已有 run：先让 implement run 到达 `needs_review`，再用 `--run-id` 启动 review。
 - `resume` / `run review` 会恢复 run 中已存储的 `host_contract`，而不是要求再次手动指定 adapter 语义。
+- `inspect` 会读取 `run-diagnostics.json` 与 `run-provenance.json`，直接告诉你 run 为什么停下、下一步做什么、关键证据 artifacts 在哪里。
 - `compile claude` 会生成 Claude 宿主投影文件与 drift-aware manifest，而不只是简单 bundle 导出。
 
 ## 宿主契约与 review 证据契约
@@ -84,7 +86,32 @@ uv run aiwf compile claude --output .claude/compiled
   claude-review-prompt.md         # manual Claude review handoff only
   review-report.json              # after review step runs
   work-receipt.json               # terminal summary only
+  run-diagnostics.json            # status/reason/next-actions surface
+  run-provenance.json             # artifact index + gate/review evidence navigation
 ```
+
+当 run 处于 `blocked` / `needs_review` / `failed` 时，CLI 会直接打印：
+
+- `reason=...`
+- 一到两个 `next=...`
+- `diagnostics=...`
+- `provenance=...`
+- `inspect=uv run aiwf inspect <run_id> --ai-root ...`
+
+如果需要完整查看 explainability surface，可运行：
+
+```bash
+uv run aiwf inspect <run_id>
+```
+
+该命令会汇总：
+
+- 当前 workflow / status / last completed stage
+- 停止原因与 next actions
+- 宿主契约关键能力（mode / auto support / review handoff）
+- gate evidence
+- review evidence 与 linked artifacts
+- run-level artifact index
 
 ## 默认 gates
 

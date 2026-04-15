@@ -146,6 +146,27 @@ class RunStateManager:
         except OSError as exc:
             raise StateError("Failed to append event", path=events_path, stage="append_event") from exc
 
+    def load_events(self, run_id: str) -> list[EventRecord]:
+        """Load parsed append-only run events from `events.ndjson`."""
+        run_dir = self._require_run_dir(run_id)
+        events_path = run_dir / "events.ndjson"
+        try:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError as exc:
+            raise StateError("Run events do not exist", path=events_path, stage="load_events") from exc
+        except OSError as exc:
+            raise StateError("Failed to read run events", path=events_path, stage="load_events") from exc
+
+        events: list[EventRecord] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                events.append(EventRecord.model_validate_json(line))
+            except ValidationError as exc:
+                raise StateError("Invalid run event record", path=events_path, stage="load_events") from exc
+        return events
+
     def update_run(
         self,
         run_id: str,

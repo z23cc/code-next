@@ -67,7 +67,37 @@ review 阶段会按当前 `host_contract.review` 契约检查：
 - `review-report.json` 是否包含最小必需字段
 - 报告中引用的证据 artifact（如 `prompt_file` / `response_file`）是否真实存在
 
-## 6. 编译 Claude 输入包
+## 6. 查看 run 为什么停下
+
+当 run 停在 `blocked` / `needs_review` / `failed` 时，CLI 会直接打印：
+
+- `reason=...`
+- `next=...`
+- `diagnostics=...`
+- `provenance=...`
+- `inspect=uv run aiwf inspect <run_id> --ai-root ...`
+
+如果需要完整查看 explainability / evidence surface，执行：
+
+```bash
+uv run aiwf inspect <run_id>
+```
+
+该命令会汇总：
+
+- 当前状态、最后完成阶段、停止原因
+- 下一步建议操作
+- 宿主契约关键能力
+- `verify-report.json` 对应的 gate evidence
+- `review-report.json` 与 linked review evidence
+- run-level artifact index
+
+对应运行目录中的核心 explainability artifacts 为：
+
+- `.ai/runs/<run_id>/run-diagnostics.json`
+- `.ai/runs/<run_id>/run-provenance.json`
+
+## 7. 编译 Claude 输入包
 
 ```bash
 uv run aiwf compile claude --output .claude/compiled
@@ -85,7 +115,7 @@ uv run aiwf compile claude --output .claude/compiled
 - `claude-projection.json` 是 Claude 宿主投影契约，包含显式 host/review contract 元数据
 - `manifest.json` 会记录 source fingerprint 与上一次编译相比的 drift 状态
 
-## 7. Claude Code 技能入口
+## 8. Claude Code 技能入口
 
 如果你更喜欢在 Claude Code 中触发，可使用：
 
@@ -93,7 +123,7 @@ uv run aiwf compile claude --output .claude/compiled
 - `/rp-implement`
 - `/rp-review`
 
-## 8. 默认验证
+## 9. 默认验证
 
 默认 gate 集会运行：
 

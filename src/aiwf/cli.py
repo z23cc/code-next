@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 
 import typer
 from rich.console import Console
@@ -11,6 +11,7 @@ from rich.console import Console
 from aiwf import __version__
 from aiwf.adapters import build_adapter, build_adapter_from_contract, restore_host_contract
 from aiwf.adapters.base import HostContract
+from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AiwfError
@@ -102,11 +103,134 @@ def _execute_command(action: str, ai_root: Path, func: Callable[[], str]) -> Non
     final_status = RunStateManager(ai_root).load_run(run_id).status.value
     if final_status == "failed":
         console.print(f"[red]{action} finished with failed status[/red] run_id={run_id}")
+        _print_run_guidance(ai_root, run_id)
         raise typer.Exit(code=1)
     if final_status == "passed":
         console.print(f"[green]{action} completed[/green] run_id={run_id}")
         return
     console.print(f"[yellow]{action} stopped[/yellow] run_id={run_id} status={final_status}")
+    _print_run_guidance(ai_root, run_id)
+
+
+def _load_run_surface(ai_root: Path, run_id: str, artifact_name: str) -> dict[str, Any]:
+    run_dir = ai_root / "runs" / run_id
+    try:
+        artifact = ArtifactStore(run_dir).read_artifact(artifact_name)
+    except Exception as exc:
+        raise AiwfError(f"Unable to read {artifact_name} for run {run_id}: {exc}") from exc
+    if not isinstance(artifact, dict):
+        raise AiwfError(f"{artifact_name} for run {run_id} is not a JSON object")
+    return artifact
+
+
+def _artifact_path(ai_root: Path, run_id: str, artifact_name: str) -> Path:
+    return ai_root / "runs" / run_id / artifact_name
+
+
+def _print_run_guidance(ai_root: Path, run_id: str) -> None:
+    try:
+        diagnostics = _load_run_surface(ai_root, run_id, "run-diagnostics.json")
+    except AiwfError:
+        console.print(f"[yellow]inspect hint:[/yellow] uv run aiwf inspect {run_id} --ai-root {ai_root}")
+        return
+
+    status_reason = str(diagnostics.get("status_reason", "")).strip()
+    if status_reason:
+        console.print(f"reason={status_reason}")
+
+    next_actions = diagnostics.get("next_actions")
+    if isinstance(next_actions, list):
+        for action in next_actions[:2]:
+            if isinstance(action, str) and action.strip():
+                console.print(f"next={action.strip()}")
+
+    console.print(f"diagnostics={_artifact_path(ai_root, run_id, 'run-diagnostics.json')}")
+    console.print(f"provenance={_artifact_path(ai_root, run_id, 'run-provenance.json')}")
+    console.print(f"inspect=uv run aiwf inspect {run_id} --ai-root {ai_root}")
+
+
+def _print_inspection(ai_root: Path, run_id: str) -> None:
+    diagnostics = _load_run_surface(ai_root, run_id, "run-diagnostics.json")
+    provenance: dict[str, Any] | None
+    try:
+        provenance = _load_run_surface(ai_root, run_id, "run-provenance.json")
+    except AiwfError as exc:
+        provenance = None
+        console.print(f"provenance_warning={exc}")
+
+    workflow = str(diagnostics.get("workflow", "")).strip()
+    status = str(diagnostics.get("status", "")).strip()
+    last_completed_stage = diagnostics.get("last_completed_stage")
+    console.print(
+        f"run_id={run_id} workflow={workflow} status={status} "
+        f"last_completed_stage={last_completed_stage or '-'}"
+    )
+
+    status_reason = str(diagnostics.get("status_reason", "")).strip()
+    if status_reason:
+        console.print(f"reason={status_reason}")
+
+    host = diagnostics.get("host")
+    if isinstance(host, dict):
+        adapter = str(host.get("adapter", "")).strip()
+        mode = str(host.get("mode", "")).strip()
+        supports_auto = host.get("supports_auto_execution")
+        explicit_review = host.get("requires_explicit_review_handoff")
+        console.print(
+            "host="
+            f"adapter={adapter or '-'} "
+            f"mode={mode or '-'} "
+            f"supports_auto_execution={supports_auto} "
+            f"requires_explicit_review_handoff={explicit_review}"
+        )
+
+    next_actions = diagnostics.get("next_actions")
+    if isinstance(next_actions, list) and next_actions:
+        console.print("next_actions:")
+        for action in next_actions:
+            if isinstance(action, str) and action.strip():
+                console.print(f"- {action.strip()}")
+
+    if provenance is not None:
+        gate_evidence = provenance.get("gate_evidence")
+        if isinstance(gate_evidence, dict):
+            report = gate_evidence.get("report")
+            gate_set = gate_evidence.get("gate_set")
+            passed = gate_evidence.get("passed")
+            if isinstance(report, dict) and isinstance(report.get("path"), str):
+                console.print(
+                    f"gate_evidence=gate_set={gate_set or '-'} passed={passed} report={report['path']}"
+                )
+
+        review_evidence = provenance.get("review_evidence")
+        if isinstance(review_evidence, dict):
+            report = review_evidence.get("report")
+            mode_value = review_evidence.get("mode")
+            linked_artifacts = review_evidence.get("linked_artifacts")
+            if isinstance(report, dict) and isinstance(report.get("path"), str):
+                console.print(f"review_evidence=mode={mode_value or '-'} report={report['path']}")
+            if isinstance(linked_artifacts, list) and linked_artifacts:
+                console.print("review_links:")
+                for artifact in linked_artifacts:
+                    if isinstance(artifact, dict) and isinstance(artifact.get("path"), str):
+                        console.print(f"- {artifact['path']}")
+
+        artifact_index = provenance.get("artifact_index")
+        if isinstance(artifact_index, list) and artifact_index:
+            console.print("artifacts:")
+            for artifact in artifact_index:
+                if not isinstance(artifact, dict):
+                    continue
+                name = str(artifact.get("name", "")).strip()
+                raw_stage = artifact.get("stage")
+                stage_label = raw_stage.strip() if isinstance(raw_stage, str) and raw_stage.strip() else "-"
+                category = str(artifact.get("category", "")).strip() or "-"
+                path = str(artifact.get("path", "")).strip()
+                if name and path:
+                    console.print(f"- [{stage_label}/{category}] {name} -> {path}")
+
+    console.print(f"diagnostics={_artifact_path(ai_root, run_id, 'run-diagnostics.json')}")
+    console.print(f"provenance={_artifact_path(ai_root, run_id, 'run-provenance.json')}")
 
 
 @run_app.command("plan")
@@ -168,6 +292,19 @@ def resume(
         lambda: _build_engine(ai_root, repo_root, host_contract=_resolve_run_execution(ai_root, run_id)),
     )
     _execute_command("resume", ai_root, lambda: engine.resume(run_id))
+
+
+@app.command("inspect")
+def inspect_run(
+    run_id: str,
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+) -> None:
+    """Inspect diagnostics and provenance for an existing run."""
+    try:
+        _print_inspection(ai_root, run_id)
+    except AiwfError as exc:
+        console.print(f"[red]inspect failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
 
 
 @compile_app.command("claude")

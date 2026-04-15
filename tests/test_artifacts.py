@@ -7,7 +7,18 @@ import pytest
 
 from aiwf.artifacts import ArtifactStore
 from aiwf.exceptions import ArtifactError
-from aiwf.models import RunStatus, TaskSpec, VerifyReport, WorkReceipt
+from aiwf.models import (
+    RunDiagnostics,
+    RunGateEvidence,
+    RunHostDiagnostics,
+    RunProvenance,
+    RunProvenanceArtifact,
+    RunReviewEvidence,
+    RunStatus,
+    TaskSpec,
+    VerifyReport,
+    WorkReceipt,
+)
 from aiwf.state import RunStateManager
 
 
@@ -63,3 +74,77 @@ def test_read_artifact_raises_for_missing_artifact(tmp_path: Path) -> None:
         store.read_artifact("missing.md")
 
     assert "path=" in str(exc_info.value)
+
+
+def test_artifact_store_writes_and_reads_run_diagnostics(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Diagnostics Artifact", body="Store diagnostics artifact."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+
+    store.write_run_diagnostics(
+        RunDiagnostics(
+            run_id=run_id,
+            workflow="implement",
+            status=RunStatus.blocked,
+            status_reason="Run is blocked at implement waiting for operator action.",
+            resumable=True,
+            next_actions=[f"Run `uv run aiwf resume {run_id}` when ready."],
+            host=RunHostDiagnostics(
+                adapter="claude",
+                mode="manual",
+                supports_auto_execution=True,
+                requires_explicit_review_handoff=True,
+            ),
+        )
+    )
+
+    diagnostics = store.read_artifact("run-diagnostics.json")
+
+    assert diagnostics["status"] == "blocked"
+    assert diagnostics["resumable"] is True
+    assert diagnostics["host"]["adapter"] == "claude"
+
+
+def test_artifact_store_writes_and_reads_run_provenance(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Provenance Artifact", body="Store provenance artifact."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+
+    store.write_run_provenance(
+        RunProvenance(
+            run_id=run_id,
+            workflow="implement",
+            status=RunStatus.needs_review,
+            last_completed_stage="gates",
+            host=RunHostDiagnostics(
+                adapter="claude",
+                mode="manual",
+                supports_auto_execution=True,
+                requires_explicit_review_handoff=True,
+            ),
+            artifact_index=[
+                RunProvenanceArtifact(
+                    name="verify-report.json",
+                    path=str(run_dir / "verify-report.json"),
+                    stage="gates",
+                    category="gate_report",
+                )
+            ],
+            gate_evidence=RunGateEvidence(
+                gate_set="default",
+                passed=True,
+            ),
+            review_evidence=RunReviewEvidence(
+                required_run_artifacts=["verify-report.json"],
+            ),
+        )
+    )
+
+    provenance = store.read_artifact("run-provenance.json")
+
+    assert provenance["status"] == "needs_review"
+    assert provenance["artifact_index"][0]["stage"] == "gates"
+    assert provenance["gate_evidence"]["passed"] is True
+    assert provenance["review_evidence"]["required_run_artifacts"] == ["verify-report.json"]

@@ -11,7 +11,22 @@ from aiwf.artifacts import ArtifactStore
 from aiwf.exceptions import ArtifactError, StateError
 from aiwf.gates import run_gates
 from aiwf.loader import load_gate_set, load_policy, load_runbook, load_task
-from aiwf.models import RunMeta, RunStatus, StageResult, TaskSpec, WorkReceipt
+from aiwf.models import (
+    EventRecord,
+    RunArtifactRef,
+    RunDiagnostics,
+    RunGateEvidence,
+    RunHostDiagnostics,
+    RunMeta,
+    RunProvenance,
+    RunProvenanceArtifact,
+    RunReviewEvidence,
+    RunStatus,
+    RunTimelineEntry,
+    StageResult,
+    TaskSpec,
+    WorkReceipt,
+)
 from aiwf.state import RunStateManager
 
 
@@ -73,6 +88,7 @@ class WorkflowEngine:
                 ["context-pack.md", "exec-plan.md", "work-receipt.json"],
             )
             self.state_manager.transition(run_id, RunStatus.passed, stage="plan")
+            self._write_runtime_surfaces(store, workflow="plan")
             return run_id
         except Exception as exc:
             self._handle_run_failure(run_id, store, "plan", exc)
@@ -90,6 +106,7 @@ class WorkflowEngine:
 
         try:
             self._resume_implement(task, run_id, run_dir, store, start_after_stage=None)
+            self._write_runtime_surfaces(store, workflow="implement")
             return run_id
         except Exception as exc:
             self._handle_run_failure(run_id, store, "implement", exc)
@@ -129,6 +146,7 @@ class WorkflowEngine:
                 success_summary="Review workflow completed successfully.",
                 success_artifacts=["review-report.json", "work-receipt.json"],
             )
+            self._write_runtime_surfaces(store, workflow=workflow)
             return run_id
         except Exception as exc:
             self._handle_run_failure(run_id, store, workflow, exc)
@@ -170,6 +188,7 @@ class WorkflowEngine:
                     success_summary="Review workflow completed successfully.",
                     success_artifacts=["review-report.json", "work-receipt.json"],
                 )
+            self._write_runtime_surfaces(store, workflow=workflow)
             return run_id
         except Exception as exc:
             self._handle_run_failure(run_id, store, workflow, exc)
@@ -234,6 +253,7 @@ class WorkflowEngine:
 
         if start_after_stage == "plan":
             result = self.adapter.execute(task, plan_content, run_dir)
+            self._record_stage_result(run_id, result)
             self.state_manager.update_run(run_id, last_completed_stage="implement", data=self._workflow_data("implement"))
             if result.status is RunStatus.blocked:
                 self.state_manager.transition(run_id, RunStatus.blocked, stage="implement")
@@ -364,6 +384,10 @@ class WorkflowEngine:
             self.state_manager.update_run(run_id, error=str(exc), data=self._workflow_data(workflow))
         else:
             self.state_manager.transition(run_id, RunStatus.failed, stage=workflow, error=str(exc))
+        try:
+            self._write_runtime_surfaces(store, workflow=workflow)
+        except Exception:
+            pass
 
     def _workflow_data(self, workflow: str) -> dict[str, object]:
         return {
@@ -462,6 +486,328 @@ class WorkflowEngine:
                 path=linked_artifact_path,
                 stage="review",
             )
+
+    def _record_stage_result(self, run_id: str, result: StageResult) -> None:
+        self.state_manager.append_event(
+            run_id,
+            EventRecord(
+                event="stage_result_recorded",
+                status=result.status,
+                stage=result.stage,
+                data={
+                    "summary": result.summary,
+                    "outputs": list(result.outputs),
+                    "metadata": dict(result.metadata),
+                },
+            ),
+        )
+
+    def _write_runtime_surfaces(self, store: ArtifactStore, *, workflow: str) -> None:
+        diagnostics = self._build_run_diagnostics(store.run_id, store.run_dir, workflow=workflow)
+        store.write_run_diagnostics(diagnostics)
+        provenance = self._build_run_provenance(store, workflow=workflow, diagnostics=diagnostics)
+        store.write_run_provenance(provenance)
+
+    def _build_run_diagnostics(self, run_id: str, run_dir: Path, *, workflow: str) -> RunDiagnostics:
+        meta = self.state_manager.load_run(run_id)
+        events = self.state_manager.load_events(run_id)
+        key_artifacts = self._collect_key_artifacts(run_dir)
+        artifact_names = {artifact.name for artifact in key_artifacts}
+
+        return RunDiagnostics(
+            run_id=run_id,
+            workflow=workflow,
+            status=meta.status,
+            last_completed_stage=meta.last_completed_stage,
+            status_reason=self._diagnostics_status_reason(meta, artifact_names, run_dir),
+            resumable=meta.status in {RunStatus.blocked, RunStatus.failed},
+            reviewable=meta.status is RunStatus.needs_review,
+            resume_command=f"uv run aiwf resume {run_id}" if meta.status in {RunStatus.blocked, RunStatus.failed} else None,
+            review_command=f"uv run aiwf run review --run-id {run_id}" if meta.status is RunStatus.needs_review else None,
+            next_actions=self._diagnostics_next_actions(meta, artifact_names, run_id, run_dir),
+            error=meta.error,
+            host=RunHostDiagnostics(
+                adapter=self.host_contract.adapter,
+                mode=self.host_contract.mode,
+                supports_auto_execution=self.host_contract.capabilities.supports_auto_execution,
+                requires_explicit_review_handoff=self.host_contract.capabilities.requires_explicit_review_handoff,
+            ),
+            key_artifacts=key_artifacts,
+            stage_timeline=self._build_stage_timeline(events),
+        )
+
+    def _build_run_provenance(
+        self,
+        store: ArtifactStore,
+        *,
+        workflow: str,
+        diagnostics: RunDiagnostics,
+    ) -> RunProvenance:
+        meta = self.state_manager.load_run(store.run_id)
+        events = self.state_manager.load_events(store.run_id)
+        artifact_refs = self._collect_artifact_refs(store.run_dir)
+        artifact_index: dict[str, RunProvenanceArtifact] = {}
+
+        def add_artifact(
+            name: str,
+            *,
+            stage: str | None,
+            category: str,
+            related_artifacts: list[str] | None = None,
+        ) -> None:
+            artifact = artifact_refs.get(name)
+            if artifact is None:
+                return
+            artifact_index[name] = RunProvenanceArtifact(
+                name=artifact.name,
+                path=artifact.path,
+                stage=stage,
+                category=category,
+                related_artifacts=sorted(set(related_artifacts or [])),
+            )
+
+        add_artifact("context-pack.md", stage="discover", category="context")
+        add_artifact("exec-plan.md", stage="plan", category="plan")
+        add_artifact("verify-report.json", stage="gates", category="gate_report")
+        add_artifact("work-receipt.json", stage=None, category="receipt")
+        add_artifact("run-diagnostics.json", stage=None, category="diagnostics")
+
+        implement_output_names = self._implement_output_artifact_names(events, artifact_refs)
+        for artifact_name in implement_output_names:
+            category = "handoff" if "prompt" in artifact_name else "stage_output"
+            add_artifact(artifact_name, stage="implement", category=category)
+
+        review_report = self._read_json_artifact_if_present(store, "review-report.json")
+        linked_review_artifact_names = self._linked_review_artifact_names(review_report)
+        add_artifact(
+            "review-report.json",
+            stage="review",
+            category="review_report",
+            related_artifacts=[
+                *linked_review_artifact_names,
+                *[
+                    artifact_name
+                    for artifact_name in self.host_contract.review.required_run_artifacts
+                    if artifact_name in artifact_refs
+                ],
+            ],
+        )
+        for artifact_name in linked_review_artifact_names:
+            category = "handoff" if "prompt" in artifact_name else "review_evidence"
+            add_artifact(
+                artifact_name,
+                stage="review",
+                category=category,
+                related_artifacts=["review-report.json"],
+            )
+
+        verify_report = self._read_json_artifact_if_present(store, "verify-report.json")
+        gate_report_ref = artifact_refs.get("verify-report.json")
+        review_required_artifact_names = list(self.host_contract.review.required_run_artifacts)
+        available_review_required_artifacts = [
+            artifact_refs[artifact_name]
+            for artifact_name in review_required_artifact_names
+            if artifact_name in artifact_refs
+        ]
+
+        gate_evidence = RunGateEvidence(
+            report=gate_report_ref,
+            gate_set=self._json_string_value(verify_report, "gate_set"),
+            passed=self._json_bool_value(verify_report, "passed"),
+        )
+        review_evidence = RunReviewEvidence(
+            report=artifact_refs.get("review-report.json"),
+            mode=self._json_string_value(review_report, "mode"),
+            linked_report_artifact_field=self.host_contract.review.linked_report_artifact_field,
+            linked_artifacts=[
+                artifact_refs[artifact_name]
+                for artifact_name in linked_review_artifact_names
+                if artifact_name in artifact_refs
+            ],
+            required_run_artifacts=review_required_artifact_names,
+            available_required_artifacts=available_review_required_artifacts,
+        )
+
+        return RunProvenance(
+            run_id=store.run_id,
+            workflow=workflow,
+            status=meta.status,
+            last_completed_stage=meta.last_completed_stage,
+            host=diagnostics.host,
+            artifact_index=sorted(
+                artifact_index.values(),
+                key=lambda artifact: (
+                    artifact.stage or "",
+                    artifact.category,
+                    artifact.name,
+                ),
+            ),
+            gate_evidence=gate_evidence,
+            review_evidence=review_evidence,
+        )
+
+    def _build_stage_timeline(self, events: list[EventRecord]) -> list[RunTimelineEntry]:
+        return [
+            RunTimelineEntry(
+                ts=event.ts,
+                event=event.event,
+                stage=event.stage,
+                status=event.status,
+            )
+            for event in events
+            if event.event in {"run_initialized", "run_updated", "status_transition"}
+        ]
+
+    def _collect_key_artifacts(self, run_dir: Path) -> list[RunArtifactRef]:
+        return [
+            RunArtifactRef(name=path.name, path=str(path))
+            for path in sorted(run_dir.iterdir())
+            if path.is_file() and path.name not in {"run.json", "events.ndjson", "run-diagnostics.json", "run-provenance.json"}
+        ]
+
+    def _collect_artifact_refs(self, run_dir: Path) -> dict[str, RunArtifactRef]:
+        return {
+            path.name: RunArtifactRef(name=path.name, path=str(path))
+            for path in sorted(run_dir.iterdir())
+            if path.is_file() and path.name not in {"run.json", "events.ndjson", "run-provenance.json"}
+        }
+
+    def _implement_output_artifact_names(
+        self,
+        events: list[EventRecord],
+        artifact_refs: dict[str, RunArtifactRef],
+    ) -> list[str]:
+        for event in reversed(events):
+            if event.event != "stage_result_recorded" or event.stage != "implement":
+                continue
+            outputs = event.data.get("outputs")
+            if not isinstance(outputs, list):
+                continue
+            return sorted(
+                output_name
+                for output_name in outputs
+                if isinstance(output_name, str) and output_name in artifact_refs
+            )
+        return self._matching_artifact_names(set(artifact_refs), stage="implement")
+
+    def _read_json_artifact_if_present(self, store: ArtifactStore, name: str) -> dict[str, object] | None:
+        artifact_path = store.run_dir / name
+        if not artifact_path.exists():
+            return None
+        artifact = store.read_artifact(name)
+        return artifact if isinstance(artifact, dict) else None
+
+    def _linked_review_artifact_names(self, review_report: dict[str, object] | None) -> list[str]:
+        linked_field = self.host_contract.review.linked_report_artifact_field
+        if review_report is None or linked_field is None:
+            return []
+        artifact_name = review_report.get(linked_field)
+        if not isinstance(artifact_name, str) or not artifact_name.strip():
+            return []
+        return [artifact_name.strip()]
+
+    def _json_string_value(self, payload: dict[str, object] | None, key: str) -> str | None:
+        if payload is None:
+            return None
+        value = payload.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    def _json_bool_value(self, payload: dict[str, object] | None, key: str) -> bool | None:
+        if payload is None:
+            return None
+        value = payload.get(key)
+        return value if isinstance(value, bool) else None
+
+    def _diagnostics_status_reason(self, meta: RunMeta, artifact_names: set[str], run_dir: Path) -> str:
+        if meta.status is RunStatus.passed:
+            return "Run completed successfully."
+        if meta.status is RunStatus.failed:
+            if meta.last_completed_stage == "gates" and "verify-report.json" in artifact_names:
+                return "Run failed during gates and requires fixes before resume."
+            return meta.error or "Run failed and requires operator action before resume."
+        if meta.status is RunStatus.needs_review:
+            return "Implementation completed verification and is waiting for an explicit review step."
+        if meta.status is RunStatus.blocked:
+            if meta.last_completed_stage == "implement":
+                implement_handoff = self._matching_artifact_names(artifact_names, stage="implement")
+                if implement_handoff:
+                    return f"Run is blocked at implement waiting for operator action on {', '.join(implement_handoff)}."
+                return "Run is blocked at implement waiting for operator action."
+            if meta.last_completed_stage == "review":
+                review_handoff = self._linked_review_artifact_name(run_dir)
+                if review_handoff:
+                    return f"Run is blocked at review waiting for operator action on {review_handoff}."
+                return "Run is blocked at review waiting for operator action."
+            return "Run is blocked and requires operator action before it can continue."
+        if meta.status is RunStatus.running:
+            return "Run is currently executing."
+        if meta.status is RunStatus.canceled:
+            return "Run has been canceled."
+        return "Run is queued and has not started yet."
+
+    def _diagnostics_next_actions(
+        self,
+        meta: RunMeta,
+        artifact_names: set[str],
+        run_id: str,
+        run_dir: Path,
+    ) -> list[str]:
+        if meta.status is RunStatus.needs_review:
+            actions = ["Inspect verify-report.json and implementation artifacts before review."]
+            actions.append(f"Run `uv run aiwf run review --run-id {run_id}` to start review.")
+            return actions
+        if meta.status is RunStatus.blocked:
+            if meta.last_completed_stage == "implement":
+                handoff_artifacts = self._matching_artifact_names(artifact_names, stage="implement")
+                if handoff_artifacts:
+                    return [
+                        f"Inspect {', '.join(handoff_artifacts)} to complete the external implementation handoff.",
+                        f"Run `uv run aiwf resume {run_id}` when the implementation handoff is complete.",
+                    ]
+                return [f"Run `uv run aiwf resume {run_id}` when the blocked implementation step is complete."]
+            if meta.last_completed_stage == "review":
+                review_handoff = self._linked_review_artifact_name(run_dir)
+                if review_handoff:
+                    return [
+                        f"Inspect {review_handoff} to complete the review handoff.",
+                        f"Run `uv run aiwf resume {run_id}` when review is complete.",
+                    ]
+                return [f"Run `uv run aiwf resume {run_id}` when the blocked review step is complete."]
+            return [f"Run `uv run aiwf resume {run_id}` after addressing the blocking issue."]
+        if meta.status is RunStatus.failed:
+            if meta.last_completed_stage == "gates" and "verify-report.json" in artifact_names:
+                return [
+                    "Inspect verify-report.json for failing gate details.",
+                    f"Run `uv run aiwf resume {run_id}` after fixing the reported problems.",
+                ]
+            return [
+                "Inspect work-receipt.json and the latest stage artifacts for failure details.",
+                f"Run `uv run aiwf resume {run_id}` after addressing the failure.",
+            ]
+        return []
+
+    def _matching_artifact_names(self, artifact_names: set[str], *, stage: str) -> list[str]:
+        return sorted(
+            artifact_name
+            for artifact_name in artifact_names
+            if stage in artifact_name and ("prompt" in artifact_name or "response" in artifact_name)
+        )
+
+    def _linked_review_artifact_name(self, run_dir: Path) -> str | None:
+        linked_field = self.host_contract.review.linked_report_artifact_field
+        if linked_field is None:
+            return None
+        review_report_path = run_dir / "review-report.json"
+        if not review_report_path.exists():
+            return None
+        try:
+            report = ArtifactStore(run_dir, state_manager=self.state_manager).read_artifact("review-report.json")
+        except ArtifactError:
+            return None
+        if not isinstance(report, dict):
+            return None
+        artifact_name = report.get(linked_field)
+        return artifact_name.strip() if isinstance(artifact_name, str) and artifact_name.strip() else None
 
     def _load_supporting_specs(self, task: TaskSpec) -> None:
         load_runbook(self.ai_root / "runbooks" / f"{task.runbook}.md")

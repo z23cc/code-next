@@ -30,6 +30,8 @@ def test_run_plan_creates_expected_artifacts(tmp_path: Path) -> None:
     assert meta.data["host_contract"]["mode"] == "manual"
     assert (run_dir / "context-pack.md").exists()
     assert (run_dir / "exec-plan.md").exists()
+    assert (run_dir / "run-diagnostics.json").exists()
+    assert (run_dir / "run-provenance.json").exists()
     assert (run_dir / "work-receipt.json").exists()
 
 
@@ -45,6 +47,8 @@ def test_run_implement_completes_full_stub_workflow(tmp_path: Path) -> None:
     assert meta.status is RunStatus.passed
     assert meta.last_completed_stage == "review"
     assert verify_report["passed"] is True
+    assert (run_dir / "run-diagnostics.json").exists()
+    assert (run_dir / "run-provenance.json").exists()
     assert (run_dir / "review-report.json").exists()
 
 
@@ -61,12 +65,22 @@ def test_run_review_operates_on_existing_run_and_blocks_for_manual_claude(tmp_pa
     reviewed_run_id = engine.run_review(run_id)
     run_dir = ai_root / "runs" / run_id
     meta = RunStateManager(ai_root).load_run(run_id)
+    provenance = json.loads((run_dir / "run-provenance.json").read_text(encoding="utf-8"))
 
     assert reviewed_run_id == run_id
     assert meta.status is RunStatus.blocked
     assert meta.last_completed_stage == "review"
     assert (run_dir / "review-report.json").exists()
     assert (run_dir / "claude-review-prompt.md").exists()
+    assert provenance["review_evidence"]["report"]["name"] == "review-report.json"
+    assert provenance["review_evidence"]["mode"] == "manual"
+    assert provenance["review_evidence"]["linked_artifacts"][0]["name"] == "claude-review-prompt.md"
+    assert any(
+        artifact["name"] == "review-report.json"
+        and artifact["stage"] == "review"
+        and artifact["category"] == "review_report"
+        for artifact in provenance["artifact_index"]
+    )
     assert not (run_dir / "work-receipt.json").exists()
 
 
@@ -136,10 +150,25 @@ def test_manual_claude_implement_stops_after_prompt_handoff(tmp_path: Path) -> N
     run_id = engine.run_implement(task_path)
     run_dir = ai_root / "runs" / run_id
     meta = RunStateManager(ai_root).load_run(run_id)
+    diagnostics = json.loads((run_dir / "run-diagnostics.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "run-provenance.json").read_text(encoding="utf-8"))
 
     assert meta.status is RunStatus.blocked
     assert meta.last_completed_stage == "implement"
     assert (run_dir / "claude-implement-prompt.md").exists()
+    assert diagnostics["status"] == "blocked"
+    assert diagnostics["status_reason"].startswith("Run is blocked at implement")
+    assert diagnostics["resumable"] is True
+    assert diagnostics["host"]["mode"] == "manual"
+    assert any("claude-implement-prompt.md" in action for action in diagnostics["next_actions"])
+    assert any(
+        artifact["name"] == "claude-implement-prompt.md"
+        and artifact["stage"] == "implement"
+        and artifact["category"] == "handoff"
+        for artifact in provenance["artifact_index"]
+    )
+    assert provenance["gate_evidence"]["report"] is None
+    assert provenance["review_evidence"]["report"] is None
     assert not (run_dir / "verify-report.json").exists()
     assert not (run_dir / "review-report.json").exists()
     assert not (run_dir / "work-receipt.json").exists()
@@ -158,11 +187,22 @@ def test_manual_claude_resume_stops_at_needs_review_after_passing_gates(tmp_path
     run_dir = ai_root / "runs" / run_id
     meta = RunStateManager(ai_root).load_run(run_id)
     verify_report = json.loads((run_dir / "verify-report.json").read_text(encoding="utf-8"))
+    diagnostics = json.loads((run_dir / "run-diagnostics.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "run-provenance.json").read_text(encoding="utf-8"))
 
     assert resumed_run_id == run_id
     assert meta.status is RunStatus.needs_review
     assert meta.last_completed_stage == "gates"
     assert verify_report["passed"] is True
+    assert diagnostics["status"] == "needs_review"
+    assert diagnostics["reviewable"] is True
+    assert diagnostics["review_command"] == f"uv run aiwf run review --run-id {run_id}"
+    assert diagnostics["status_reason"].startswith("Implementation completed verification")
+    assert provenance["gate_evidence"]["report"]["name"] == "verify-report.json"
+    assert provenance["gate_evidence"]["passed"] is True
+    assert provenance["review_evidence"]["required_run_artifacts"] == ["verify-report.json"]
+    assert provenance["review_evidence"]["available_required_artifacts"][0]["name"] == "verify-report.json"
+    assert provenance["review_evidence"]["linked_artifacts"] == []
     assert not (run_dir / "review-report.json").exists()
     assert not (run_dir / "work-receipt.json").exists()
 
@@ -252,9 +292,17 @@ def test_failed_gate_run_can_resume_after_gate_fix(tmp_path: Path) -> None:
     run_id = engine.run_implement(task_path)
     state_manager = RunStateManager(ai_root)
     failed_meta = state_manager.load_run(run_id)
+    diagnostics = json.loads((ai_root / "runs" / run_id / "run-diagnostics.json").read_text(encoding="utf-8"))
+    provenance = json.loads((ai_root / "runs" / run_id / "run-provenance.json").read_text(encoding="utf-8"))
 
     assert failed_meta.status is RunStatus.failed
     assert failed_meta.last_completed_stage == "gates"
+    assert diagnostics["status"] == "failed"
+    assert diagnostics["resumable"] is True
+    assert diagnostics["status_reason"] == "Run failed during gates and requires fixes before resume."
+    assert any(artifact["name"] == "verify-report.json" for artifact in diagnostics["key_artifacts"])
+    assert provenance["gate_evidence"]["report"]["name"] == "verify-report.json"
+    assert provenance["gate_evidence"]["passed"] is False
 
     (ai_root / "gates" / "default.yaml").write_text(
         _gates_yaml(_python_print_command("gate-fixed")),
