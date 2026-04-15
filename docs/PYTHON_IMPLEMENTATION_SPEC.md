@@ -4,16 +4,16 @@
 
 实现一个名为 `aiwf` 的 Python 工作流内核，作用是把任务输入、runbook 语义、上下文发现、宿主执行、gates、artifacts 和 resume 串成一个稳定流程。
 
-这个内核应当可以作为后续 RepoPrompt Agent Run、Claude Code、Codex 的共享底座，但第一阶段只要求把 **Claude Code 路径走通**。
+这个内核是 RepoPrompt Agent Run、Claude Code、Codex 的共享底座；当前实现已覆盖多宿主（Claude/RP/Codex/stub）与显式契约治理。RP、Codex 仍是 manual-first 路径，Claude 支持 manual/auto 双模式。
 
 ## 2. 设计立场
 
 ### 2.1 真源优先
 所有流程语义应来自 `.ai/`，而不是硬编码在 Python 里。  
-当前阶段中，Python 代码仍拥有主要的 `plan / implement / review / resume` 控制流；runbook 更偏向可校验的工作流契约说明与阶段边界描述，而不是单独驱动全部分支与状态迁移。
+当前实现中，Python 代码仍拥有主要的 `plan / implement / review / resume` 控制流；runbook 更偏向可校验的工作流契约说明与阶段边界描述，而不是单独驱动全部分支与状态迁移。
 
 ### 2.2 文件协议优先
-第一阶段不依赖数据库。  
+当前基线仍不依赖数据库。  
 所有状态和产物都应该是可读、可审计、可恢复的文件。
 
 ### 2.3 Claude 适配应当很薄
@@ -44,7 +44,7 @@ ruff = "^0.6"
 mypy = "^1.10"
 ```
 
-如非必要，不要在第一阶段引入：
+如非必要，不要引入：
 - celery
 - sqlalchemy
 - fastapi
@@ -73,6 +73,7 @@ src/aiwf/
   compilers/
     __init__.py
     claude.py
+    codex.py
 tests/
 ```
 
@@ -115,7 +116,7 @@ tests/
 - 生成 `verify-report.json`
 
 ### 4.6 `engine.py`
-这是第一阶段的核心编排器。  
+这是当前内核的核心编排器。  
 它应提供：
 
 - `run_plan(task_path)`
@@ -136,7 +137,7 @@ tests/
 
 ### 4.8 `adapters/claude_code.py`
 实现 Claude Code 的薄适配。  
-第一阶段可接受的方式：
+当前可接受的方式：
 
 - 通过 subprocess 调用 `claude`
 - 把 prompt / 输入文件路径交给 Claude Code
@@ -149,12 +150,15 @@ tests/
 建议使用 `typer`，命令面如下：
 
 ```bash
-uv run aiwf run plan --task .ai/tasks/example.md
-uv run aiwf run implement --task .ai/tasks/example.md
+uv run aiwf run plan --task .ai/tasks/example.md --adapter claude
+uv run aiwf run implement --task .ai/tasks/example.md --adapter claude
 uv run aiwf run review --run-id <run_id>
 uv run aiwf resume <run_id>
 uv run aiwf inspect <run_id>
+uv run aiwf contracts lint
+uv run aiwf doctor --json
 uv run aiwf compile claude
+uv run aiwf compile codex
 ```
 
 ### 5.1 CLI 输出原则
@@ -234,16 +238,17 @@ uv run aiwf compile claude
 6. 如果报告声明了 linked evidence artifact（如 `prompt_file` / `response_file`），对应 artifact 必须存在
 7. 手动 Claude 模式下可再次停在 `blocked`，由后续 `resume(run_id)` 完成终态收口
 
-## 8. 第一阶段的现实取舍
+## 8. 当前实现的现实取舍
 
 优先完成这些：
 - schema 稳定
 - 状态可恢复
 - artifact 可落盘
-- Claude Code 路径可跑通
+- 多宿主路径可跑通（Claude/RP/Codex/stub）
+- manual-first 与 auto（Claude）边界清晰
 
 可以暂缓这些：
-- 多宿主切换
+- RP/Codex 的 native execution（当前仍 manual-first）
 - 并发 stage
 - 复杂权限模型
 - 插件市场分发
@@ -290,7 +295,7 @@ uv run aiwf compile claude
 - 不要把状态更新散落在多个函数里而没有统一入口
 - 不要把 Claude Code prompt 拼接逻辑埋进 `engine.py`
 - 不要为了“通用性”过早抽象多层插件体系
-- 不要在第一阶段引入数据库
+- 不要引入数据库（除非任务明确要求）
 
 ## 12. 交付标准
 

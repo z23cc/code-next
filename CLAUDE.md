@@ -5,19 +5,19 @@
 
 ## 当前范围
 
-第一阶段只实现以下能力：
+当前已实现以下能力：
 
-1. `plan`
-2. `implement`
-3. `review`
-4. `resume`
-5. artifact store
-6. gate runner
-7. host compiler（先只生成 Claude Code 需要的文件）
+1. `run plan / implement / review`
+2. `resume`
+3. artifact store（含 diagnostics / provenance）
+4. gate runner
+5. 显式 `host_contract` / review evidence contract
+6. `contracts lint` 与 `doctor`
+7. host compiler（`compile claude` / `compile codex`）
 
 ## 非目标
 
-当前阶段不要做这些事情：
+当前仍不要做这些事情：
 
 - 不实现 Web UI
 - 不实现数据库持久化
@@ -62,11 +62,16 @@ src/aiwf/
   artifacts.py
   gates.py
   state.py
+  contracts.py
+  doctor.py
   adapters/
-    rp_agent.py
     claude_code.py
+    rp_agent.py
+    codex.py
+    stub.py
   compilers/
     claude.py
+    codex.py
 ```
 
 ## 核心对象
@@ -97,7 +102,7 @@ src/aiwf/
 
 ## 强制产物
 
-以下产物在第一阶段必须支持：
+以下产物当前必须支持：
 
 - `context-pack.md`
 - `exec-plan.md`
@@ -115,9 +120,9 @@ src/aiwf/
 2. 再读任务文件与相关 runbook
 3. 优先最小改动，不做无关重构
 4. 先产出计划，再做实现
-5. 对手动 Claude 模式，要把 prompt 文件视为人工 handoff 边界，而不是视为实现或 review 已经终态完成
+5. 对 manual-first 宿主（Claude manual / RP / Codex），要把 prompt 文件视为人工 handoff 边界，而不是视为实现或 review 已经终态完成
 6. 实现完成后必须跑 gates
-7. review 现在基于既有 run 与 artifacts，通过 `run review --run-id <run_id>` 进入，并按已存储的 review artifact contract 校验证据
+7. review 基于既有 run 与 artifacts，通过 `run review --run-id <run_id>` 进入，并按已存储的 review artifact contract 校验证据
 8. 所有关键决定写入 artifact
 9. 如果上下文过大，拆分任务，不要把过多设计塞进一次回答
 
@@ -143,7 +148,7 @@ src/aiwf/
 
 ## 技能使用建议
 
-当任务需要多步操作时，优先使用这些 skills：
+当任务需要多步操作时，优先使用这些 skills（当前仍为 Claude 入口）：
 
 - `/rp-plan`
 - `/rp-implement`
