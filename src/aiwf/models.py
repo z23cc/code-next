@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, field_validator, model_validator
 
+from aiwf.exceptions import ErrorCode
+
 
 def utc_now() -> datetime:
     """Return a timezone-aware UTC timestamp."""
@@ -167,6 +169,7 @@ class RunMeta(ModelBase):
     updated_at: datetime = Field(default_factory=utc_now)
     last_completed_stage: str | None = None
     error: str | None = None
+    error_code: ErrorCode | None = None
     data: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -222,6 +225,7 @@ class RunDiagnostics(ModelBase):
     review_command: str | None = None
     next_actions: list[str] = Field(default_factory=list)
     error: str | None = None
+    error_code: ErrorCode | None = None
     host: RunHostDiagnostics
     key_artifacts: list[RunArtifactRef] = Field(default_factory=list)
     stage_timeline: list[RunTimelineEntry] = Field(default_factory=list)

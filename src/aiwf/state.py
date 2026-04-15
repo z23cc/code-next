@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from aiwf.exceptions import StateError
+from aiwf.exceptions import ErrorCode, StateError
 from aiwf.models import EventRecord, RunMeta, RunStatus, TaskSpec, slugify, utc_now
 
 
@@ -86,6 +86,7 @@ class RunStateManager:
         stage: str | None = None,
         data: dict[str, object] | None = None,
         error: str | None = None,
+        error_code: ErrorCode | str | None = None,
     ) -> RunMeta:
         """Validate and persist a run status transition."""
         meta = self.load_run(run_id)
@@ -106,8 +107,11 @@ class RunStateManager:
                 "updated_at": utc_now(),
                 "last_completed_stage": stage or meta.last_completed_stage,
                 "error": error,
+                "error_code": ErrorCode(error_code) if error_code is not None else None,
             }
         )
+        payload["error"] = updated.error
+        payload["error_code"] = updated.error_code.value if updated.error_code is not None else None
         self._write_run_meta(updated)
         self.append_event(
             run_id,
@@ -173,6 +177,7 @@ class RunStateManager:
         *,
         last_completed_stage: str | None = None,
         error: str | None = None,
+        error_code: ErrorCode | str | None = None,
         data: dict[str, object] | None = None,
     ) -> RunMeta:
         """Persist non-status run metadata updates and append an audit event."""
@@ -185,6 +190,7 @@ class RunStateManager:
                 "updated_at": utc_now(),
                 "last_completed_stage": last_completed_stage or meta.last_completed_stage,
                 "error": error if error is not None else meta.error,
+                "error_code": ErrorCode(error_code) if error_code is not None else meta.error_code,
                 "data": merged_data,
             }
         )
@@ -198,6 +204,7 @@ class RunStateManager:
                     "last_completed_stage": updated.last_completed_stage,
                     "data": data or {},
                     "error": updated.error,
+                    "error_code": updated.error_code.value if updated.error_code is not None else None,
                 },
             ),
         )

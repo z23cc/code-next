@@ -8,7 +8,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from aiwf.exceptions import ArtifactError
+from aiwf.exceptions import ArtifactError, ErrorCode
 from aiwf.models import (
     EventRecord,
     ReviewReportContent,
@@ -89,6 +89,7 @@ class ArtifactStore:
                 f"Artifact {name!r} does not have a registered validation schema",
                 path=artifact_path,
                 stage="read_validated_artifact",
+                error_code=ErrorCode.INVALID_ARTIFACT,
             )
         try:
             return resolved_schema.model_validate(parsed)
@@ -97,6 +98,7 @@ class ArtifactStore:
                 f"Artifact content failed validation: {self._format_validation_errors(exc)}",
                 path=artifact_path,
                 stage="read_validated_artifact",
+                error_code=ErrorCode.INVALID_ARTIFACT,
             ) from exc
 
     @classmethod
@@ -109,7 +111,12 @@ class ArtifactStore:
         try:
             artifact_path.write_text(content, encoding="utf-8")
         except OSError as exc:
-            raise ArtifactError("Failed to write artifact", path=artifact_path, stage="write_artifact") from exc
+            raise ArtifactError(
+                "Failed to write artifact",
+                path=artifact_path,
+                stage="write_artifact",
+                error_code=ErrorCode.INVALID_ARTIFACT,
+            ) from exc
         self._record_artifact_written(filename)
         return artifact_path
 
@@ -122,7 +129,12 @@ class ArtifactStore:
                 encoding="utf-8",
             )
         except OSError as exc:
-            raise ArtifactError("Failed to write artifact", path=artifact_path, stage="write_artifact") from exc
+            raise ArtifactError(
+                "Failed to write artifact",
+                path=artifact_path,
+                stage="write_artifact",
+                error_code=ErrorCode.INVALID_ARTIFACT,
+            ) from exc
         self._record_artifact_written(filename)
         return artifact_path
 
@@ -130,17 +142,37 @@ class ArtifactStore:
         try:
             return artifact_path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
-            raise ArtifactError("Artifact does not exist", path=artifact_path, stage=stage) from exc
+            raise ArtifactError(
+                "Artifact does not exist",
+                path=artifact_path,
+                stage=stage,
+                error_code=ErrorCode.MISSING_ARTIFACT,
+            ) from exc
         except OSError as exc:
-            raise ArtifactError("Failed to read artifact", path=artifact_path, stage=stage) from exc
+            raise ArtifactError(
+                "Failed to read artifact",
+                path=artifact_path,
+                stage=stage,
+                error_code=ErrorCode.INVALID_ARTIFACT,
+            ) from exc
 
     def _parse_json_artifact(self, content: str, artifact_path: Path, *, stage: str) -> dict[str, Any]:
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise ArtifactError("Artifact JSON is invalid", path=artifact_path, stage=stage) from exc
+            raise ArtifactError(
+                "Artifact JSON is invalid",
+                path=artifact_path,
+                stage=stage,
+                error_code=ErrorCode.INVALID_ARTIFACT,
+            ) from exc
         if not isinstance(parsed, dict):
-            raise ArtifactError("Artifact JSON must be an object", path=artifact_path, stage=stage)
+            raise ArtifactError(
+                "Artifact JSON must be an object",
+                path=artifact_path,
+                stage=stage,
+                error_code=ErrorCode.INVALID_ARTIFACT,
+            )
         return parsed
 
     def _format_validation_errors(self, exc: ValidationError) -> str:
@@ -162,9 +194,19 @@ class ArtifactStore:
 
     def _ensure_run_dir(self) -> None:
         if not self.run_dir.exists():
-            raise ArtifactError("Run directory does not exist", path=self.run_dir, stage="artifact_init")
+            raise ArtifactError(
+                "Run directory does not exist",
+                path=self.run_dir,
+                stage="artifact_init",
+                error_code=ErrorCode.MISSING_ARTIFACT,
+            )
         if not self.run_dir.is_dir():
-            raise ArtifactError("Run path is not a directory", path=self.run_dir, stage="artifact_init")
+            raise ArtifactError(
+                "Run path is not a directory",
+                path=self.run_dir,
+                stage="artifact_init",
+                error_code=ErrorCode.INVALID_ARTIFACT,
+            )
 
     def _infer_ai_root(self) -> Path:
         if self.run_dir.parent.name == "runs":
@@ -173,4 +215,5 @@ class ArtifactStore:
             "Run directory must live under `.ai/runs/<run_id>`",
             path=self.run_dir,
             stage="artifact_init",
+            error_code=ErrorCode.INVALID_ARTIFACT,
         )

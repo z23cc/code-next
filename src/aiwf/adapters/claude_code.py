@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
-from aiwf.exceptions import AdapterError
+from aiwf.exceptions import AdapterError, ErrorCode
 from aiwf.models import RunStatus, StageResult, TaskSpec
 
 
@@ -200,15 +200,35 @@ class ClaudeCodeAdapter:
                 timeout=self.claude_timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            raise AdapterError("Claude CLI timed out", path=path or self.repo_root, stage=stage) from exc
+            raise AdapterError(
+                "Claude CLI timed out",
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_TIMEOUT,
+            ) from exc
         except FileNotFoundError as exc:
-            raise AdapterError("Claude CLI is not available", path=path or self.repo_root, stage=stage) from exc
+            raise AdapterError(
+                "Claude CLI is not available",
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_UNAVAILABLE,
+            ) from exc
         except OSError as exc:
-            raise AdapterError("Failed to invoke Claude CLI", path=path or self.repo_root, stage=stage) from exc
+            raise AdapterError(
+                "Failed to invoke Claude CLI",
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_FAILURE,
+            ) from exc
 
         if completed.returncode != 0:
             message = completed.stderr.strip() or completed.stdout.strip() or "Claude CLI returned a failure"
-            raise AdapterError(message, path=path or self.repo_root, stage=stage)
+            raise AdapterError(
+                message,
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_FAILURE,
+            )
         return completed.stdout.strip()
 
     def _snapshot_repo(self) -> list[str]:

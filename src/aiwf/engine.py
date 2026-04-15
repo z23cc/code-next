@@ -8,7 +8,7 @@ from pathlib import Path
 from aiwf.adapters import restore_host_contract
 from aiwf.adapters.base import HostContract, RunnerAdapter
 from aiwf.artifacts import ArtifactStore
-from aiwf.exceptions import ArtifactError, StateError
+from aiwf.exceptions import AiwfError, ArtifactError, ErrorCode, StateError
 from aiwf.gates import run_gates
 from aiwf.loader import load_gate_set, load_policy, load_runbook, load_task
 from aiwf.models import (
@@ -140,9 +140,9 @@ class WorkflowEngine:
         self._load_supporting_specs(task)
         run_dir = Path(meta.run_dir)
         store = ArtifactStore(run_dir, state_manager=self.state_manager)
-        self._require_review_artifacts(store)
 
         try:
+            self._require_review_artifacts(store)
             self.state_manager.transition(run_id, RunStatus.running, stage="review", data=self._workflow_data(workflow))
             self._resume_review(
                 task,
@@ -290,6 +290,7 @@ class WorkflowEngine:
                     RunStatus.failed,
                     stage="gates",
                     error="Gate verification failed",
+                    error_code=ErrorCode.GATE_FAILURE,
                 )
                 return
 
@@ -361,6 +362,7 @@ class WorkflowEngine:
                     f"Stored review-report.json is invalid: {exc.message}",
                     path=run_dir / "review-report.json",
                     stage="review",
+                    error_code=exc.error_code,
                 ) from exc
             review_report = stored_review_report.model_dump(mode="python")
             self._validate_review_report(review_report, run_dir)
@@ -400,6 +402,7 @@ class WorkflowEngine:
         workflow: str,
         exc: Exception,
     ) -> None:
+        error_code = exc.error_code if isinstance(exc, AiwfError) else ErrorCode.UNKNOWN
         self._write_receipt(
             store,
             run_id,
@@ -410,9 +413,20 @@ class WorkflowEngine:
         )
         meta = self.state_manager.load_run(run_id)
         if meta.status is RunStatus.failed:
-            self.state_manager.update_run(run_id, error=str(exc), data=self._workflow_data(workflow))
+            self.state_manager.update_run(
+                run_id,
+                error=str(exc),
+                error_code=error_code,
+                data=self._workflow_data(workflow),
+            )
         else:
-            self.state_manager.transition(run_id, RunStatus.failed, stage=workflow, error=str(exc))
+            self.state_manager.transition(
+                run_id,
+                RunStatus.failed,
+                stage=workflow,
+                error=str(exc),
+                error_code=error_code,
+            )
         try:
             self._write_runtime_surfaces(store, workflow=workflow)
         except Exception:
@@ -451,16 +465,18 @@ class WorkflowEngine:
                 else:
                     store.read_artifact(artifact_name)
             except ArtifactError as exc:
-                if exc.message == "Artifact does not exist":
+                if exc.error_code is ErrorCode.MISSING_ARTIFACT:
                     raise StateError(
                         f"Run is missing required review artifact {artifact_name!r}",
                         path=store.run_dir / artifact_name,
                         stage="review",
+                        error_code=ErrorCode.MISSING_ARTIFACT,
                     ) from exc
                 raise StateError(
                     f"Run review artifact {artifact_name!r} is invalid: {exc.message}",
                     path=store.run_dir / artifact_name,
                     stage="review",
+                    error_code=exc.error_code,
                 ) from exc
 
     def _requires_explicit_review_handoff(self, review_report: dict[str, object] | None = None) -> bool:
@@ -485,6 +501,7 @@ class WorkflowEngine:
                 f"Review report content is invalid: {detail}",
                 path=run_dir / "review-report.json",
                 stage="review",
+                error_code=ErrorCode.INVALID_ARTIFACT,
             ) from exc
 
         review_contract = self.host_contract.review
@@ -496,6 +513,7 @@ class WorkflowEngine:
                     f"Review report is missing required string field {field_name!r}",
                     path=run_dir / "review-report.json",
                     stage="review",
+                    error_code=ErrorCode.INVALID_ARTIFACT,
                 )
 
         for field_name in review_contract.required_report_list_fields:
@@ -505,6 +523,7 @@ class WorkflowEngine:
                     f"Review report field {field_name!r} must be a list",
                     path=run_dir / "review-report.json",
                     stage="review",
+                    error_code=ErrorCode.INVALID_ARTIFACT,
                 )
 
         expected_mode = review_contract.expected_report_mode
@@ -515,6 +534,7 @@ class WorkflowEngine:
                     f"Review report mode {reported_mode!r} does not match expected review evidence mode {expected_mode!r}",
                     path=run_dir / "review-report.json",
                     stage="review",
+                    error_code=ErrorCode.INVALID_ARTIFACT,
                 )
 
         linked_field = review_contract.linked_report_artifact_field
@@ -526,6 +546,7 @@ class WorkflowEngine:
                 f"Review report is missing linked artifact field {linked_field!r}",
                 path=run_dir / "review-report.json",
                 stage="review",
+                error_code=ErrorCode.INVALID_ARTIFACT,
             )
         linked_artifact_path = run_dir / artifact_name
         if not linked_artifact_path.exists() or not linked_artifact_path.is_file():
@@ -533,6 +554,7 @@ class WorkflowEngine:
                 f"Review evidence artifact {artifact_name!r} referenced by {linked_field!r} does not exist",
                 path=linked_artifact_path,
                 stage="review",
+                error_code=ErrorCode.MISSING_ARTIFACT,
             )
 
     def _record_stage_result(self, run_id: str, result: StageResult) -> None:
@@ -574,6 +596,7 @@ class WorkflowEngine:
             review_command=f"uv run aiwf run review --run-id {run_id}" if meta.status is RunStatus.needs_review else None,
             next_actions=self._diagnostics_next_actions(meta, artifact_names, run_id, run_dir),
             error=meta.error,
+            error_code=meta.error_code,
             host=RunHostDiagnostics(
                 adapter=self.host_contract.adapter,
                 mode=self.host_contract.mode,

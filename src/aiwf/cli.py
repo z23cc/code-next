@@ -156,6 +156,9 @@ def _print_run_guidance(ai_root: Path, run_id: str) -> None:
     status_reason = str(diagnostics.get("status_reason", "")).strip()
     if status_reason:
         console.print(f"reason={status_reason}")
+    error_code = diagnostics.get("error_code")
+    if isinstance(error_code, str) and error_code.strip():
+        console.print(f"error_code={error_code}")
 
     next_actions = diagnostics.get("next_actions")
     if isinstance(next_actions, list):
@@ -368,6 +371,9 @@ def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> N
     status_reason = str(diagnostics.get("status_reason", "")).strip()
     if status_reason:
         console.print(f"reason={status_reason}")
+    error_code = diagnostics.get("error_code")
+    if isinstance(error_code, str) and error_code.strip():
+        console.print(f"error_code={error_code}")
 
     resolved_contract = payload.get("host_contract")
     if isinstance(resolved_contract, dict):

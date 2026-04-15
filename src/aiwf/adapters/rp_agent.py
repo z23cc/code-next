@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from aiwf.adapters.base import HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
-from aiwf.exceptions import AdapterError
+from aiwf.exceptions import AdapterError, ErrorCode
 from aiwf.models import RunStatus, StageResult, TaskSpec
 
 
@@ -242,12 +242,22 @@ class RpAgentAdapter:
                     timeout=self.rp_timeout,
                 )
             except subprocess.TimeoutExpired as exc:
-                raise AdapterError("RepoPrompt native runtime timed out", path=path or self.repo_root, stage=stage) from exc
+                raise AdapterError(
+                    "RepoPrompt native runtime timed out",
+                    path=path or self.repo_root,
+                    stage=stage,
+                    error_code=ErrorCode.ADAPTER_TIMEOUT,
+                ) from exc
             except FileNotFoundError:
                 missing_runtime = True
                 continue
             except OSError as exc:
-                raise AdapterError("Failed to invoke RepoPrompt native runtime", path=path or self.repo_root, stage=stage) from exc
+                raise AdapterError(
+                    "Failed to invoke RepoPrompt native runtime",
+                    path=path or self.repo_root,
+                    stage=stage,
+                    error_code=ErrorCode.ADAPTER_FAILURE,
+                ) from exc
 
             if completed.returncode != 0:
                 message = (
@@ -255,12 +265,27 @@ class RpAgentAdapter:
                     or completed.stdout.strip()
                     or "RepoPrompt native runtime returned a failure"
                 )
-                raise AdapterError(message, path=path or self.repo_root, stage=stage)
+                raise AdapterError(
+                    message,
+                    path=path or self.repo_root,
+                    stage=stage,
+                    error_code=ErrorCode.ADAPTER_FAILURE,
+                )
             return completed.stdout.strip()
 
         if missing_runtime:
-            raise AdapterError("RepoPrompt native runtime is not available", path=path or self.repo_root, stage=stage)
-        raise AdapterError("RepoPrompt native runtime is not configured", path=path or self.repo_root, stage=stage)
+            raise AdapterError(
+                "RepoPrompt native runtime is not available",
+                path=path or self.repo_root,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_UNAVAILABLE,
+            )
+        raise AdapterError(
+            "RepoPrompt native runtime is not configured",
+            path=path or self.repo_root,
+            stage=stage,
+            error_code=ErrorCode.ADAPTER_UNAVAILABLE,
+        )
 
     def _build_plan_prompt(self, task: TaskSpec, context: str) -> str:
         return "\n".join(

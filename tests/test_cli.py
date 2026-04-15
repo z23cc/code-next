@@ -843,6 +843,7 @@ def test_cli_inspect_json_surfaces_machine_readable_runtime_state(tmp_path: Path
     assert payload["ok"] is True
     assert payload["run_id"] == run_id
     assert payload["diagnostics"]["status"] == "blocked"
+    assert payload["diagnostics"]["error_code"] is None
     assert payload["diagnostics"]["host"]["adapter"] == "claude"
     assert payload["provenance"]["status"] == "blocked"
     assert payload["review_report"] is None
@@ -863,6 +864,67 @@ def test_cli_inspect_json_surfaces_machine_readable_runtime_state(tmp_path: Path
     assert payload["artifacts"]["diagnostics"].endswith("run-diagnostics.json")
     assert payload["artifacts"]["provenance"].endswith("run-provenance.json")
     assert payload["artifacts"]["review_report"] is None
+
+
+def test_cli_inspect_surfaces_structured_error_codes_for_failed_runs(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path, gate_command=_python_exit_command(1))
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert implement_result.exit_code == 0
+
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    resume_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert resume_result.exit_code == 1
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+        ],
+    )
+    assert inspect_result.exit_code == 0
+    assert "error_code=GATE_FAILURE" in inspect_result.stdout
+
+    inspect_json_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--json",
+        ],
+    )
+    assert inspect_json_result.exit_code == 0
+    payload = json.loads(inspect_json_result.stdout)
+    assert payload["diagnostics"]["status"] == "failed"
+    assert payload["diagnostics"]["error_code"] == "GATE_FAILURE"
 
 
 def test_cli_inspect_json_includes_review_report_evidence_summary_for_rp_runs(tmp_path: Path) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from aiwf.artifacts import ArtifactStore
-from aiwf.exceptions import ArtifactError
+from aiwf.exceptions import ArtifactError, ErrorCode
 from aiwf.models import (
     ReviewReportContent,
     RunDiagnostics,
@@ -77,6 +77,7 @@ def test_read_artifact_raises_for_missing_artifact(tmp_path: Path) -> None:
         store.read_artifact("missing.md")
 
     assert "path=" in str(exc_info.value)
+    assert exc_info.value.error_code is ErrorCode.MISSING_ARTIFACT
 
 
 def test_read_validated_artifact_returns_typed_known_artifacts(tmp_path: Path) -> None:
@@ -115,6 +116,7 @@ def test_read_validated_artifact_rejects_malformed_verify_report_with_field_erro
     assert "Artifact content failed validation" in message
     assert "passed" in message
     assert "stage=read_validated_artifact" in message
+    assert exc_info.value.error_code is ErrorCode.INVALID_ARTIFACT
 
 
 def test_read_validated_artifact_rejects_malformed_review_report_with_field_errors(tmp_path: Path) -> None:
@@ -133,6 +135,7 @@ def test_read_validated_artifact_rejects_malformed_review_report_with_field_erro
     message = str(exc_info.value)
     assert "Artifact content failed validation" in message
     assert "issues" in message
+    assert exc_info.value.error_code is ErrorCode.INVALID_ARTIFACT
 
 
 def test_read_validated_artifact_rejects_malformed_work_receipt_with_field_errors(tmp_path: Path) -> None:
@@ -151,6 +154,7 @@ def test_read_validated_artifact_rejects_malformed_work_receipt_with_field_error
     message = str(exc_info.value)
     assert "Artifact content failed validation" in message
     assert "artifacts" in message
+    assert exc_info.value.error_code is ErrorCode.INVALID_ARTIFACT
 
 
 def test_artifact_store_writes_and_reads_run_diagnostics(tmp_path: Path) -> None:
@@ -167,6 +171,7 @@ def test_artifact_store_writes_and_reads_run_diagnostics(tmp_path: Path) -> None
             status_reason="Run is blocked at implement waiting for operator action.",
             resumable=True,
             next_actions=[f"Run `uv run aiwf resume {run_id}` when ready."],
+            error_code=ErrorCode.STATE_VIOLATION,
             host=RunHostDiagnostics(
                 adapter="claude",
                 mode="manual",
@@ -180,6 +185,7 @@ def test_artifact_store_writes_and_reads_run_diagnostics(tmp_path: Path) -> None
 
     assert diagnostics["status"] == "blocked"
     assert diagnostics["resumable"] is True
+    assert diagnostics["error_code"] == "STATE_VIOLATION"
     assert diagnostics["host"]["adapter"] == "claude"
 
 

@@ -12,7 +12,7 @@ from aiwf.adapters.codex import CodexAdapter
 from aiwf.adapters.rp_agent import RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 from aiwf.engine import WorkflowEngine
-from aiwf.exceptions import AdapterError, StateError
+from aiwf.exceptions import AdapterError, ErrorCode, StateError
 from aiwf.models import RunStatus
 from aiwf.state import RunStateManager
 
@@ -101,6 +101,13 @@ def test_run_review_requires_contract_declared_verify_report_artifact(tmp_path: 
     with pytest.raises(StateError, match="missing required review artifact 'verify-report.json'"):
         engine.run_review(run_id)
 
+    failed_meta = RunStateManager(ai_root).load_run(run_id)
+    diagnostics = json.loads((ai_root / "runs" / run_id / "run-diagnostics.json").read_text(encoding="utf-8"))
+
+    assert failed_meta.status is RunStatus.failed
+    assert failed_meta.error_code is ErrorCode.MISSING_ARTIFACT
+    assert diagnostics["error_code"] == "MISSING_ARTIFACT"
+
 
 def test_run_review_rejects_malformed_verify_report_content_at_review_boundary(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
@@ -117,6 +124,13 @@ def test_run_review_rejects_malformed_verify_report_content_at_review_boundary(t
 
     with pytest.raises(StateError, match="Run review artifact 'verify-report.json' is invalid: Artifact content failed validation: passed"):
         engine.run_review(run_id)
+
+    failed_meta = RunStateManager(ai_root).load_run(run_id)
+    diagnostics = json.loads((ai_root / "runs" / run_id / "run-diagnostics.json").read_text(encoding="utf-8"))
+
+    assert failed_meta.status is RunStatus.failed
+    assert failed_meta.error_code is ErrorCode.INVALID_ARTIFACT
+    assert diagnostics["error_code"] == "INVALID_ARTIFACT"
 
 
 def test_run_review_fails_when_adapter_returns_review_report_missing_linked_prompt_artifact(tmp_path: Path) -> None:
@@ -339,6 +353,7 @@ def test_auto_claude_run_implement_persists_passed_runtime_surfaces(tmp_path: Pa
         "workflow",
         "status",
         "status_reason",
+        "error_code",
         "host",
         "key_artifacts",
         "stage_timeline",
@@ -407,6 +422,7 @@ def test_auto_claude_failed_implement_persists_failed_runtime_surfaces(tmp_path:
     assert diagnostics["reviewable"] is False
     assert diagnostics["status_reason"].startswith("boom")
     assert diagnostics["error"].startswith("boom")
+    assert diagnostics["error_code"] == "ADAPTER_FAILURE"
     assert any(artifact["name"] == "work-receipt.json" for artifact in diagnostics["key_artifacts"])
 
     assert provenance["status"] == "failed"
@@ -592,9 +608,11 @@ def test_failed_gate_run_can_resume_after_gate_fix(tmp_path: Path) -> None:
 
     assert failed_meta.status is RunStatus.failed
     assert failed_meta.last_completed_stage == "gates"
+    assert failed_meta.error_code is ErrorCode.GATE_FAILURE
     assert diagnostics["status"] == "failed"
     assert diagnostics["resumable"] is True
     assert diagnostics["status_reason"] == "Run failed during gates and requires fixes before resume."
+    assert diagnostics["error_code"] == "GATE_FAILURE"
     assert any(artifact["name"] == "verify-report.json" for artifact in diagnostics["key_artifacts"])
     assert provenance["gate_evidence"]["report"]["name"] == "verify-report.json"
     assert provenance["gate_evidence"]["passed"] is False
