@@ -228,10 +228,16 @@ class RpAgentAdapter:
             "",
             "Evidence summary:",
             f"- verify: {summary['verify']}",
-            *[f"- gate: {line}" for line in summary["gate_results"]],
-            f"- diagnostics: {summary['diagnostics']}",
-            f"- provenance: {summary['provenance']}",
         ]
+        gate_results = summary.get("gate_results")
+        if isinstance(gate_results, list) and gate_results:
+            lines.extend(f"- gate: {line}" for line in gate_results)
+        lines.extend(
+            [
+                f"- diagnostics: {summary['diagnostics']}",
+                f"- provenance: {summary['provenance']}",
+            ]
+        )
         changed_files = summary.get("changed_files")
         if isinstance(changed_files, list) and changed_files:
             lines.extend([
