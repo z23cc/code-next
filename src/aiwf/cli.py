@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
 
@@ -9,10 +10,11 @@ import typer
 from rich.console import Console
 
 from aiwf import __version__
-from aiwf.adapters import build_adapter, build_adapter_from_contract, restore_host_contract
+from aiwf.adapters import ADAPTER_SPECS, build_adapter, build_adapter_from_contract, restore_host_contract
 from aiwf.adapters.base import HostContract
 from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
+from aiwf.contracts import assess_review_boundary, assess_review_evidence, lint_contract_registry, review_contract_fields
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AiwfError
 from aiwf.state import RunStateManager
@@ -23,8 +25,10 @@ app = typer.Typer(
 )
 run_app = typer.Typer(help="Run workflow stages with the configured adapter.")
 compile_app = typer.Typer(help="Compile workflow inputs for host-specific outputs.")
+contracts_app = typer.Typer(help="Lint and inspect built-in host contracts.")
 app.add_typer(run_app, name="run")
 app.add_typer(compile_app, name="compile")
+app.add_typer(contracts_app, name="contracts")
 console = Console()
 
 
@@ -149,7 +153,20 @@ def _print_run_guidance(ai_root: Path, run_id: str) -> None:
     console.print(f"inspect=uv run aiwf inspect {run_id} --ai-root {ai_root}")
 
 
-def _print_inspection(ai_root: Path, run_id: str) -> None:
+def _list_run_artifact_names(ai_root: Path, run_id: str) -> set[str]:
+    run_dir = ai_root / "runs" / run_id
+    try:
+        return {path.name for path in run_dir.iterdir() if path.is_file()}
+    except OSError as exc:
+        raise AiwfError(f"Unable to inspect artifacts for run {run_id}: {exc}") from exc
+
+
+def _format_csv(values: tuple[str, ...] | list[str] | set[str]) -> str:
+    flattened = sorted(value for value in values if value)
+    return ",".join(flattened) if flattened else "-"
+
+
+def _print_inspection(ai_root: Path, run_id: str, *, verbose: bool = False) -> None:
     diagnostics = _load_run_surface(ai_root, run_id, "run-diagnostics.json")
     provenance: dict[str, Any] | None
     try:
@@ -170,19 +187,74 @@ def _print_inspection(ai_root: Path, run_id: str) -> None:
     if status_reason:
         console.print(f"reason={status_reason}")
 
-    host = diagnostics.get("host")
-    if isinstance(host, dict):
-        adapter = str(host.get("adapter", "")).strip()
-        mode = str(host.get("mode", "")).strip()
-        supports_auto = host.get("supports_auto_execution")
-        explicit_review = host.get("requires_explicit_review_handoff")
+    resolved_contract: HostContract | None = None
+    try:
+        resolved_contract = _resolve_run_execution(ai_root, run_id)
+    except AiwfError as exc:
+        console.print(f"host_contract_warning={exc}")
+
+    if resolved_contract is not None:
         console.print(
-            "host="
-            f"adapter={adapter or '-'} "
-            f"mode={mode or '-'} "
-            f"supports_auto_execution={supports_auto} "
-            f"requires_explicit_review_handoff={explicit_review}"
+            "host_contract="
+            f"adapter={resolved_contract.adapter} "
+            f"mode={resolved_contract.mode} "
+            f"supports_auto_execution={resolved_contract.capabilities.supports_auto_execution} "
+            "requires_explicit_review_handoff="
+            f"{resolved_contract.capabilities.requires_explicit_review_handoff}"
         )
+        review_contract = resolved_contract.review
+        console.print(
+            "review_contract="
+            f"required_run_artifacts={_format_csv(list(review_contract.required_run_artifacts))} "
+            f"required_report_fields={_format_csv(list(review_contract_fields(review_contract)))} "
+            f"expected_mode={review_contract.expected_report_mode or '-'} "
+            f"linked_field={review_contract.linked_report_artifact_field or '-'}"
+        )
+
+        artifact_names = _list_run_artifact_names(ai_root, run_id)
+        review_boundary = assess_review_boundary(resolved_contract, available_artifact_names=artifact_names)
+        console.print(
+            "review_boundary="
+            f"{'ready' if review_boundary.ready else 'waiting'} "
+            f"missing_required_artifacts={_format_csv(list(review_boundary.missing_required_artifacts))}"
+        )
+
+        review_report: Mapping[str, object] | None = None
+        try:
+            loaded_report = _load_run_surface(ai_root, run_id, "review-report.json")
+            review_report = loaded_report if isinstance(loaded_report, Mapping) else None
+        except AiwfError:
+            review_report = None
+        review_evidence = assess_review_evidence(
+            resolved_contract,
+            review_report,
+            available_artifact_names=artifact_names,
+        )
+        console.print(
+            "review_evidence="
+            f"{review_evidence.status} "
+            f"mode={review_evidence.mode or '-'} "
+            f"missing_report_fields={_format_csv(list(review_evidence.missing_report_fields))} "
+            f"missing_linked_artifacts={_format_csv(list(review_evidence.missing_linked_artifacts))}"
+        )
+        if review_evidence.mode_mismatch:
+            console.print(f"review_evidence_mode_mismatch={review_evidence.mode_mismatch}")
+        if review_evidence.linked_artifacts:
+            console.print(f"review_linked_artifacts={_format_csv(list(review_evidence.linked_artifacts))}")
+    else:
+        host = diagnostics.get("host")
+        if isinstance(host, dict):
+            adapter = str(host.get("adapter", "")).strip()
+            mode = str(host.get("mode", "")).strip()
+            supports_auto = host.get("supports_auto_execution")
+            explicit_review = host.get("requires_explicit_review_handoff")
+            console.print(
+                "host="
+                f"adapter={adapter or '-'} "
+                f"mode={mode or '-'} "
+                f"supports_auto_execution={supports_auto} "
+                f"requires_explicit_review_handoff={explicit_review}"
+            )
 
     next_actions = diagnostics.get("next_actions")
     if isinstance(next_actions, list) and next_actions:
@@ -202,21 +274,23 @@ def _print_inspection(ai_root: Path, run_id: str) -> None:
                     f"gate_evidence=gate_set={gate_set or '-'} passed={passed} report={report['path']}"
                 )
 
-        review_evidence = provenance.get("review_evidence")
-        if isinstance(review_evidence, dict):
-            report = review_evidence.get("report")
-            mode_value = review_evidence.get("mode")
-            linked_artifacts = review_evidence.get("linked_artifacts")
-            if isinstance(report, dict) and isinstance(report.get("path"), str):
-                console.print(f"review_evidence=mode={mode_value or '-'} report={report['path']}")
-            if isinstance(linked_artifacts, list) and linked_artifacts:
+        # The contract-assessed summary above explains readiness/completeness;
+        # this provenance block is the raw persisted evidence view for verbose inspection.
+        review_evidence_ref = provenance.get("review_evidence")
+        if isinstance(review_evidence_ref, dict):
+            report = review_evidence_ref.get("report")
+            mode_value = review_evidence_ref.get("mode")
+            linked_artifacts = review_evidence_ref.get("linked_artifacts")
+            if isinstance(report, dict) and isinstance(report.get("path"), str) and verbose:
+                console.print(f"review_report={report['path']} mode={mode_value or '-'}")
+            if isinstance(linked_artifacts, list) and linked_artifacts and verbose:
                 console.print("review_links:")
                 for artifact in linked_artifacts:
                     if isinstance(artifact, dict) and isinstance(artifact.get("path"), str):
                         console.print(f"- {artifact['path']}")
 
         artifact_index = provenance.get("artifact_index")
-        if isinstance(artifact_index, list) and artifact_index:
+        if verbose and isinstance(artifact_index, list) and artifact_index:
             console.print("artifacts:")
             for artifact in artifact_index:
                 if not isinstance(artifact, dict):
@@ -298,13 +372,32 @@ def resume(
 def inspect_run(
     run_id: str,
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    verbose: Annotated[bool, typer.Option("--verbose", help="Show artifact index and detailed provenance links.")] = False,
 ) -> None:
     """Inspect diagnostics and provenance for an existing run."""
     try:
-        _print_inspection(ai_root, run_id)
+        _print_inspection(ai_root, run_id, verbose=verbose)
     except AiwfError as exc:
         console.print(f"[red]inspect failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
+
+
+@contracts_app.command("lint")
+def contract_lint() -> None:
+    """Lint built-in adapter host/review contracts."""
+    results = lint_contract_registry(ADAPTER_SPECS)
+    failed = False
+    for result in results:
+        status = "[green]ok[/green]" if result.ok else "[red]fail[/red]"
+        console.print(f"{status} {result.subject}")
+        if result.ok:
+            continue
+        failed = True
+        for issue in result.issues:
+            console.print(f"  - {issue.code}: {issue.message}")
+    if failed:
+        raise typer.Exit(code=1)
+    console.print(f"[green]contract lint completed[/green] contracts={len(results)} adapters={len(ADAPTER_SPECS)}")
 
 
 @compile_app.command("claude")

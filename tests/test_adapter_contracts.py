@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from aiwf.adapters import build_adapter, restore_host_contract
-from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
+from aiwf.adapters import ADAPTER_SPECS, build_adapter, restore_host_contract
+from aiwf.adapters.base import AdapterSpec, HostCapabilities, HostContract, ReviewArtifactContract
+from aiwf.contracts import lint_contract_registry, lint_host_contract
 
 
 def test_restore_host_contract_prefers_explicit_metadata() -> None:
@@ -64,6 +65,67 @@ def test_restore_host_contract_accepts_legacy_metadata() -> None:
 def test_build_adapter_rejects_unsupported_auto_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not support auto mode"):
         build_adapter("rp", tmp_path, auto=True)
+
+
+def test_builtin_adapter_contracts_pass_lint() -> None:
+    results = lint_contract_registry(ADAPTER_SPECS)
+
+    assert results
+    assert all(result.ok for result in results)
+
+
+def test_lint_host_contract_flags_linked_artifact_field_not_tracked() -> None:
+    result = lint_host_contract(
+        HostContract(
+            adapter="broken",
+            mode="manual",
+            capabilities=HostCapabilities(
+                supports_auto_execution=False,
+                requires_explicit_review_handoff=True,
+            ),
+            review=ReviewArtifactContract(
+                required_run_artifacts=("verify-report.json",),
+                required_report_string_fields=("summary", "mode"),
+                required_report_list_fields=("issues",),
+                expected_report_mode="manual",
+                linked_report_artifact_field="prompt_file",
+            ),
+        ),
+        subject="broken/manual",
+    )
+
+    assert result.subject == "broken/manual"
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"untracked-linked-artifact-field"}
+
+
+def test_lint_contract_registry_flags_variant_metadata_mismatch() -> None:
+    broken_spec = AdapterSpec(
+        name="broken",
+        default_mode="manual",
+        variants={
+            "manual": HostContract(
+                adapter="other",
+                mode="auto",
+                capabilities=HostCapabilities(supports_auto_execution=False),
+                review=ReviewArtifactContract(
+                    required_report_string_fields=("summary",),
+                    required_report_list_fields=("issues",),
+                ),
+            )
+        },
+        factory=lambda repo_root, contract: build_adapter("stub", repo_root)[0],
+    )
+
+    results = lint_contract_registry({"broken": broken_spec})
+
+    result = next(result for result in results if result.subject == "broken/manual")
+    assert not result.ok
+    assert {issue.code for issue in result.issues} >= {
+        "adapter-field-mismatch",
+        "mode-field-mismatch",
+        "auto-without-capability",
+    }
 
 
 def test_restore_host_contract_backfills_review_contract_for_item1_metadata() -> None:

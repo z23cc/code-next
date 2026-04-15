@@ -604,6 +604,17 @@ def test_cli_rejects_auto_when_adapter_contract_does_not_support_it(tmp_path: Pa
     assert "does not support auto mode" in result.stdout
 
 
+def test_cli_contract_lint_command_succeeds() -> None:
+    result = runner.invoke(app, ["contracts", "lint"])
+
+    assert result.exit_code == 0
+    assert "ok claude/manual" in result.stdout
+    assert "ok claude/auto" in result.stdout
+    assert "ok rp/manual" in result.stdout
+    assert "ok stub/manual" in result.stdout
+    assert "contract lint completed" in result.stdout
+
+
 def test_cli_inspect_command_surfaces_diagnostics_and_provenance(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
 
@@ -637,10 +648,11 @@ def test_cli_inspect_command_surfaces_diagnostics_and_provenance(tmp_path: Path)
     assert inspect_result.exit_code == 0
     assert f"run_id={run_id}" in inspect_result.stdout
     assert "reason=Run is blocked at implement" in inspect_result.stdout
-    assert "host=adapter=claude mode=manual" in inspect_result.stdout
+    assert "host_contract=adapter=claude mode=manual" in inspect_result.stdout
+    assert "review_contract=required_run_artifacts=verify-report.json" in inspect_result.stdout
+    assert "review_boundary=waiting missing_required_artifacts=verify-report.json" in inspect_result.stdout
+    assert "review_evidence=not_started mode=-" in inspect_result.stdout
     assert "next_actions:" in inspect_result.stdout
-    assert "artifacts:" in inspect_result.stdout
-    assert "claude-implement-prompt.md" in inspect_result.stdout
     assert "diagnostics=" in inspect_result.stdout
     assert "provenance=" in inspect_result.stdout
 
@@ -705,9 +717,75 @@ def test_cli_inspect_command_surfaces_gate_and_review_evidence(tmp_path: Path) -
 
     assert inspect_result.exit_code == 0
     assert "gate_evidence=gate_set=default passed=True" in inspect_result.stdout
-    assert "review_evidence=mode=manual" in inspect_result.stdout
+    assert "review_boundary=ready missing_required_artifacts=-" in inspect_result.stdout
+    assert "review_evidence=complete mode=manual" in inspect_result.stdout
+    assert "missing_report_fields=-" in inspect_result.stdout
+    assert "missing_linked_artifacts=-" in inspect_result.stdout
+    assert "review_linked_artifacts=claude-review-prompt.md" in inspect_result.stdout
+
+
+def test_cli_inspect_verbose_surfaces_artifact_index_and_review_links(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    gates_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert gates_result.exit_code == 0
+
+    review_result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert review_result.exit_code == 0
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--verbose",
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
     assert "review_links:" in inspect_result.stdout
     assert "claude-review-prompt.md" in inspect_result.stdout
+    assert "artifacts:" in inspect_result.stdout
 
 
 def test_cli_inspect_command_surfaces_auto_host_runtime_evidence(tmp_path: Path) -> None:
@@ -742,10 +820,10 @@ def test_cli_inspect_command_surfaces_auto_host_runtime_evidence(tmp_path: Path)
     assert "workflow=implement" in inspect_result.stdout
     assert "status=passed" in inspect_result.stdout
     assert "last_completed_stage=review" in inspect_result.stdout
-    assert "host=adapter=claude mode=auto" in inspect_result.stdout
-    assert "review_evidence=mode=auto" in inspect_result.stdout
-    assert "claude-implement-response.md" in inspect_result.stdout
-    assert "claude-review-response.md" in inspect_result.stdout
+    assert "host_contract=adapter=claude mode=auto" in inspect_result.stdout
+    assert "review_boundary=ready missing_required_artifacts=-" in inspect_result.stdout
+    assert "review_evidence=complete mode=auto" in inspect_result.stdout
+    assert "review_linked_artifacts=claude-review-response.md" in inspect_result.stdout
     assert "diagnostics=" in inspect_result.stdout
     assert "provenance=" in inspect_result.stdout
 
