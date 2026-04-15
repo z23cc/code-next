@@ -45,3 +45,42 @@ jobs:
 
       - name: Pytest
         run: uv run pytest tests/ -x -q
+
+  workflow-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11'
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Doctor JSON gate
+        run: uv run aiwf doctor --json > doctor-report.json
+
+      - name: Compile smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmpdir="$(mktemp -d)"
+          uv run aiwf compile claude --ai-root .ai --output "$tmpdir/claude"
+          uv run aiwf compile codex --ai-root .ai --output "$tmpdir/codex"
+          uv run aiwf compile rp --ai-root .ai --output "$tmpdir/rp"
+
+      - name: Upload doctor report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctor-report
+          path: doctor-report.json
