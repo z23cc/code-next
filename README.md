@@ -19,6 +19,7 @@
 - `.claude/skills/`：Claude Code 技能入口
 - `docs/PYTHON_IMPLEMENTATION_SPEC.md`：实现规范
 - `docs/QUICKSTART.md`：快速上手
+- `docs/compatibility-policy.md`：run metadata / host contract / projection 兼容性策略
 
 ## 安装
 
@@ -96,3 +97,5 @@ uv run aiwf compile codex --output .codex/compiled
 - `compile codex` 输出 `.codex/compiled/codex-bundle.md`、`codex-projection.json`、`manifest.json`
 
 两者 manifest 都包含 source fingerprint 与 drift 状态（`initial` / `clean` / `changed`）。
+
+与 `host_contract`、projection、install surface 相关的兼容性规则见 `docs/compatibility-policy.md`。

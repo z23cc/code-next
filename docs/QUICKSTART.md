@@ -97,6 +97,8 @@ uv run aiwf compile codex --output .codex/compiled
 
 生成内容包括 bundle / projection / manifest；manifest 记录 source fingerprint 与 drift 状态。
 
+兼容性边界（`host_contract`、projection、install surface、legacy run metadata retention）见 `docs/compatibility-policy.md`。
+
 ## 9. Claude Code 技能入口
 
 - `/rp-plan`
