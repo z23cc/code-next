@@ -4,7 +4,7 @@
 
 实现一个名为 `aiwf` 的 Python 工作流内核，作用是把任务输入、runbook 语义、上下文发现、宿主执行、gates、artifacts 和 resume 串成一个稳定流程。
 
-这个内核是 RepoPrompt Agent Run、Claude Code、Codex 的共享底座；当前实现已覆盖多宿主（Claude/RP/Codex/stub）与显式契约治理。RP、Codex 仍是 manual-first 路径，Claude 支持 manual/auto 双模式。
+这个内核是 RepoPrompt Agent Run、Claude Code、Codex 的共享底座；当前实现已覆盖多宿主（Claude/RP/Codex/stub）与显式契约治理。Claude 与 RP 支持 manual/auto 双模式；Codex 仍是 manual-first。RP 的 auto 依赖 PATH 上可用的 `rp` / `rp-cli` native runtime。
 
 ## 2. 设计立场
 
@@ -74,6 +74,7 @@ src/aiwf/
     __init__.py
     claude.py
     codex.py
+    rp.py
 tests/
 ```
 
@@ -157,6 +158,7 @@ uv run aiwf resume <run_id>
 uv run aiwf inspect <run_id>
 uv run aiwf contracts lint
 uv run aiwf doctor --json
+uv run aiwf compile rp
 uv run aiwf compile claude
 uv run aiwf compile codex
 ```
@@ -172,12 +174,13 @@ uv run aiwf compile codex
   - `run-diagnostics.json` / `run-provenance.json` 路径
   - 一个稳定的 inspection 命令（如 `aiwf inspect <run_id>`）
 
-### 5.2 `compile claude` 最小投影契约
+### 5.2 `compile <host>` 最小投影契约
 
-`compile claude` 不应只做简单 bundle 导出；最小可行版本至少应输出：
+当前 `compile rp` / `compile claude` / `compile codex` 都不应只做简单 bundle 导出；最小可行版本至少应输出：
 
-- 一个 Claude 可直接消费的 markdown bundle
+- 一个宿主可直接消费的 markdown bundle
 - 一个显式宿主投影文件（命令、host contract、review artifact contract、workflow 边界）
+- 一个 `install-surface.json`，用于声明当前 compiled output directory 的安装与所有权语义
 - 一个带 source fingerprint 与 drift 信息的 manifest
 - compiler/projection 的共享抽象层应直接复用已有 host contract 模型，而不是在编译器里重复声明 variant contract
 
@@ -245,10 +248,10 @@ uv run aiwf compile codex
 - 状态可恢复
 - artifact 可落盘
 - 多宿主路径可跑通（Claude/RP/Codex/stub）
-- manual-first 与 auto（Claude）边界清晰
+- manual-first 与 auto（Claude/RP）边界清晰
 
 可以暂缓这些：
-- RP/Codex 的 native execution（当前仍 manual-first）
+- Codex 的 native execution（当前仍 manual-first）
 - 并发 stage
 - 复杂权限模型
 - 插件市场分发
@@ -275,7 +278,7 @@ uv run aiwf compile codex
 - `adapters/claude_code.py`
 
 ### 第 5 提交
-- `compile claude` 路径
+- host compile 路径（rp / claude / codex）
 - 测试与文档补齐
 
 ## 10. 质量门槛

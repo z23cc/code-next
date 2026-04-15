@@ -13,7 +13,7 @@
 4. gate runner
 5. 显式 `host_contract` / review evidence contract
 6. `contracts lint` 与 `doctor`
-7. host compiler（`compile claude` / `compile codex`）
+7. host compiler（`compile rp` / `compile claude` / `compile codex`）
 
 ## 非目标
 
@@ -72,6 +72,7 @@ src/aiwf/
   compilers/
     claude.py
     codex.py
+    rp.py
 ```
 
 ## 核心对象
@@ -120,7 +121,7 @@ src/aiwf/
 2. 再读任务文件与相关 runbook
 3. 优先最小改动，不做无关重构
 4. 先产出计划，再做实现
-5. 对 manual-first 宿主（Claude manual / RP / Codex），要把 prompt 文件视为人工 handoff 边界，而不是视为实现或 review 已经终态完成
+5. 对 manual-first 宿主（Claude manual / Codex，以及未启用 native runtime 的 RP），要把 prompt 文件视为人工 handoff 边界，而不是视为实现或 review 已经终态完成
 6. 实现完成后必须跑 gates
 7. review 基于既有 run 与 artifacts，通过 `run review --run-id <run_id>` 进入，并按已存储的 review artifact contract 校验证据
 8. 所有关键决定写入 artifact
@@ -155,3 +156,5 @@ src/aiwf/
 - `/rp-review`
 
 如果一个流程已经可以写成 skill，就不要继续把长操作步骤塞进 `CLAUDE.md`。
+
+RP / Claude 编译产物的实际安装与集成方式见 `docs/INSTALL_GUIDE.md`。

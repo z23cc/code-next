@@ -41,7 +41,7 @@ uv run aiwf resume <run_id>
 
 如果 gates 通过，run 会停在 `needs_review`；如果 gates 失败，修复后同样使用 `resume` 继续。
 
-`--auto` 仅在宿主契约声明支持自动执行时生效；当前仅 `claude` 支持。
+`--auto` 仅在宿主契约声明支持自动执行时生效；当前 `claude` 与 `rp` 支持。RP 的 `--auto` 还要求 PATH 上有可用的 `rp` 或 `rp-cli`。
 
 ## 5. 复核阶段
 
@@ -91,13 +91,15 @@ uv run aiwf doctor --json
 ## 8. 编译宿主投影
 
 ```bash
+uv run aiwf compile rp --output .rp/compiled
 uv run aiwf compile claude --output .claude/compiled
 uv run aiwf compile codex --output .codex/compiled
 ```
 
-生成内容包括 bundle / projection / manifest；manifest 记录 source fingerprint 与 drift 状态。
+生成内容包括 bundle / projection / install surface / manifest；manifest 记录 source fingerprint 与 drift 状态。
 
-兼容性边界（`host_contract`、projection、install surface、legacy run metadata retention）见 `docs/compatibility-policy.md`。
+- 样例安装/集成方式见 `docs/INSTALL_GUIDE.md`
+- 兼容性边界（`host_contract`、projection、install surface、legacy run metadata retention）见 `docs/compatibility-policy.md`
 
 ## 9. Claude Code 技能入口
 
