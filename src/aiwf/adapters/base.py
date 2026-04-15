@@ -105,29 +105,39 @@ class NativeRuntimeContract:
     enabled: bool = False
     command_candidates: tuple[str, ...] = ()
     install_hint: str | None = None
+    protocol_version: int | None = None
 
     def to_metadata(self) -> dict[str, object]:
-        return {
+        metadata: dict[str, object] = {
             "enabled": self.enabled,
             "command_candidates": list(self.command_candidates),
             "install_hint": self.install_hint,
         }
+        if self.protocol_version is not None:
+            metadata["protocol_version"] = self.protocol_version
+        return metadata
 
     @classmethod
     def from_metadata(cls, data: Mapping[str, object]) -> NativeRuntimeContract:
         enabled = data.get("enabled", False)
         command_candidates = cls._read_string_sequence(data, "command_candidates")
         install_hint = data.get("install_hint")
+        protocol_version = data.get("protocol_version")
         if not isinstance(enabled, bool):
             raise ValueError("native runtime contract enabled must be a boolean")
         if install_hint is not None and (not isinstance(install_hint, str) or not install_hint.strip()):
             raise ValueError("native runtime contract install_hint must be a non-empty string or null")
+        if protocol_version is not None and (not isinstance(protocol_version, int) or isinstance(protocol_version, bool)):
+            raise ValueError("native runtime contract protocol_version must be an integer or null")
+        if isinstance(protocol_version, int) and protocol_version <= 0:
+            raise ValueError("native runtime contract protocol_version must be greater than 0")
         if enabled and not command_candidates:
             raise ValueError("enabled native runtime contracts must declare at least one command candidate")
         return cls(
             enabled=enabled,
             command_candidates=command_candidates,
             install_hint=install_hint.strip() if isinstance(install_hint, str) else None,
+            protocol_version=protocol_version if isinstance(protocol_version, int) else None,
         )
 
     @staticmethod

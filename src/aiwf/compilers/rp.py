@@ -48,6 +48,11 @@ def _build_compiled_markdown(context: CompileContext) -> str:
         f"- default_variant: `{RP_COMPILER_SPEC.variant_namespace}/{RP_COMPILER_SPEC.default_variant}`",
         "- supported_variants: `rp/manual`, `rp/auto`",
         f"- native_runtime_candidates: `{', '.join(native_runtime.command_candidates)}`",
+        (
+            f"- native_protocol: `aiwf-rp-native/v{native_runtime.protocol_version}`"
+            if native_runtime.protocol_version is not None
+            else "- native_protocol: `_legacy text fallback only_`"
+        ),
         f"- resume_mode: restores stored `{RP_COMPILER_SPEC.stored_runtime_key}` from run metadata",
         "",
         "## RepoPrompt Review Evidence Contract",
@@ -215,7 +220,7 @@ RP_COMPILER_SPEC = CompilerSpec(
     projection_name="rp-host-projection",
     variant_namespace="rp",
     compiler_name="aiwf.compile.rp",
-    projection_contract="rp-host-projection-v1",
+    projection_contract="rp-host-projection-v2",
     host_name="repoprompt",
     host_display_name="RepoPrompt",
     stored_runtime_key="host_contract",

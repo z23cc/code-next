@@ -54,6 +54,7 @@ def test_restore_host_contract_prefers_explicit_metadata() -> None:
                 "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
                 "to make RP native-ready; manual handoff remains supported."
             ),
+            protocol_version=1,
         ),
     )
 
@@ -107,9 +108,37 @@ def test_build_adapter_supports_rp_auto_mode(tmp_path: Path) -> None:
                 "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
                 "to make RP native-ready; manual handoff remains supported."
             ),
+            protocol_version=1,
         ),
     )
     assert adapter.host_contract == contract
+
+
+def test_native_runtime_contract_protocol_version_round_trip_and_backfill() -> None:
+    current = NativeRuntimeContract.from_metadata(
+        {
+            "enabled": True,
+            "command_candidates": ["rp", "rp-cli"],
+            "install_hint": "Install rp.",
+            "protocol_version": 1,
+        }
+    )
+    legacy = NativeRuntimeContract.from_metadata(
+        {
+            "enabled": True,
+            "command_candidates": ["rp"],
+            "install_hint": "Install rp.",
+        }
+    )
+
+    assert current == NativeRuntimeContract(
+        enabled=True,
+        command_candidates=("rp", "rp-cli"),
+        install_hint="Install rp.",
+        protocol_version=1,
+    )
+    assert current.to_metadata()["protocol_version"] == 1
+    assert legacy.protocol_version is None
 
 
 def test_builtin_adapter_contracts_pass_lint() -> None:
@@ -239,6 +268,7 @@ def test_restore_host_contract_backfills_rp_auto_contract_defaults() -> None:
                 "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
                 "to make RP native-ready; manual handoff remains supported."
             ),
+            protocol_version=1,
         ),
     )
 
@@ -305,6 +335,7 @@ def test_restore_host_contract_backfills_rp_auto_contract_defaults() -> None:
                         "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
                         "to make RP native-ready; manual handoff remains supported."
                     ),
+                    protocol_version=1,
                 ),
             ),
         ),

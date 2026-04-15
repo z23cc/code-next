@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -28,6 +30,8 @@ class DoctorCheck:
     name: str
     detail: str
     path: str | None = None
+    protocol_supported: bool | None = None
+    protocol_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -292,15 +296,50 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
     for command in native_runtime.command_candidates:
         resolved = shutil.which(command)
         if resolved:
+            protocol_supported, detected_version = _probe_native_runtime_protocol(resolved)
+            declared_version = native_runtime.protocol_version
+            if protocol_supported:
+                if declared_version is not None and detected_version != declared_version:
+                    return DoctorCheck(
+                        status="warn",
+                        category="tool",
+                        name=adapter_name,
+                        detail=(
+                            f"native runtime found via {command} at {resolved}; protocol probe reported "
+                            f"aiwf-rp-native v{detected_version}, but aiwf currently advertises v{declared_version}. "
+                            "Legacy/manual fallback remains available if negotiation cannot agree on a version."
+                        ),
+                        path=resolved,
+                        protocol_supported=True,
+                        protocol_version=detected_version,
+                    )
+                return DoctorCheck(
+                    status="ok",
+                    category="tool",
+                    name=adapter_name,
+                    detail=(
+                        f"native-ready via {command} at {resolved}; protocol aiwf-rp-native v{detected_version} detected. "
+                        "Manual handoff remains available when auto execution is not desired."
+                    ),
+                    path=resolved,
+                    protocol_supported=True,
+                    protocol_version=detected_version,
+                )
             return DoctorCheck(
-                status="ok",
+                status="warn",
                 category="tool",
                 name=adapter_name,
                 detail=(
-                    f"native-ready via {command} at {resolved}; "
-                    "manual handoff remains available until the native bridge is enabled"
+                    f"native runtime found via {command} at {resolved}, but protocol negotiation support "
+                    f"was not detected; legacy text fallback remains available"
+                    + (
+                        f" (aiwf advertises protocol v{declared_version})."
+                        if declared_version is not None
+                        else "."
+                    )
                 ),
                 path=resolved,
+                protocol_supported=False,
             )
 
     candidates = ", ".join(native_runtime.command_candidates)
@@ -311,9 +350,43 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
         name=adapter_name,
         detail=(
             "manual-only fallback active; native runtime contract is declared but no compatible "
-            f"RepoPrompt runtime was found on PATH ({candidates}). {hint}"
+            f"RepoPrompt runtime was found on PATH ({candidates}). "
+            + (
+                f"aiwf advertises protocol v{native_runtime.protocol_version}. "
+                if native_runtime.protocol_version is not None
+                else ""
+            )
+            + hint
         ),
+        protocol_supported=False,
     )
+
+
+def _probe_native_runtime_protocol(command_path: str) -> tuple[bool, int | None]:
+    try:
+        completed = subprocess.run(
+            [command_path, "--aiwf-protocol-version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, None
+    if completed.returncode != 0:
+        return False, None
+    try:
+        payload = json.loads(completed.stdout.strip())
+    except json.JSONDecodeError:
+        return False, None
+    if not isinstance(payload, dict):
+        return False, None
+    version = payload.get("version")
+    if payload.get("protocol") != "aiwf-rp-native":
+        return False, None
+    if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
+        return False, None
+    return True, version
 
 
 def _tool_check(command: str, *, required: bool, reason: str) -> DoctorCheck:

@@ -150,12 +150,14 @@ def test_compile_rp_writes_bundle_projection_install_surface_and_manifest(tmp_pa
     assert "rp/manual`, `rp/auto" in bundle
     assert "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp" in bundle
     assert "rp, rp-cli" in bundle
+    assert "aiwf-rp-native/v1" in bundle
 
     assert projection["host"]["name"] == "repoprompt"
     assert projection["host"]["stored_runtime_key"] == "host_contract"
     assert projection["host"]["default_variant"] == "rp/manual"
     assert projection["host"]["variants"]["manual"] == resolve_adapter_contract("rp", auto=False).to_metadata()
     assert projection["host"]["variants"]["auto"] == resolve_adapter_contract("rp", auto=True).to_metadata()
+    assert projection["host"]["variants"]["auto"]["native_runtime"]["protocol_version"] == 1
     assert projection["workflow_contract"]["plan"]["auto_entrypoint"] == (
         "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter rp --auto"
     )
@@ -174,7 +176,7 @@ def test_compile_rp_writes_bundle_projection_install_surface_and_manifest(tmp_pa
     assert install_surface["default_output_dir"] == ".rp/compiled"
     assert install_surface["external_assets"] == []
 
-    assert manifest["compiler"]["projection_contract"] == "rp-host-projection-v1"
+    assert manifest["compiler"]["projection_contract"] == "rp-host-projection-v2"
     assert manifest["files"]["rp_bundle"] == "rp-bundle.md"
     assert manifest["files"]["install_surface"] == "install-surface.json"
     assert manifest["files"]["projection"] == "rp-projection.json"
@@ -382,8 +384,10 @@ def test_compile_rp_projection_exposes_required_contract_paths(tmp_path: Path) -
         "host.default_variant",
         "host.variants.manual.adapter",
         "host.variants.manual.mode",
+        "host.variants.manual.native_runtime.protocol_version",
         "host.variants.auto.adapter",
         "host.variants.auto.mode",
+        "host.variants.auto.native_runtime.protocol_version",
         "artifacts.bundle",
         "artifacts.install_surface",
         "artifacts.manifest",

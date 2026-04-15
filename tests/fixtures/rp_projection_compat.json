@@ -35,7 +35,8 @@
             "rp",
             "rp-cli"
           ],
-          "install_hint": "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) to make RP native-ready; manual handoff remains supported."
+          "install_hint": "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) to make RP native-ready; manual handoff remains supported.",
+          "protocol_version": 1
         }
       },
       "auto": {
@@ -66,7 +67,8 @@
             "rp",
             "rp-cli"
           ],
-          "install_hint": "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) to make RP native-ready; manual handoff remains supported."
+          "install_hint": "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) to make RP native-ready; manual handoff remains supported.",
+          "protocol_version": 1
         }
       }
     }

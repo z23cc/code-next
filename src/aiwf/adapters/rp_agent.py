@@ -52,6 +52,7 @@ RP_NATIVE_RUNTIME = NativeRuntimeContract(
         "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
         "to make RP native-ready; manual handoff remains supported."
     ),
+    protocol_version=_RP_PROTOCOL_VERSION,
 )
 
 RP_MANUAL_CONTRACT = HostContract(
