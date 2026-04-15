@@ -66,6 +66,9 @@ def test_build_adapter_rejects_unsupported_auto_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not support auto mode"):
         build_adapter("rp", tmp_path, auto=True)
 
+    with pytest.raises(ValueError, match="does not support auto mode"):
+        build_adapter("codex", tmp_path, auto=True)
+
 
 def test_builtin_adapter_contracts_pass_lint() -> None:
     results = lint_contract_registry(ADAPTER_SPECS)

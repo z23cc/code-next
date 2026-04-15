@@ -8,6 +8,7 @@ import pytest
 
 from aiwf.adapters import build_adapter_from_contract
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
+from aiwf.adapters.codex import CodexAdapter
 from aiwf.adapters.rp_agent import RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 from aiwf.engine import WorkflowEngine
@@ -400,6 +401,63 @@ def test_manual_rp_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: P
     assert reviewed_meta.last_completed_stage == "review"
     assert (run_dir / "review-report.json").exists()
     assert (run_dir / "rp-agent-review-prompt.md").exists()
+    assert not (run_dir / "work-receipt.json").exists()
+
+    finalized_run_id = resumed_engine.resume(run_id)
+    finalized_meta = state_manager.load_run(finalized_run_id)
+    receipt = json.loads((run_dir / "work-receipt.json").read_text(encoding="utf-8"))
+
+    assert finalized_run_id == run_id
+    assert finalized_meta.status is RunStatus.passed
+    assert finalized_meta.last_completed_stage == "review"
+    assert receipt["status"] == "passed"
+
+
+def test_manual_codex_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        CodexAdapter(repo_root=repo_root),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    run_dir = ai_root / "runs" / run_id
+    state_manager = RunStateManager(ai_root)
+    blocked_meta = state_manager.load_run(run_id)
+
+    assert blocked_meta.status is RunStatus.blocked
+    assert blocked_meta.last_completed_stage == "implement"
+    assert blocked_meta.data["host_contract"]["adapter"] == "codex"
+    assert (run_dir / "codex-implement-prompt.md").exists()
+
+    resumed_engine = WorkflowEngine(
+        StubRunnerAdapter(),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        adapter_resolver=lambda contract: build_adapter_from_contract(contract, repo_root),
+    )
+
+    resumed_run_id = resumed_engine.resume(run_id)
+    needs_review_meta = state_manager.load_run(run_id)
+
+    assert resumed_run_id == run_id
+    assert needs_review_meta.status is RunStatus.needs_review
+    assert needs_review_meta.last_completed_stage == "gates"
+    assert isinstance(resumed_engine.adapter, CodexAdapter)
+    assert resumed_engine.adapter_name == "codex"
+    assert resumed_engine.adapter_auto is False
+    assert (run_dir / "verify-report.json").exists()
+    assert not (run_dir / "review-report.json").exists()
+
+    reviewed_run_id = resumed_engine.run_review(run_id)
+    reviewed_meta = state_manager.load_run(reviewed_run_id)
+
+    assert reviewed_run_id == run_id
+    assert reviewed_meta.status is RunStatus.blocked
+    assert reviewed_meta.last_completed_stage == "review"
+    assert (run_dir / "review-report.json").exists()
+    assert (run_dir / "codex-review-prompt.md").exists()
     assert not (run_dir / "work-receipt.json").exists()
 
     finalized_run_id = resumed_engine.resume(run_id)

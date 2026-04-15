@@ -7,6 +7,7 @@ from pathlib import Path
 
 from aiwf.adapters.base import AdapterSpec, HostCapabilities, HostContract, ReviewArtifactContract, RunnerAdapter
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
+from aiwf.adapters.codex import CodexAdapter
 from aiwf.adapters.rp_agent import RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 
@@ -18,6 +19,11 @@ def _build_claude_adapter(repo_root: Path, contract: HostContract) -> RunnerAdap
 def _build_rp_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
     del contract
     return RpAgentAdapter(repo_root=repo_root)
+
+
+def _build_codex_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
+    del contract
+    return CodexAdapter(repo_root=repo_root)
 
 
 def _build_stub_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
@@ -82,6 +88,27 @@ ADAPTER_SPECS: dict[str, AdapterSpec] = {
             )
         },
         factory=_build_rp_adapter,
+    ),
+    "codex": AdapterSpec(
+        name="codex",
+        variants={
+            "manual": HostContract(
+                adapter="codex",
+                mode="manual",
+                capabilities=HostCapabilities(
+                    supports_auto_execution=False,
+                    requires_explicit_review_handoff=True,
+                ),
+                review=ReviewArtifactContract(
+                    required_run_artifacts=("verify-report.json",),
+                    required_report_string_fields=("summary", "mode", "prompt_file"),
+                    required_report_list_fields=("issues",),
+                    expected_report_mode="manual",
+                    linked_report_artifact_field="prompt_file",
+                ),
+            )
+        },
+        factory=_build_codex_adapter,
     ),
     "stub": AdapterSpec(
         name="stub",
@@ -171,6 +198,7 @@ __all__ = [
     "ReviewArtifactContract",
     "RunnerAdapter",
     "ClaudeCodeAdapter",
+    "CodexAdapter",
     "RpAgentAdapter",
     "StubRunnerAdapter",
     "build_adapter",

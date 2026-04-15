@@ -34,7 +34,7 @@ app.add_typer(contracts_app, name="contracts")
 console = Console()
 
 
-AdapterName = Literal["claude", "rp", "stub"]
+AdapterName = Literal["claude", "rp", "codex", "stub"]
 
 
 def _version_callback(value: bool) -> None:
