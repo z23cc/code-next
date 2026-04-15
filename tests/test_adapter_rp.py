@@ -31,7 +31,26 @@ def test_rp_agent_adapter_generates_manual_handoff_outputs(tmp_path: Path) -> No
     assert result.metadata["mode"] == "manual"
     assert (run_dir / "rp-agent-implement-prompt.md").exists()
     assert review["mode"] == "manual"
+    assert review["verify_report_file"] == "verify-report.json"
+    assert review["diagnostics_file"] == "run-diagnostics.json"
+    assert review["provenance_file"] == "run-provenance.json"
+    assert review["evidence_files"] == [
+        "context-pack.md",
+        "exec-plan.md",
+        "verify-report.json",
+        "run-diagnostics.json",
+        "run-provenance.json",
+        "work-receipt.json",
+        "rp-agent-implement-prompt.md",
+    ]
     assert (run_dir / "rp-agent-review-prompt.md").exists()
+    prompt_text = (run_dir / "rp-agent-review-prompt.md").read_text(encoding="utf-8")
+    assert "run-diagnostics.json" in prompt_text
+    assert "run-provenance.json" in prompt_text
+    assert "Evidence summary:" in prompt_text
+    assert "verify: gate_set=default passed=True" in prompt_text
+    assert "diagnostics: status=needs_review reviewable=True resumable=False" in prompt_text
+    assert "provenance: gate_report=" in prompt_text
 
 
 def test_rp_agent_adapter_discover_raises_for_missing_repo_root(tmp_path: Path) -> None:
@@ -42,6 +61,46 @@ def test_rp_agent_adapter_discover_raises_for_missing_repo_root(tmp_path: Path) 
         adapter.discover(task, run_dir)
 
     assert "stage=discover" in str(exc_info.value)
+
+
+def test_rp_agent_adapter_snapshot_respects_gitignore_and_common_noise(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    (repo_root / ".gitignore").write_text(
+        "\n".join(
+            [
+                "*.log",
+                "ignored-dir/",
+                "nested/generated.txt",
+                "!keep.log",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (repo_root / "src").mkdir()
+    (repo_root / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (repo_root / "ignored.log").write_text("ignored\n", encoding="utf-8")
+    (repo_root / "keep.log").write_text("kept\n", encoding="utf-8")
+    (repo_root / "ignored-dir").mkdir()
+    (repo_root / "ignored-dir" / "value.txt").write_text("noise\n", encoding="utf-8")
+    (repo_root / "nested").mkdir()
+    (repo_root / "nested" / "generated.txt").write_text("noise\n", encoding="utf-8")
+    (repo_root / "dist").mkdir()
+    (repo_root / "dist" / "bundle.js").write_text("noise\n", encoding="utf-8")
+    (repo_root / ".pytest_cache").mkdir()
+    (repo_root / ".pytest_cache" / "state").write_text("noise\n", encoding="utf-8")
+
+    adapter = RpAgentAdapter(repo_root=repo_root)
+
+    context = adapter.discover(task, run_dir)
+
+    assert "- README.md" in context
+    assert "- src/main.py" in context
+    assert "- keep.log" in context
+    assert "ignored.log" not in context
+    assert "ignored-dir/value.txt" not in context
+    assert "nested/generated.txt" not in context
+    assert "dist/bundle.js" not in context
+    assert ".pytest_cache/state" not in context
 
 
 def _create_workspace(tmp_path: Path) -> tuple[Path, Path, TaskSpec]:
@@ -60,6 +119,21 @@ def _create_workspace(tmp_path: Path) -> tuple[Path, Path, TaskSpec]:
         encoding="utf-8",
     )
     (repo_root / "README.md").write_text("# Example Repo\n", encoding="utf-8")
+    (run_dir / "context-pack.md").write_text("# Context\n", encoding="utf-8")
+    (run_dir / "exec-plan.md").write_text("# Plan\n", encoding="utf-8")
+    (run_dir / "verify-report.json").write_text(
+        '{"gate_set":"default","passed":true,"results":[]}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "run-diagnostics.json").write_text(
+        '{"status":"needs_review","status_reason":"Ready for review.","reviewable":true,"resumable":false}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "run-provenance.json").write_text(
+        '{"gate_evidence":{"report":{"path":"verify-report.json"}},"review_evidence":{"linked_artifacts":[],"available_required_artifacts":[{"name":"verify-report.json","path":"verify-report.json"}]}}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "work-receipt.json").write_text('{"summary":"ok"}\n', encoding="utf-8")
     task = TaskSpec(
         title="RepoPrompt Adapter Task",
         slug="repoprompt-adapter-task",
