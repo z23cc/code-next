@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from re import sub
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -39,12 +39,38 @@ class RunStatus(str, Enum):
     canceled = "canceled"
 
 
+StagePauseStatus = Literal["blocked", "needs_review"]
+
+
 class StageSpec(ModelBase):
     """A logical stage within a runbook."""
 
     name: str
     description: str = ""
     outputs: list[str] = Field(default_factory=list)
+    required: bool = True
+    retry_limit: int = 0
+    pause_on: list[StagePauseStatus] = Field(default_factory=list)
+
+    @field_validator("retry_limit")
+    @classmethod
+    def validate_retry_limit(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("retry_limit must be greater than or equal to 0")
+        return value
+
+    @field_validator("pause_on")
+    @classmethod
+    def validate_pause_on(cls, value: list[StagePauseStatus]) -> list[StagePauseStatus]:
+        duplicates: list[str] = []
+        seen: set[str] = set()
+        for status in value:
+            if status in seen and status not in duplicates:
+                duplicates.append(status)
+            seen.add(status)
+        if duplicates:
+            raise ValueError(f"pause_on contains duplicate statuses: {', '.join(duplicates)}")
+        return value
 
 
 class TaskSpec(ModelBase):
@@ -75,6 +101,19 @@ class RunbookSpec(ModelBase):
     description: str = ""
     stages: list[StageSpec] = Field(default_factory=list)
     body: str = ""
+
+    @field_validator("stages")
+    @classmethod
+    def validate_unique_stage_names(cls, value: list[StageSpec]) -> list[StageSpec]:
+        duplicates: list[str] = []
+        seen: set[str] = set()
+        for stage in value:
+            if stage.name in seen and stage.name not in duplicates:
+                duplicates.append(stage.name)
+            seen.add(stage.name)
+        if duplicates:
+            raise ValueError(f"runbook stages must be unique: {', '.join(duplicates)}")
+        return value
 
 
 class GateCommand(ModelBase):

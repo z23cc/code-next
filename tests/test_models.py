@@ -18,13 +18,24 @@ def test_task_spec_populates_slug_and_defaults() -> None:
 def test_runbook_and_gate_models_validate_nested_data() -> None:
     runbook = RunbookSpec(
         name="default",
-        stages=[{"name": "discover", "outputs": ["context-pack.md"]}],
+        stages=[
+            {
+                "name": "discover",
+                "outputs": ["context-pack.md"],
+                "required": True,
+                "retry_limit": 0,
+                "pause_on": ["blocked"],
+            }
+        ],
         body="Use the default workflow.",
     )
     gate_set = GateSet(gates=[{"name": "lint", "command": "ruff check src/ tests/"}])
 
     assert runbook.stages[0].name == "discover"
     assert runbook.stages[0].outputs == ["context-pack.md"]
+    assert runbook.stages[0].required is True
+    assert runbook.stages[0].retry_limit == 0
+    assert runbook.stages[0].pause_on == ["blocked"]
     assert gate_set.gates[0].timeout_seconds == 120
 
 
@@ -43,3 +54,31 @@ def test_run_meta_uses_enum_status() -> None:
 def test_task_spec_requires_title() -> None:
     with pytest.raises(ValidationError):
         TaskSpec(body="Missing the required title field.")
+
+
+def test_runbook_stage_strategy_fields_default_backward_compatibly() -> None:
+    runbook = RunbookSpec(
+        name="default",
+        stages=[{"name": "review"}],
+    )
+
+    assert runbook.stages[0].required is True
+    assert runbook.stages[0].retry_limit == 0
+    assert runbook.stages[0].pause_on == []
+
+
+def test_runbook_stage_strategy_fields_reject_invalid_values() -> None:
+    with pytest.raises(ValidationError, match="retry_limit"):
+        RunbookSpec(name="default", stages=[{"name": "gates", "retry_limit": -1}])
+
+    with pytest.raises(ValidationError, match="pause_on"):
+        RunbookSpec(name="default", stages=[{"name": "implement", "pause_on": ["blocked", "blocked"]}])
+
+    with pytest.raises(ValidationError, match="runbook stages must be unique"):
+        RunbookSpec(
+            name="default",
+            stages=[
+                {"name": "plan"},
+                {"name": "plan"},
+            ],
+        )
