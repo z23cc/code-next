@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from typer.testing import CliRunner
 
-from aiwf.cli import app
 from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
+from aiwf.adapters.claude_code import ClaudeCodeAdapter
+from aiwf.cli import app
+from aiwf.engine import WorkflowEngine
 from aiwf.state import RunStateManager
 
 
@@ -705,6 +708,46 @@ def test_cli_inspect_command_surfaces_gate_and_review_evidence(tmp_path: Path) -
     assert "review_evidence=mode=manual" in inspect_result.stdout
     assert "review_links:" in inspect_result.stdout
     assert "claude-review-prompt.md" in inspect_result.stdout
+
+
+def test_cli_inspect_command_surfaces_auto_host_runtime_evidence(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(
+            repo_root=repo_root,
+            auto=True,
+            claude_command=[
+                sys.executable,
+                "-c",
+                "import sys; print('stdin:' + ('yes' if sys.stdin.read() else 'no'))",
+            ],
+        ),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+    run_id = engine.run_implement(task_path)
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    assert f"run_id={run_id}" in inspect_result.stdout
+    assert "workflow=implement" in inspect_result.stdout
+    assert "status=passed" in inspect_result.stdout
+    assert "last_completed_stage=review" in inspect_result.stdout
+    assert "host=adapter=claude mode=auto" in inspect_result.stdout
+    assert "review_evidence=mode=auto" in inspect_result.stdout
+    assert "claude-implement-response.md" in inspect_result.stdout
+    assert "claude-review-response.md" in inspect_result.stdout
+    assert "diagnostics=" in inspect_result.stdout
+    assert "provenance=" in inspect_result.stdout
 
 
 def test_cli_inspect_command_fails_for_missing_run(tmp_path: Path) -> None:

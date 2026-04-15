@@ -11,7 +11,7 @@ from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.adapters.rp_agent import RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 from aiwf.engine import WorkflowEngine
-from aiwf.exceptions import StateError
+from aiwf.exceptions import AdapterError, StateError
 from aiwf.models import RunStatus
 from aiwf.state import RunStateManager
 
@@ -227,6 +227,133 @@ def test_manual_claude_resume_after_review_handoff_finalizes_run(tmp_path: Path)
     assert meta.status is RunStatus.passed
     assert meta.last_completed_stage == "review"
     assert receipt["status"] == "passed"
+
+
+def test_auto_claude_run_implement_persists_passed_runtime_surfaces(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(
+            repo_root=repo_root,
+            auto=True,
+            claude_command=[
+                sys.executable,
+                "-c",
+                "import sys; print('stdin:' + ('yes' if sys.stdin.read() else 'no'))",
+            ],
+        ),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    run_id = engine.run_implement(task_path)
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+    diagnostics = json.loads((run_dir / "run-diagnostics.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "run-provenance.json").read_text(encoding="utf-8"))
+    review_report = json.loads((run_dir / "review-report.json").read_text(encoding="utf-8"))
+
+    assert meta.status is RunStatus.passed
+    assert meta.last_completed_stage == "review"
+    assert (run_dir / "claude-implement-response.md").exists()
+    assert (run_dir / "claude-review-response.md").exists()
+
+    assert diagnostics["workflow"] == "implement"
+    assert diagnostics["status"] == "passed"
+    assert diagnostics["status_reason"] == "Run completed successfully."
+    assert diagnostics["host"]["adapter"] == "claude"
+    assert diagnostics["host"]["mode"] == "auto"
+    assert diagnostics["host"]["requires_explicit_review_handoff"] is False
+    assert diagnostics["resumable"] is False
+    assert diagnostics["reviewable"] is False
+    assert diagnostics["resume_command"] is None
+    assert diagnostics["review_command"] is None
+    assert {
+        "run_id",
+        "workflow",
+        "status",
+        "status_reason",
+        "host",
+        "key_artifacts",
+        "stage_timeline",
+        "generated_at",
+    } <= diagnostics.keys()
+
+    assert provenance["status"] == "passed"
+    assert provenance["host"]["mode"] == "auto"
+    assert provenance["review_evidence"]["mode"] == "auto"
+    assert provenance["review_evidence"]["report"]["name"] == "review-report.json"
+    assert provenance["review_evidence"]["linked_artifacts"][0]["name"] == "claude-review-response.md"
+    assert any(
+        artifact["name"] == "claude-implement-response.md"
+        and artifact["stage"] == "implement"
+        and artifact["category"] == "stage_output"
+        for artifact in provenance["artifact_index"]
+    )
+    assert any(
+        artifact["name"] == "review-report.json" and artifact["stage"] == "review"
+        for artifact in provenance["artifact_index"]
+    )
+
+    assert review_report["mode"] == "auto"
+    assert review_report["response_file"] == "claude-review-response.md"
+
+
+def test_auto_claude_failed_implement_persists_failed_runtime_surfaces(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    engine = WorkflowEngine(
+        ClaudeCodeAdapter(
+            repo_root=repo_root,
+            auto=True,
+            claude_command=[
+                sys.executable,
+                "-c",
+                "import sys; prompt = sys.stdin.read(); is_plan = 'Generate an implementation plan' in prompt; print('plan ok') if is_plan else print('boom', file=sys.stderr); sys.exit(0 if is_plan else 1)",
+            ],
+        ),
+        ai_root=ai_root,
+        repo_root=repo_root,
+    )
+
+    with pytest.raises(AdapterError, match="boom"):
+        engine.run_implement(task_path)
+
+    run_id = next((ai_root / "runs").iterdir()).name
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+    diagnostics = json.loads((run_dir / "run-diagnostics.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "run-provenance.json").read_text(encoding="utf-8"))
+    receipt = json.loads((run_dir / "work-receipt.json").read_text(encoding="utf-8"))
+
+    assert meta.status is RunStatus.failed
+    assert meta.last_completed_stage == "implement"
+    assert (run_dir / "context-pack.md").exists()
+    assert (run_dir / "exec-plan.md").exists()
+    assert not (run_dir / "claude-implement-response.md").exists()
+    assert not (run_dir / "verify-report.json").exists()
+    assert not (run_dir / "review-report.json").exists()
+
+    assert diagnostics["workflow"] == "implement"
+    assert diagnostics["status"] == "failed"
+    assert diagnostics["host"]["adapter"] == "claude"
+    assert diagnostics["host"]["mode"] == "auto"
+    assert diagnostics["resumable"] is True
+    assert diagnostics["reviewable"] is False
+    assert diagnostics["status_reason"].startswith("boom")
+    assert diagnostics["error"].startswith("boom")
+    assert any(artifact["name"] == "work-receipt.json" for artifact in diagnostics["key_artifacts"])
+
+    assert provenance["status"] == "failed"
+    assert provenance["host"]["mode"] == "auto"
+    assert provenance["gate_evidence"]["report"] is None
+    assert provenance["review_evidence"]["report"] is None
+    assert provenance["review_evidence"]["mode"] is None
+    assert any(
+        artifact["name"] == "work-receipt.json" and artifact["category"] == "receipt"
+        for artifact in provenance["artifact_index"]
+    )
+
+    assert receipt["status"] == "failed"
+    assert "boom" in receipt["summary"]
 
 
 def test_manual_rp_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: Path) -> None:
