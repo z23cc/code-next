@@ -12,6 +12,7 @@ from aiwf.compilers.claude import compile_claude
 
 
 runner = CliRunner()
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 def test_compile_claude_writes_bundle_projection_and_manifest(tmp_path: Path) -> None:
@@ -63,6 +64,75 @@ def test_compiler_registry_exposes_claude_spec_backed_by_adapter_contracts() -> 
     assert spec.projection_name == "claude-host-projection"
     assert spec.variants["manual"] == resolve_adapter_contract("claude", auto=False)
     assert spec.variants["auto"] == resolve_adapter_contract("claude", auto=True)
+
+
+def test_compile_claude_projection_matches_compat_fixture(tmp_path: Path) -> None:
+    ai_root = _create_ai_sources(tmp_path)
+    output_dir = tmp_path / ".claude" / "compiled"
+
+    compiled = compile_claude(ai_root, output_dir)
+    projection = json.loads(compiled["projection_path"].read_text(encoding="utf-8"))
+    expected = json.loads((FIXTURES_DIR / "claude_projection_compat.json").read_text(encoding="utf-8"))
+
+    assert _projection_compat_view(projection) == expected
+
+
+def test_compile_claude_projection_exposes_required_contract_paths(tmp_path: Path) -> None:
+    ai_root = _create_ai_sources(tmp_path)
+    output_dir = tmp_path / ".claude" / "compiled"
+
+    compiled = compile_claude(ai_root, output_dir)
+    projection = json.loads(compiled["projection_path"].read_text(encoding="utf-8"))
+    actual_paths = _flatten_mapping_paths(projection)
+
+    assert {
+        "schema_version",
+        "projection_name",
+        "host.name",
+        "host.display_name",
+        "host.stored_runtime_key",
+        "host.default_variant",
+        "host.variants.manual.adapter",
+        "host.variants.manual.mode",
+        "host.variants.manual.capabilities.supports_auto_execution",
+        "host.variants.manual.capabilities.requires_explicit_review_handoff",
+        "host.variants.manual.review.required_run_artifacts",
+        "host.variants.manual.review.required_report_string_fields",
+        "host.variants.manual.review.required_report_list_fields",
+        "host.variants.manual.review.expected_report_mode",
+        "host.variants.manual.review.linked_report_artifact_field",
+        "host.variants.auto.adapter",
+        "host.variants.auto.mode",
+        "host.variants.auto.capabilities.supports_auto_execution",
+        "host.variants.auto.capabilities.requires_explicit_review_handoff",
+        "host.variants.auto.review.required_run_artifacts",
+        "host.variants.auto.review.required_report_string_fields",
+        "host.variants.auto.review.required_report_list_fields",
+        "host.variants.auto.review.expected_report_mode",
+        "host.variants.auto.review.linked_report_artifact_field",
+        "artifacts.bundle",
+        "artifacts.manifest",
+        "commands.plan",
+        "commands.implement",
+        "commands.review",
+        "commands.resume",
+        "workflow_contract.plan.entrypoint",
+        "workflow_contract.plan.primary_artifacts",
+        "workflow_contract.implement.entrypoint",
+        "workflow_contract.implement.manual_handoff_artifact",
+        "workflow_contract.implement.resume_boundary",
+        "workflow_contract.review.entrypoint",
+        "workflow_contract.review.requires_status",
+        "workflow_contract.review.required_run_artifacts",
+        "workflow_contract.review.report_contract.manual.expected_report_mode",
+        "workflow_contract.review.report_contract.manual.linked_report_artifact_field",
+        "workflow_contract.review.report_contract.auto.expected_report_mode",
+        "workflow_contract.review.report_contract.auto.linked_report_artifact_field",
+        "workflow_contract.resume.entrypoint",
+        "workflow_contract.resume.restores_run_metadata",
+        "projection_inputs",
+        "projection_hashes.bundle_sha256",
+    } <= actual_paths
 
 
 def test_compile_claude_tracks_manifest_drift_against_previous_projection(tmp_path: Path) -> None:
@@ -190,3 +260,64 @@ def _create_ai_sources(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return ai_root
+
+
+def _projection_compat_view(projection: dict[str, object]) -> dict[str, object]:
+    host = projection["host"]
+    workflow_contract = projection["workflow_contract"]
+    projection_inputs = projection["projection_inputs"]
+    projection_hashes = projection["projection_hashes"]
+
+    assert isinstance(host, dict)
+    assert isinstance(workflow_contract, dict)
+    assert isinstance(projection_inputs, list)
+    assert isinstance(projection_hashes, dict)
+
+    return {
+        "schema_version": projection["schema_version"],
+        "projection_name": projection["projection_name"],
+        "host": {
+            "name": host["name"],
+            "display_name": host["display_name"],
+            "stored_runtime_key": host["stored_runtime_key"],
+            "default_variant": host["default_variant"],
+            "variants": {
+                "manual": host["variants"]["manual"],
+                "auto": host["variants"]["auto"],
+            },
+        },
+        "artifacts": projection["artifacts"],
+        "commands": projection["commands"],
+        "workflow_contract": workflow_contract,
+        "projection_inputs": {
+            "count": len(projection_inputs),
+            "entry_keys": sorted(
+                {
+                    key
+                    for entry in projection_inputs
+                    if isinstance(entry, dict)
+                    for key in entry
+                }
+            ),
+            "kind_counts": {
+                "gate": sum(1 for entry in projection_inputs if isinstance(entry, dict) and entry.get("kind") == "gate"),
+                "policy": sum(
+                    1 for entry in projection_inputs if isinstance(entry, dict) and entry.get("kind") == "policy"
+                ),
+                "runbook": sum(
+                    1 for entry in projection_inputs if isinstance(entry, dict) and entry.get("kind") == "runbook"
+                ),
+            },
+        },
+        "projection_hash_keys": sorted(projection_hashes),
+    }
+
+
+def _flatten_mapping_paths(payload: dict[str, object], prefix: str = "") -> set[str]:
+    paths: set[str] = set()
+    for key, value in payload.items():
+        current = f"{prefix}.{key}" if prefix else key
+        paths.add(current)
+        if isinstance(value, dict):
+            paths.update(_flatten_mapping_paths(value, current))
+    return paths
