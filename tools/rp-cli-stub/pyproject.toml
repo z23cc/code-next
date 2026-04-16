@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rp-cli-stub"
+version = "0.1.0"
+description = "Reference rp-cli stub for aiwf-rp-native/v1"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "aiwf maintainers" }]
+
+[project.scripts]
+rp-cli-stub = "rp_cli_stub.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
