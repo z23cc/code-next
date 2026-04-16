@@ -1574,10 +1574,24 @@ def conformance_rp_command(
         typer.Option("--rp-arg", help="Additional arguments passed to the RP provider command."),
     ] = None,
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
+    certify_real_runtime: Annotated[
+        bool,
+        typer.Option(
+            "--certify-real-runtime",
+            help=(
+                "Promote a passing non-stub-like conformance run to scope=real-runtime-certified. "
+                "Use only after following docs/RP_REAL_RUNTIME_VALIDATION.md."
+            ),
+        ),
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Render the conformance report as JSON.")] = False,
 ) -> None:
     """Run RP native protocol conformance checks against a specific runtime command."""
-    report = run_rp_conformance([rp_command, *(rp_arg or [])], repo_root=repo_root)
+    report = run_rp_conformance(
+        [rp_command, *(rp_arg or [])],
+        repo_root=repo_root,
+        certify_real_runtime=certify_real_runtime,
+    )
     if json_output:
         typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
     else:

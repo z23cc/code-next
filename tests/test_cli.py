@@ -1717,9 +1717,10 @@ def test_cli_conformance_rp_help_targets_real_repoprompt_runtime() -> None:
     result = runner.invoke(app, ["conformance", "rp", "--help"])
 
     assert result.exit_code == 0
-    assert "official target is the real RepoPrompt app" in result.stdout
+    assert "real RepoPrompt app / MCP CLI" in result.stdout
     assert "rp-cli-stub" in result.stdout
     assert "reference/test-only" in result.stdout
+    assert "--certify-real-runtime" in result.stdout
 
 
 def test_cli_contract_lint_command_succeeds() -> None:

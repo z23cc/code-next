@@ -23,6 +23,7 @@
 - `docs/compatibility-policy.md`：run metadata / host contract / projection 兼容性策略
 - `docs/RP_PROVIDER_GAP_ANALYSIS.md`：真实 RepoPrompt CLI 与 aiwf provider 期待之间的差距分析
 - `docs/RP_BRIDGE_DESIGN.md`：基于真实 `rp-cli` tool surface 的 bridge 集成方案
+- `docs/RP_REAL_RUNTIME_VALIDATION.md`：真实 RepoPrompt runtime 的 scope 标签、doctor 启发式与操作员验证流程
 
 ## 安装
 
@@ -46,6 +47,7 @@ uv run aiwf resume <run_id>
 uv run aiwf inspect <run_id>
 uv run aiwf contracts lint
 uv run aiwf doctor --json
+uv run aiwf conformance rp --rp-command /usr/local/bin/rp-cli --json
 uv run aiwf compile rp --output .rp/compiled
 uv run aiwf compile claude --output .claude/compiled
 uv run aiwf compile codex --output .codex/compiled

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ class DoctorCheck:
     protocol_version: int | None = None
     bridge_tools_detected: list[str] | None = None
     bridge_probe_error: str | None = None
+    runtime_detection: Literal["stub-like", "non-stub-like"] | None = None
+    runtime_detection_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,8 +94,13 @@ def render_doctor_report(report: DoctorReport) -> str:
     ]
     for check in report.checks:
         path_suffix = f" path={check.path}" if check.path else ""
+        detection_suffix = (
+            f" runtime_detection={check.runtime_detection}"
+            if check.runtime_detection is not None
+            else ""
+        )
         lines.append(
-            f"{check.status.upper()} [{check.category}] {check.name}: {check.detail}{path_suffix}"
+            f"{check.status.upper()} [{check.category}] {check.name}: {check.detail}{path_suffix}{detection_suffix}"
         )
     return "\n".join(lines)
 
@@ -303,9 +311,19 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
     for command in native_runtime.command_candidates:
         resolved = shutil.which(command)
         if resolved:
+            detection, detection_reason = _classify_runtime_detection(resolved)
             protocol_supported, detected_version = _probe_native_runtime_protocol(resolved)
             declared_version = native_runtime.protocol_version
             if protocol_supported:
+                detection_detail = _runtime_detection_detail(
+                    detection,
+                    detection_reason,
+                    stub_warning="treat this as reference-stub evidence, not product validation",
+                    non_stub_warning=(
+                        "treat this as a real-runtime candidate only; run conformance and the runtime "
+                        "validation guide before calling it certified"
+                    ),
+                )
                 if declared_version is not None and detected_version != declared_version:
                     return DoctorCheck(
                         status="warn",
@@ -314,12 +332,14 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                         detail=(
                             f"RP runtime found via {command} at {resolved}; protocol probe reported "
                             f"aiwf-rp-native v{detected_version}, but aiwf currently advertises v{declared_version}. "
-                            "Verify this is the real RepoPrompt app / MCP CLI runtime; manual handoff remains the "
-                            "stable supported path if negotiation cannot agree on a version."
+                            f"{detection_detail}. Manual handoff remains the stable supported path if negotiation "
+                            "cannot agree on a version."
                         ),
                         path=resolved,
                         protocol_supported=True,
                         protocol_version=detected_version,
+                        runtime_detection=detection,
+                        runtime_detection_reason=detection_reason,
                     )
                 return DoctorCheck(
                     status="ok",
@@ -327,12 +347,14 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                     name=adapter_name,
                     detail=(
                         f"experimental RP auto runtime detected via {command} at {resolved}; protocol "
-                        f"aiwf-rp-native v{detected_version} detected. Verify this is the real RepoPrompt app / "
-                        "MCP CLI runtime, not a reference stub. Manual handoff remains the stable supported path."
+                        f"aiwf-rp-native v{detected_version} detected; {detection_detail}. Manual handoff remains "
+                        "the stable supported path."
                     ),
                     path=resolved,
                     protocol_supported=True,
                     protocol_version=detected_version,
+                    runtime_detection=detection,
+                    runtime_detection_reason=detection_reason,
                 )
             return DoctorCheck(
                 status="warn",
@@ -346,9 +368,12 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                         if declared_version is not None
                         else "."
                     )
+                    + f" Heuristic classification: {detection} ({detection_reason})."
                 ),
                 path=resolved,
                 protocol_supported=False,
+                runtime_detection=detection,
+                runtime_detection_reason=detection_reason,
             )
 
     candidates = ", ".join(native_runtime.command_candidates)
@@ -380,6 +405,7 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
     for command in bridge.command_candidates:
         resolved = shutil.which(command)
         if resolved:
+            detection, detection_reason = _classify_runtime_detection(resolved)
             probe_result = _probe_bridge_runtime(resolved)
             if probe_result.available:
                 tools_detected = [tool.name for tool in probe_result.tools]
@@ -390,11 +416,24 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                     name=bridge_name,
                     detail=(
                         f"experimental RP bridge candidate detected via {command} at {resolved}; read-only bridge probe "
-                        f"detected tools: {tool_detail}. This does not imply aiwf provider/runtime support, and "
-                        "manual handoff remains the stable supported path."
+                        f"detected tools: {tool_detail}. "
+                        + _runtime_detection_detail(
+                            detection,
+                            detection_reason,
+                            stub_warning=(
+                                "treat this as stub-like bridge evidence, not proof of a product RepoPrompt runtime"
+                            ),
+                            non_stub_warning=(
+                                "this is a non-stub-like bridge candidate, but aiwf still treats bridge probing as "
+                                "read-only reconnaissance rather than provider certification"
+                            ),
+                        )
+                        + ". Manual handoff remains the stable supported path."
                     ),
                     path=resolved,
                     bridge_tools_detected=tools_detected,
+                    runtime_detection=detection,
+                    runtime_detection_reason=detection_reason,
                 )
             return DoctorCheck(
                 status="warn",
@@ -403,10 +442,13 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                 detail=(
                     f"experimental RP bridge candidate detected via {command} at {resolved}, but the read-only bridge "
                     f"probe failed: {probe_result.error.message if probe_result.error is not None else 'unknown probe failure'}. "
-                    "This does not imply aiwf provider/runtime support, and manual handoff remains the stable supported path."
+                    f"Heuristic classification: {detection} ({detection_reason}). This does not imply aiwf "
+                    "provider/runtime support, and manual handoff remains the stable supported path."
                 ),
                 path=resolved,
                 bridge_probe_error=probe_result.error.message if probe_result.error is not None else "unknown probe failure",
+                runtime_detection=detection,
+                runtime_detection_reason=detection_reason,
             )
 
     candidates = ", ".join(bridge.command_candidates) or "-"
@@ -453,6 +495,36 @@ def _probe_native_runtime_protocol(command_path: str) -> tuple[bool, int | None]
     if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
         return False, None
     return True, version
+
+
+def _classify_runtime_detection(command_path: str) -> tuple[Literal["stub-like", "non-stub-like"], str]:
+    candidate = Path(command_path).expanduser().resolve(strict=False)
+    lower_path = str(candidate).lower()
+    repo_root = Path(__file__).resolve().parents[2]
+    if "rp-cli-stub" in lower_path or "rp_cli_stub" in lower_path:
+        return "stub-like", "path matches the repo-local rp-cli-stub/reference harness"
+    if "fake_rp_" in candidate.name.lower() or "fake-rp-" in candidate.name.lower():
+        return "stub-like", "file name matches the aiwf fake RP runtime/bridge harness naming"
+    if _is_relative_to(candidate, repo_root / "tools" / "rp-cli-stub"):
+        return "stub-like", "path is inside tools/rp-cli-stub"
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env and _is_relative_to(candidate, Path(virtual_env)):
+        return "stub-like", f"path is inside the current virtual environment ({virtual_env})"
+    if candidate.name in {"rp", "rp-cli"} and _is_relative_to(candidate, Path(sys.prefix)):
+        return "stub-like", f"path is inside the current Python environment ({sys.prefix})"
+    return "non-stub-like", "path is outside aiwf test-harness and current Python-environment heuristics"
+
+
+def _runtime_detection_detail(
+    detection: Literal["stub-like", "non-stub-like"],
+    reason: str,
+    *,
+    stub_warning: str,
+    non_stub_warning: str,
+) -> str:
+    if detection == "stub-like":
+        return f"heuristic classifies this binary as stub-like ({reason}); {stub_warning}"
+    return f"heuristic classifies this binary as non-stub-like ({reason}); {non_stub_warning}"
 
 
 def _tool_check(command: str, *, required: bool, reason: str) -> DoctorCheck:
@@ -503,6 +575,14 @@ def _resolve_command_executable(token: str) -> str | None:
     if "=" in token and not token.startswith(("/", ".", "~")):
         return None
     return shutil.which(token)
+
+
+def _is_relative_to(path: Path, other: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(other.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
 
 
 __all__ = [

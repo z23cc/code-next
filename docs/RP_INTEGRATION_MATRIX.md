@@ -10,6 +10,7 @@ This doc is intentionally concise and repo-grounded. For detailed evidence and p
 
 - `docs/RP_CAPABILITY_INVENTORY.md`
 - `docs/REPOPROMPT_CAPABILITY_INVENTORY.md`
+- `docs/RP_REAL_RUNTIME_VALIDATION.md`
 
 ## Status legend
 
@@ -46,8 +47,8 @@ Primary sources behind this matrix:
 | RP projection (`rp-projection.json`) | **IV** — compile output and compat fixture lock the schema | **DO** — runtime assumptions embedded as contract metadata | **DO** — no real RepoPrompt-side consumer reads it in-repo | Stable producer surface; unvalidated consumer uptake. |
 | Install surface (`install-surface.json`) | **IV** — output directory ownership semantics are tested and policy-backed | **DO** — runtime not directly involved | **DO** — docs describe consumption; no external consumer test | Strong emitted contract, weak consumer evidence. |
 | Bundle + manifest outputs | **IV** — bundle content, manifest hashes, drift status are tested | **DO** — runtime not directly involved | **DO** — human/operator usage documented; no external automation proof | Good producer story; no real downstream adoption evidence. |
-| Doctor readiness signal | **IA** — JSON fields and warning/ok logic are implemented/tested | **DO** — meaningful only if PATH binary is the real RP runtime | **IA** — CI/operator can read it, but current evidence is stub-only | Useful as a readiness hint, not as proof of real RP support. |
-| Conformance / certification signal | **IA** — 7-check harness implemented and wired into CI/release smoke | **DO** — only stub/fake runtime validated; real runtime unknown | **IA** — consumer can use report output, but its current meaning is “reference-stub passed” | Valuable tool, but today it certifies aiwf-vs-stub more than aiwf-vs-product. |
+| Doctor readiness signal | **IV** — JSON fields and warning/ok logic are implemented/tested, including stub-like vs non-stub-like runtime heuristics | **DO** — meaningful only if PATH binary is the real RP runtime | **IA** — CI/operator can read it, but the heuristic is intentionally non-authoritative | Useful as a readiness hint, not as proof of real RP support. |
+| Conformance / certification signal | **IV** — 7-check harness is implemented/tested and now emits explicit scope labels (`reference-stub` / `real-runtime-untrusted` / `real-runtime-certified`) | **DO** — only stub/fake runtime validated in-repo; real runtime remains an external check | **IA** — consumer can use report output without over-reading stub passes as product certification | Valuable tool, and now safer to interpret because scope is explicit. |
 | RepoPrompt plugin / MCP consumer of projection | **Gap** — no code in this repo implements such a consumer | **Gap** — no shared runtime/plugin contract beyond general docs | **Gap** — no in-repo plugin, MCP bridge, or end-to-end consumer test | Largest consumer-side integration hole. |
 | External-project consumption of compiled RP output | **IV** — producer side is stable and documented | **DO** — runtime requirements depend on manual vs auto usage | **DO** — docs explain usage, but no example repo or integration test exists | Adoption path is described, not demonstrated. |
 
@@ -69,8 +70,8 @@ Primary sources behind this matrix:
 | --- | --- | --- |
 | **A1** | Extend `conformance rp` to cover exit-code semantics and `metadata` round-trip. | These are already specified, partially modeled, and low-cost to validate in-repo. |
 | **A2** | Add `partial` response coverage to the reference stub and conformance suite. | `aiwf` already handles `partial`; the stub/conformance gap is now the weak link. |
-| **A3** | Add a short real-runtime validation runbook doc. | Current docs repeatedly caveat stub-only confidence; a single operator runbook would make the boundary explicit and actionable. |
-| **A4** | Make conformance output explicitly label certification scope (for example, reference-stub vs real-runtime). | Today the report can be over-read; labeling scope would make decision signals safer without broad changes. |
+| **A3** | Use `docs/RP_REAL_RUNTIME_VALIDATION.md` when validating `/usr/local/bin/rp-cli` on an operator machine. | The runbook now makes the stub-vs-product boundary explicit and actionable. |
+| **A4** | Treat `scope=reference-stub` as repo-only confidence and require explicit operator promotion for `real-runtime-certified`. | Conformance output is now labeled; the remaining work is disciplined operator use of those labels. |
 | **A5** | Consider surfacing a machine-readable RP protocol readiness signal in projection output. | Projection consumers currently see protocol version, but not clear readiness posture. |
 
 ### B. Cross-repo coordination dependencies

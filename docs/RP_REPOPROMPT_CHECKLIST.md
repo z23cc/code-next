@@ -178,15 +178,23 @@ Validation notes:
 
 目标：区分 reference-stub 信号与真实 RepoPrompt runtime 信号。
 
-- [ ] conformance 输出增加 scope 标记
-- [ ] `doctor` 区分 stub-like 与 real-runtime-like 探测结果
-- [ ] 新增 `docs/RP_REAL_RUNTIME_VALIDATION.md`
-- [ ] 形成真实 `rp-cli` 验证流程
+- [x] conformance 输出增加 scope 标记
+- [x] `doctor` 区分 stub-like 与 non-stub-like 探测结果，并明确写明是 heuristic
+- [x] 新增 `docs/RP_REAL_RUNTIME_VALIDATION.md`
+- [x] 形成真实 `rp-cli` 验证流程，并从 README / integration matrix 链接
 
 Exit criteria:
 
-- [ ] 用户不会把 stub 通过误读为真实 RepoPrompt 通过
-- [ ] real-runtime 验证路径清晰、可重复
+- [x] 用户不会把 stub 通过误读为真实 RepoPrompt 通过
+- [x] real-runtime 验证路径清晰、可重复
+
+Validation notes:
+
+- 日期：2026-04-17
+- P6 结论：`conformance rp` 现在总是显式输出 `scope=reference-stub|real-runtime-untrusted|real-runtime-certified`，默认把 repo 内 fake/stub harness 标记为 `reference-stub`，把非 stub-like runtime 标记为 `real-runtime-untrusted`，只有操作员显式传入 `--certify-real-runtime` 且检查通过时才提升为 `real-runtime-certified`。`doctor` 会把 `rp` / `rp-bridge` 检测结果标成 `stub-like` 或 `non-stub-like`，并把 heuristic 原因写入 detail 与 JSON。新增 `docs/RP_REAL_RUNTIME_VALIDATION.md` 统一说明真实 `/usr/local/bin/rp-cli` 的验证步骤、预期失败点与 scope 解释。
+- 已执行命令：`uv run aiwf contracts lint`
+- 已执行命令：`uv run pytest tests/test_conformance_rp.py tests/test_doctor.py -q`
+- 结果：`contracts lint` 通过；focused pytest 通过
 
 ---
 
@@ -210,4 +218,4 @@ Exit criteria:
 - [x] P3 completed
 - [x] P4 completed
 - [x] P5 completed
-- [ ] P6 pending
+- [x] P6 completed

@@ -39,6 +39,8 @@ def test_run_doctor_reports_ok_for_valid_workspace(tmp_path: Path, monkeypatch) 
     rp_check = next(check for check in report.checks if check.name == "rp")
     assert rp_check.protocol_supported is True
     assert rp_check.protocol_version == 1
+    assert rp_check.runtime_detection == "non-stub-like"
+    assert "outside aiwf test-harness" in (rp_check.runtime_detection_reason or "")
     rendered = render_doctor_report(report)
     assert "summary ok=" in rendered
     assert "OK [workspace] tasks" in rendered
@@ -151,13 +153,16 @@ def test_run_doctor_reports_rp_native_ready_when_runtime_found(tmp_path: Path, m
     assert rp_check.path == "/usr/local/bin/rp-cli"
     assert "experimental RP auto runtime detected via rp-cli" in rp_check.detail
     assert "protocol aiwf-rp-native v1 detected" in rp_check.detail
-    assert "real RepoPrompt app / MCP CLI runtime" in rp_check.detail
+    assert "heuristic classifies this binary as non-stub-like" in rp_check.detail
     assert rp_check.protocol_supported is True
     assert rp_check.protocol_version == 1
+    assert rp_check.runtime_detection == "non-stub-like"
+    assert "outside aiwf test-harness" in (rp_check.runtime_detection_reason or "")
     payload = report.to_json()
     rp_payload = next(check for check in payload["checks"] if check["name"] == "rp")
     assert rp_payload["protocol_supported"] is True
     assert rp_payload["protocol_version"] == 1
+    assert rp_payload["runtime_detection"] == "non-stub-like"
 
 
 def test_run_doctor_reports_rp_bridge_candidate_when_runtime_found(tmp_path: Path, monkeypatch) -> None:
@@ -181,10 +186,11 @@ def test_run_doctor_reports_rp_bridge_candidate_when_runtime_found(tmp_path: Pat
     assert bridge_check.path == "/usr/local/bin/rp-cli"
     assert "experimental RP bridge candidate detected via rp-cli" in bridge_check.detail
     assert "read-only bridge probe detected tools: file_search, manage_selection" in bridge_check.detail
-    assert "stable supported path" in bridge_check.detail
+    assert "heuristic classifies this binary as non-stub-like" in bridge_check.detail
     assert bridge_check.protocol_supported is None
     assert bridge_check.protocol_version is None
     assert bridge_check.bridge_tools_detected == ["file_search", "manage_selection"]
+    assert bridge_check.runtime_detection == "non-stub-like"
 
 
 def test_run_doctor_warns_when_bridge_probe_fails(tmp_path: Path, monkeypatch) -> None:
@@ -207,7 +213,9 @@ def test_run_doctor_warns_when_bridge_probe_fails(tmp_path: Path, monkeypatch) -
     assert bridge_check.status == "warn"
     assert "read-only bridge probe failed" in bridge_check.detail
     assert "tool list probe returned invalid JSON" in bridge_check.detail
+    assert "Heuristic classification: non-stub-like" in bridge_check.detail
     assert bridge_check.bridge_probe_error == "tool list probe returned invalid JSON"
+    assert bridge_check.runtime_detection == "non-stub-like"
 
 
 def test_run_doctor_json_surfaces_bridge_tool_probe_info_with_fake_cli(tmp_path: Path, monkeypatch) -> None:
@@ -242,6 +250,8 @@ def test_run_doctor_json_surfaces_bridge_tool_probe_info_with_fake_cli(tmp_path:
     assert bridge_check["status"] == "ok"
     assert bridge_check["bridge_tools_detected"] == ["file_search", "manage_selection"]
     assert bridge_check["bridge_probe_error"] is None
+    assert bridge_check["runtime_detection"] == "stub-like"
+    assert "fake RP runtime/bridge harness" in bridge_check["runtime_detection_reason"]
 
 
 def test_run_doctor_warns_when_rp_runtime_lacks_protocol_support(tmp_path: Path, monkeypatch) -> None:
@@ -264,8 +274,10 @@ def test_run_doctor_warns_when_rp_runtime_lacks_protocol_support(tmp_path: Path,
     assert "protocol negotiation support was not detected" in rp_check.detail
     assert "treat RP auto/native as unavailable" in rp_check.detail
     assert "protocol v1" in rp_check.detail
+    assert "Heuristic classification: non-stub-like" in rp_check.detail
     assert rp_check.protocol_supported is False
     assert rp_check.protocol_version is None
+    assert rp_check.runtime_detection == "non-stub-like"
 
 
 def test_run_doctor_warns_when_rp_runtime_protocol_version_mismatches(tmp_path: Path, monkeypatch) -> None:
@@ -287,9 +299,38 @@ def test_run_doctor_warns_when_rp_runtime_protocol_version_mismatches(tmp_path: 
     assert rp_check.status == "warn"
     assert "aiwf-rp-native v2" in rp_check.detail
     assert "advertises v1" in rp_check.detail
-    assert "real RepoPrompt app / MCP CLI runtime" in rp_check.detail
+    assert "heuristic classifies this binary as non-stub-like" in rp_check.detail
     assert rp_check.protocol_supported is True
     assert rp_check.protocol_version == 2
+    assert rp_check.runtime_detection == "non-stub-like"
+
+
+def test_run_doctor_labels_virtualenv_runtime_as_stub_like(tmp_path: Path, monkeypatch) -> None:
+    repo_root, ai_root = _create_workspace(tmp_path, gate_command="python -c \"print('ok')\"")
+    fake_venv = tmp_path / ".venv"
+    fake_runtime = fake_venv / "bin" / "rp-cli"
+    fake_runtime.parent.mkdir(parents=True)
+    fake_runtime.write_text("#!/bin/sh\n", encoding="utf-8")
+    _mock_which(
+        monkeypatch,
+        {
+            "python": "/usr/bin/python",
+            "uv": "/usr/bin/uv",
+            "git": "/usr/bin/git",
+            "rp-cli": str(fake_runtime),
+        },
+    )
+    monkeypatch.setenv("VIRTUAL_ENV", str(fake_venv))
+    _mock_protocol_probe(monkeypatch, {str(fake_runtime): 1})
+
+    report = run_doctor(ai_root=ai_root, repo_root=repo_root)
+
+    rp_check = next(check for check in report.checks if check.name == "rp")
+    assert rp_check.status == "ok"
+    assert rp_check.runtime_detection == "stub-like"
+    assert str(fake_venv) in (rp_check.runtime_detection_reason or "")
+    assert "heuristic classifies this binary as stub-like" in rp_check.detail
+    assert "reference-stub evidence" in rp_check.detail
 
 
 def test_cli_doctor_human_output_succeeds(tmp_path: Path, monkeypatch) -> None:

@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 _RP_PROTOCOL_NAME = "aiwf-rp-native"
 _RP_PROTOCOL_VERSION = 1
 _RP_PROTOCOL_PROBE_ARGUMENT = "--aiwf-protocol-version"
+RpConformanceScope = Literal["reference-stub", "real-runtime-untrusted", "real-runtime-certified"]
 
 
-def run_rp_conformance(command: Sequence[str], *, repo_root: str | Path = ".") -> dict[str, Any]:
+def run_rp_conformance(
+    command: Sequence[str],
+    *,
+    repo_root: str | Path = ".",
+    certify_real_runtime: bool = False,
+) -> dict[str, Any]:
     """Run RP native protocol conformance checks against an external command."""
     resolved_root = Path(repo_root)
     command_list = [str(part) for part in command]
@@ -23,7 +31,12 @@ def run_rp_conformance(command: Sequence[str], *, repo_root: str | Path = ".") -
     probe_payload = _load_payload(probe_result.get("stdout", ""))
     checks.append(_validate_probe(probe_result, probe_payload))
     if not checks[-1]["ok"]:
-        return _build_report(command_list, resolved_root, checks)
+        return _build_report(
+            command_list,
+            resolved_root,
+            checks,
+            certify_real_runtime=certify_real_runtime,
+        )
 
     for name, request_type, stage in (
         ("plan", "plan", "plan"),
@@ -80,7 +93,12 @@ def run_rp_conformance(command: Sequence[str], *, repo_root: str | Path = ".") -
 
     legacy_result = _run_command(command_list, cwd=resolved_root, runtime_input="Legacy raw conformance input")
     checks.append(_validate_legacy_response(legacy_result))
-    return _build_report(command_list, resolved_root, checks)
+    return _build_report(
+        command_list,
+        resolved_root,
+        checks,
+        certify_real_runtime=certify_real_runtime,
+    )
 
 
 def render_rp_conformance_report(report: Mapping[str, Any]) -> str:
@@ -89,6 +107,10 @@ def render_rp_conformance_report(report: Mapping[str, Any]) -> str:
         f"provider_command={' '.join(str(part) for part in report.get('provider_command', []))}",
         f"repo_root={report.get('repo_root')}",
     ]
+    scope = str(report.get("scope", "")).strip()
+    scope_reason = str(report.get("scope_reason", "")).strip()
+    if scope:
+        lines.append(f"scope={scope}" + (f" scope_reason={scope_reason}" if scope_reason else ""))
     for check in report.get("checks", []):
         if not isinstance(check, Mapping):
             continue
@@ -237,11 +259,26 @@ def _validate_legacy_response(result: Mapping[str, Any]) -> dict[str, Any]:
     return {"name": "legacy-raw", "ok": True, "detail": f"output={stdout}"}
 
 
-def _build_report(command: list[str], repo_root: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_report(
+    command: list[str],
+    repo_root: Path,
+    checks: list[dict[str, Any]],
+    *,
+    certify_real_runtime: bool,
+) -> dict[str, Any]:
+    ok = all(bool(check.get("ok")) for check in checks)
+    scope, scope_reason = _classify_scope(
+        command,
+        repo_root=repo_root,
+        ok=ok,
+        certify_real_runtime=certify_real_runtime,
+    )
     return {
         "provider_command": command,
         "repo_root": str(repo_root),
-        "ok": all(bool(check.get("ok")) for check in checks),
+        "ok": ok,
+        "scope": scope,
+        "scope_reason": scope_reason,
         "checks": checks,
     }
 
@@ -263,3 +300,70 @@ def _result_summary(result: Mapping[str, Any]) -> str:
     if stderr:
         parts.append(f"stderr={stderr}")
     return " | ".join(parts) if parts else "unknown runtime failure"
+
+
+def _classify_scope(
+    command: Sequence[str],
+    *,
+    repo_root: Path,
+    ok: bool,
+    certify_real_runtime: bool,
+) -> tuple[RpConformanceScope, str]:
+    stub_like, stub_reason = _looks_like_reference_stub(command, repo_root=repo_root)
+    if stub_like:
+        return "reference-stub", stub_reason
+    if ok and certify_real_runtime:
+        return (
+            "real-runtime-certified",
+            (
+                "non-stub-like runtime passed conformance and the operator explicitly requested "
+                "real-runtime certification for this report"
+            ),
+        )
+    return (
+        "real-runtime-untrusted",
+        (
+            "non-stub-like runtime candidate; conformance results are informative, but aiwf does not "
+            "treat this as certification unless the operator explicitly promotes it"
+        ),
+    )
+
+
+def _looks_like_reference_stub(command: Sequence[str], *, repo_root: Path) -> tuple[bool, str]:
+    resolved_root = repo_root.resolve()
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    for part in command:
+        lower = str(part).lower()
+        if "rp_cli_stub" in lower or "rp-cli-stub" in lower:
+            return True, f"command segment {part!r} matches the repo-local rp-cli-stub/reference harness"
+        if "fake_rp_runtime" in lower or "fake-rp-runtime" in lower:
+            return True, f"command segment {part!r} matches the aiwf fake RP runtime harness"
+        candidate = _resolve_command_path(part, repo_root=resolved_root)
+        if candidate is None:
+            continue
+        if _is_relative_to(candidate, resolved_root / "tools" / "rp-cli-stub"):
+            return True, f"command path {candidate} is inside tools/rp-cli-stub"
+        if candidate.name in {"rp", "rp-cli"} and virtual_env and _is_relative_to(candidate, Path(virtual_env)):
+            return True, f"command path {candidate} is inside the current virtual environment ({virtual_env})"
+        if candidate.name in {"rp", "rp-cli"} and _is_relative_to(candidate, Path(sys.prefix)):
+            return True, f"command path {candidate} is inside the current Python environment ({sys.prefix})"
+    return False, "command does not match aiwf reference-stub heuristics"
+
+
+def _resolve_command_path(part: str, *, repo_root: Path) -> Path | None:
+    if not part:
+        return None
+    candidate = Path(part).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve(strict=False)
+    if any(separator in part for separator in ("/", "\\")) or part.startswith("."):
+        return (repo_root / candidate).resolve(strict=False)
+    return None
+
+
+def _is_relative_to(path: Path, other: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(other.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
