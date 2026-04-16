@@ -52,6 +52,19 @@ def test_rp_cli_bridge_manage_selection_success(tmp_path: Path) -> None:
     assert result.selected_paths == (".ai/runs/run-1/context-pack.md", ".ai/runs/run-1/exec-plan.md")
 
 
+def test_rp_cli_bridge_read_file_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="read-ok")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    result = client.read_file("implement-response.md", workspace="workspace-alpha", context_id="ctx-123", tab="tab-7")
+
+    assert result.ok is True
+    assert result.source == "implement-response.md"
+    assert result.content == "# Implemented from RepoPrompt\n"
+    assert result.workspace == "workspace-alpha"
+    assert result.context_id == "ctx-123"
+
+
 def test_rp_cli_bridge_reports_missing_binary() -> None:
     client = RpCliBridgeClient(("/path/does/not/exist/rp-cli",), timeout_seconds=1)
 
@@ -111,6 +124,17 @@ def test_rp_cli_bridge_manage_selection_reports_nonzero_exit(tmp_path: Path) -> 
     assert result.error.detail["returncode"] == 7
 
 
+def test_rp_cli_bridge_read_file_reports_malformed_payload(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="read-malformed")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    result = client.read_file("review-response.json")
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "MALFORMED_RESPONSE"
+
+
 def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
     script_path = tmp_path / f"fake-rp-bridge-{mode}.py"
     script_path.write_text(
@@ -150,6 +174,18 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    payload = json.loads(sys.argv[-1])\n"
             "    paths = payload.get('paths', [])\n"
             "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'selected_paths': paths, 'added_paths': paths}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--read-file' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    if MODE == 'read-malformed':\n"
+            "        sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'body': 'missing content'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    source = payload.get('source')\n"
+            "    content = '# Implemented from RepoPrompt\\n' if source == 'implement-response.md' else '{\"summary\": \"Looks good\", \"issues\": []}'\n"
+            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'content': content}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

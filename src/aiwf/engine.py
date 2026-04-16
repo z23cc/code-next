@@ -691,6 +691,19 @@ class WorkflowEngine:
         add_artifact("run-diagnostics.json", stage=None, category="diagnostics")
 
         implement_output_names = self._implement_output_artifact_names(events, artifact_refs)
+        add_artifact(
+            "rp-bridge-capture.json",
+            stage=None,
+            category="bridge_capture",
+            related_artifacts=[
+                artifact_name
+                for artifact_name in [
+                    *implement_output_names,
+                    *self._linked_review_artifact_names(self._read_json_artifact_if_present(store, "review-report.json")),
+                ]
+                if artifact_name in artifact_refs and artifact_name != "rp-bridge-capture.json"
+            ],
+        )
         for artifact_name in implement_output_names:
             if artifact_name == "rp-bridge-seeding.json":
                 add_artifact(
@@ -803,18 +816,21 @@ class WorkflowEngine:
         events: list[EventRecord],
         artifact_refs: dict[str, RunArtifactRef],
     ) -> list[str]:
+        recorded_outputs: set[str] = set()
         for event in reversed(events):
             if event.event != "stage_result_recorded" or event.stage != "implement":
                 continue
             outputs = event.data.get("outputs")
             if not isinstance(outputs, list):
                 continue
-            return sorted(
+            recorded_outputs = {
                 output_name
                 for output_name in outputs
                 if isinstance(output_name, str) and output_name in artifact_refs
-            )
-        return self._matching_artifact_names(set(artifact_refs), stage="implement")
+            }
+            break
+        recorded_outputs.update(self._matching_artifact_names(set(artifact_refs), stage="implement"))
+        return sorted(recorded_outputs)
 
     def _read_json_artifact_if_present(self, store: ArtifactStore, name: str) -> dict[str, object] | None:
         artifact_path = store.run_dir / name
@@ -824,13 +840,18 @@ class WorkflowEngine:
         return artifact if isinstance(artifact, dict) else None
 
     def _linked_review_artifact_names(self, review_report: dict[str, object] | None) -> list[str]:
+        if review_report is None:
+            return []
+        artifact_names: list[str] = []
         linked_field = self.host_contract.review.linked_report_artifact_field
-        if review_report is None or linked_field is None:
-            return []
-        artifact_name = review_report.get(linked_field)
-        if not isinstance(artifact_name, str) or not artifact_name.strip():
-            return []
-        return [artifact_name.strip()]
+        if linked_field is not None:
+            artifact_name = review_report.get(linked_field)
+            if isinstance(artifact_name, str) and artifact_name.strip():
+                artifact_names.append(artifact_name.strip())
+        response_file = review_report.get("response_file")
+        if isinstance(response_file, str) and response_file.strip() and response_file.strip() not in artifact_names:
+            artifact_names.append(response_file.strip())
+        return artifact_names
 
     def _load_bridge_seeding_artifact(self, run_dir: Path) -> RpBridgeSeedingArtifactContent | None:
         artifact_path = run_dir / "rp-bridge-seeding.json"
@@ -911,9 +932,7 @@ class WorkflowEngine:
         if meta.last_completed_stage == "implement":
             handoff_artifacts = self._matching_artifact_names(artifact_names, stage="implement")
         elif meta.last_completed_stage == "review":
-            review_handoff = self._linked_review_artifact_name(run_dir)
-            if review_handoff:
-                handoff_artifacts = [review_handoff]
+            handoff_artifacts = self._linked_review_artifact_names_from_run_dir(run_dir)
 
         bridge_seeding = self._load_bridge_seeding_artifact(run_dir)
         return RunBridgeDiagnostics(
@@ -968,9 +987,9 @@ class WorkflowEngine:
                     return f"Run is blocked at implement waiting for operator action on {', '.join(implement_handoff)}."
                 return "Run is blocked at implement waiting for operator action."
             if meta.last_completed_stage == "review":
-                review_handoff = self._linked_review_artifact_name(run_dir)
+                review_handoff = self._linked_review_artifact_names_from_run_dir(run_dir)
                 if review_handoff:
-                    return f"Run is blocked at review waiting for operator action on {review_handoff}."
+                    return f"Run is blocked at review waiting for operator action on {', '.join(review_handoff)}."
                 return "Run is blocked at review waiting for operator action."
             return "Run is blocked and requires operator action before it can continue."
         if meta.status is RunStatus.running:
@@ -1035,15 +1054,15 @@ class WorkflowEngine:
                     ]
                 return [f"Run `uv run aiwf resume {run_id}` when the blocked implementation step is complete."]
             if meta.last_completed_stage == "review":
-                review_handoff = self._linked_review_artifact_name(run_dir)
+                review_handoff = self._linked_review_artifact_names_from_run_dir(run_dir)
                 if review_handoff:
                     if self.bridge_config is not None:
                         return [
-                            f"Open or reuse the RepoPrompt session{bridge_target_hint}, then inspect {review_handoff} to complete the manual-assist review handoff.",
+                            f"Open or reuse the RepoPrompt session{bridge_target_hint}, then inspect {', '.join(review_handoff)} to complete the manual-assist review handoff.",
                             f"Run `uv run aiwf resume {run_id}` when review is complete.",
                         ]
                     return [
-                        f"Inspect {review_handoff} to complete the review handoff.",
+                        f"Inspect {', '.join(review_handoff)} to complete the review handoff.",
                         f"Run `uv run aiwf resume {run_id}` when review is complete.",
                     ]
                 if self.bridge_config is not None:
@@ -1072,21 +1091,17 @@ class WorkflowEngine:
             if stage in artifact_name and ("prompt" in artifact_name or "response" in artifact_name)
         )
 
-    def _linked_review_artifact_name(self, run_dir: Path) -> str | None:
-        linked_field = self.host_contract.review.linked_report_artifact_field
-        if linked_field is None:
-            return None
+    def _linked_review_artifact_names_from_run_dir(self, run_dir: Path) -> list[str]:
         review_report_path = run_dir / "review-report.json"
         if not review_report_path.exists():
-            return None
+            return []
         try:
             report = ArtifactStore(run_dir, state_manager=self.state_manager).read_artifact("review-report.json")
         except ArtifactError:
-            return None
+            return []
         if not isinstance(report, dict):
-            return None
-        artifact_name = report.get(linked_field)
-        return artifact_name.strip() if isinstance(artifact_name, str) and artifact_name.strip() else None
+            return []
+        return self._linked_review_artifact_names(report)
 
     def _load_supporting_specs(self, task: TaskSpec) -> None:
         runbook_path = self.ai_root / "runbooks" / f"{task.runbook}.md"

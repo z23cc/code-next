@@ -43,7 +43,19 @@ uv run aiwf resume <run_id>
 
 `--auto` 仅在宿主契约声明支持自动执行时生效；当前 `claude` 可稳定使用 auto。`rp` 保留实验性 `--auto` 路径，但只应在已验证实现 `aiwf-rp-native/v1` 的真实 RepoPrompt app / MCP CLI runtime 上尝试；默认请使用 manual handoff + `resume`。
 
-`rp` 的 manual 模式还支持实验性的 `--bridge` groundwork 选项。当前它只会增强 manual handoff prompt、写入 `rp_bridge` run metadata，并让后续 `resume` / `run review` 自动恢复这份配置；**不会自动调用 rp-cli MCP/tools**。
+`rp` 的 manual 模式还支持实验性的 `--bridge` groundwork 选项。当前它会增强 manual handoff prompt、写入 `rp_bridge` run metadata、在 implement 阶段尝试做安全的 context seeding，并支持后续把 RepoPrompt 侧输出通过 `read_file` bridge capture 回填到 aiwf artifacts；**仍然不会启动 managed-agent，也不会直接执行 mutating rp-cli 流程**。
+
+如果 implement 阶段是 `rp/manual + --bridge`，完成 RepoPrompt 侧实现后，可先 capture 再继续：
+
+```bash
+uv run aiwf rp bridge capture <run_id> --stage implement --source <rp-side-source>
+uv run aiwf resume <run_id>
+```
+
+其中 `--source` 是 RepoPrompt 侧可被 bridge `read_file` 读取的路径或标识。capture 成功后会写入：
+
+- `.ai/runs/<run_id>/rp-agent-implement-response.md`
+- `.ai/runs/<run_id>/rp-bridge-capture.json`
 
 ## 5. 复核阶段
 
@@ -53,11 +65,14 @@ uv run aiwf resume <run_id>
 uv run aiwf run review --run-id <run_id>
 ```
 
-manual-first review 也可能先停在 `blocked`，完成手动复核后继续：
+manual-first review 也可能先停在 `blocked`。如果是 `rp/manual + --bridge`，建议先 capture RepoPrompt 侧 review 输出：
 
 ```bash
+uv run aiwf rp bridge capture <run_id> --stage review --source <rp-side-source>
 uv run aiwf resume <run_id>
 ```
+
+capture 成功后会把 RepoPrompt 侧响应写入 `rp-agent-review-response.md`，并把 `review-report.json` 规范化到当前 run 的 review contract；如果必需字段缺失，capture 会 deterministic 地拒绝、保留 run 在 `blocked`，同时把 refusal 写入 `rp-bridge-capture.json` 供 `inspect` / provenance 查看。
 
 review 阶段会按 `host_contract.review` 校验：
 

@@ -235,6 +235,27 @@ class RpBridgeSeedingArtifact(ModelBase):
     calls: list[RpBridgeToolCall] = Field(default_factory=list)
 
 
+class RpBridgeCaptureRecord(ModelBase):
+    """A normalized capture record for one bridge stage."""
+
+    stage: Literal["implement", "review"]
+    source: str
+    status: Literal["captured", "refused"]
+    workspace: str | None = None
+    context_id: str | None = None
+    response_artifact: str | None = None
+    review_report_artifact: str | None = None
+    summary: str
+    calls: list[RpBridgeToolCall] = Field(default_factory=list)
+
+
+class RpBridgeCaptureArtifact(ModelBase):
+    """Typed record of bridge-captured RepoPrompt outputs."""
+
+    version: int = 1
+    captures: list[RpBridgeCaptureRecord] = Field(default_factory=list)
+
+
 class WorkReceipt(ModelBase):
     """Final run summary written at the end of workflow execution."""
 
@@ -547,6 +568,47 @@ class RpBridgeSeedingArtifactContent(ArtifactSchemaBase):
         if not value.strip():
             raise ValueError("must be a non-empty string")
         return value
+
+
+class RpBridgeCaptureRecordContent(ArtifactSchemaBase):
+    """Strict artifact schema for a single bridge capture record."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    stage: Literal["implement", "review"]
+    source: StrictStr
+    status: Literal["captured", "refused"]
+    workspace: StrictStr | None = None
+    context_id: StrictStr | None = None
+    response_artifact: StrictStr | None = None
+    review_report_artifact: StrictStr | None = None
+    summary: StrictStr
+    calls: list[RpBridgeToolCallContent] = Field(default_factory=list)
+
+    @field_validator(
+        "source",
+        "workspace",
+        "context_id",
+        "response_artifact",
+        "review_report_artifact",
+        "summary",
+    )
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeCaptureArtifactContent(ArtifactSchemaBase):
+    """Strict artifact schema for `rp-bridge-capture.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    version: StrictInt = 1
+    captures: list[RpBridgeCaptureRecordContent] = Field(default_factory=list)
 
 
 class WorkReceiptContent(ArtifactSchemaBase):

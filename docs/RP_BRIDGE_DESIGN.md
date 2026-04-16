@@ -331,13 +331,40 @@ bridge 更现实，原因有三点：
 - 不会启动 `managed-agent`
 - 不会做超出当前 aiwf run artifacts 的广泛 context seeding
 
-### Phase 4+
+### Phase 4 — response capture / normalization（已落地）
+
+> **Status (2026-04-16): P4 completed.** 当前 bridge manual-assist 已支持把 RepoPrompt 侧 implement / review 输出通过只读 `read_file` surface 拉回 aiwf run，并做 deterministic normalization。当前已落地的是：
+>
+> - `uv run aiwf rp bridge capture <run_id> --stage implement|review --source <rp-side-source>`
+> - typed capture artifact `rp-bridge-capture.json`
+> - implement capture → `rp-agent-implement-response.md`
+> - review capture → `rp-agent-review-response.md` + normalized `review-report.json`
+> - `run-provenance.json` / `inspect` 对 capture artifact 与 response artifact 的暴露
+>
+> 当前 P4 保持的原则仍然是：
+>
+> - 只读 ingest；bridge 只通过 `read_file` 拉回 RepoPrompt 侧输出
+> - normalization deterministic；缺失 contract 必需字段时直接拒绝，不伪造字段
+> - refusal 不会把 run 弄坏；review capture 失败时 run 继续停在 `blocked`，operator 可以修正 source 后重试
+>
+> 一个最小 P4 operator loop 是：
+>
+> 1. `uv run aiwf run implement --adapter rp --bridge ...`
+> 2. 在 RepoPrompt 侧完成 implement
+> 3. `uv run aiwf rp bridge capture <run_id> --stage implement --source <rp-side-source>`
+> 4. `uv run aiwf resume <run_id>`
+> 5. `uv run aiwf run review --run-id <run_id>`
+> 6. 在 RepoPrompt 侧完成 review 并产出结构化结果
+> 7. `uv run aiwf rp bridge capture <run_id> --stage review --source <rp-side-source>`
+> 8. `uv run aiwf resume <run_id>`
+
+### Phase 5+
 
 再之后才考虑：
 
-- capture / transcript normalization
 - managed-agent bridge
 - 更深的 `inspect` / provenance / review contract 自动化
+- 对 capture source / transcript surfaces 的进一步自动化
 
 ## 12. 一句话结论
 

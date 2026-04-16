@@ -12,6 +12,7 @@ from aiwf.exceptions import ArtifactError, ErrorCode
 from aiwf.models import (
     EventRecord,
     ReviewReportContent,
+    RpBridgeCaptureArtifactContent,
     RpBridgeSeedingArtifactContent,
     VerifyReportContent,
     WorkReceiptContent,
@@ -24,6 +25,7 @@ ArtifactModelT = TypeVar("ArtifactModelT", bound=BaseModel)
 _VALIDATED_ARTIFACT_SCHEMAS: dict[str, type[BaseModel]] = {
     "verify-report.json": VerifyReportContent,
     "review-report.json": ReviewReportContent,
+    "rp-bridge-capture.json": RpBridgeCaptureArtifactContent,
     "rp-bridge-seeding.json": RpBridgeSeedingArtifactContent,
     "work-receipt.json": WorkReceiptContent,
 }
@@ -38,6 +40,10 @@ class ArtifactStore:
         self._ensure_run_dir()
         self._state_manager = state_manager or RunStateManager(self._infer_ai_root())
 
+    def write_text_artifact(self, name: str, content: str) -> Path:
+        """Persist an arbitrary text artifact."""
+        return self._write_text_artifact(name, content)
+
     def write_context_pack(self, content: str) -> Path:
         """Persist `context-pack.md`."""
         return self._write_text_artifact("context-pack.md", content)
@@ -45,6 +51,10 @@ class ArtifactStore:
     def write_exec_plan(self, content: str) -> Path:
         """Persist `exec-plan.md`."""
         return self._write_text_artifact("exec-plan.md", content)
+
+    def write_json_artifact(self, name: str, payload: BaseModel | dict[str, Any]) -> Path:
+        """Persist an arbitrary JSON artifact."""
+        return self._write_json_artifact(name, payload)
 
     def write_verify_report(self, report: BaseModel | dict[str, Any]) -> Path:
         """Persist `verify-report.json`."""

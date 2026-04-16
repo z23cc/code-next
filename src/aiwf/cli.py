@@ -21,8 +21,13 @@ from aiwf.adapters import (
     restore_host_contract,
     restore_rp_bridge_config,
 )
-from aiwf.adapters.rp_cli_bridge import RpBridgeProbeResult, RpCliBridgeClient
 from aiwf.adapters.base import HostContract
+from aiwf.adapters.rp_bridge_normalize import (
+    RpBridgeNormalizationError,
+    normalize_implement_capture,
+    normalize_review_capture,
+)
+from aiwf.adapters.rp_cli_bridge import RpBridgeProbeResult, RpCliBridgeClient
 from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
 from aiwf.compilers.codex import compile_codex
@@ -32,7 +37,14 @@ from aiwf.contracts import assess_review_boundary, assess_review_evidence, lint_
 from aiwf.doctor import render_doctor_report, run_doctor
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AiwfError
-from aiwf.models import RpBridgeRunConfig, RunMeta, RunStatus
+from aiwf.models import (
+    RpBridgeCaptureArtifact,
+    RpBridgeCaptureRecord,
+    RpBridgeRunConfig,
+    RpBridgeToolCall,
+    RunMeta,
+    RunStatus,
+)
 from aiwf.state import RunStateManager
 
 app = typer.Typer(
@@ -45,10 +57,14 @@ contracts_app = typer.Typer(help="Lint and inspect built-in host contracts.")
 conformance_app = typer.Typer(
     help="Run RP executable protocol checks; the official product target is the real RepoPrompt app / MCP CLI runtime."
 )
+rp_app = typer.Typer(help="RepoPrompt bridge utilities.")
+bridge_app = typer.Typer(help="RepoPrompt bridge workflow helpers.")
 app.add_typer(run_app, name="run")
 app.add_typer(compile_app, name="compile")
 app.add_typer(contracts_app, name="contracts")
 app.add_typer(conformance_app, name="conformance")
+app.add_typer(rp_app, name="rp")
+rp_app.add_typer(bridge_app, name="bridge")
 console = Console()
 
 
@@ -236,6 +252,184 @@ def _load_optional_run_surface(ai_root: Path, run_id: str, artifact_name: str) -
 
 def _artifact_path(ai_root: Path, run_id: str, artifact_name: str) -> Path:
     return ai_root / "runs" / run_id / artifact_name
+
+
+def _resolve_bridge_capture_run(ai_root: Path, run_id: str) -> tuple[RunMeta, HostContract, RpBridgeRunConfig]:
+    state_manager = RunStateManager(ai_root)
+    meta = state_manager.load_run(run_id)
+    workflow = str(meta.data.get("workflow", "")).strip()
+    if workflow != "implement":
+        raise AiwfError(f"Bridge capture only supports implement workflow runs; run {run_id} is {workflow or '-'}")
+
+    host_contract, bridge_config = _resolve_run_execution_payload(ai_root, run_id)
+    if host_contract.adapter != "rp" or host_contract.mode != "manual":
+        raise AiwfError(f"Run {run_id} does not use the rp/manual bridge handoff path")
+    if bridge_config is None or bridge_config.mode != "manual-assist":
+        raise AiwfError(f"Run {run_id} is not bridge-enabled with manual-assist mode")
+    return meta, host_contract, bridge_config
+
+
+def _build_bridge_capture_client(host_contract: HostContract, bridge_config: RpBridgeRunConfig) -> RpCliBridgeClient:
+    timeout_seconds = bridge_config.timeout_seconds or 5
+    client = RpCliBridgeClient.from_command_candidates(
+        host_contract.bridge.command_candidates,
+        timeout_seconds=timeout_seconds,
+    )
+    if client is not None:
+        return client
+
+    candidates = ", ".join(candidate for candidate in host_contract.bridge.command_candidates if candidate) or "-"
+    install_hint = host_contract.bridge.install_hint or "Install a RepoPrompt bridge command candidate and try again."
+    raise AiwfError(f"No RP bridge command candidate was found on PATH ({candidates}). {install_hint}")
+
+
+def _bridge_tool_call_from_read_result(result: object, *, step: str, tool: str = "read_file") -> RpBridgeToolCall:
+    ok = bool(getattr(result, "ok", False))
+    error = getattr(result, "error", None)
+    summary = f"Captured RepoPrompt source via {tool}" if ok else str(getattr(error, "message", "RP bridge call failed"))
+    return RpBridgeToolCall(
+        step=step,
+        tool=tool,
+        ok=ok,
+        command=list(getattr(result, "command", ()) or ()),
+        summary=summary,
+        error_code=getattr(error, "code", None),
+        error_message=getattr(error, "message", None),
+        detail=dict(getattr(error, "detail", {}) or {}),
+    )
+
+
+def _load_bridge_capture_artifact(store: ArtifactStore) -> RpBridgeCaptureArtifact:
+    capture_path = store.run_dir / "rp-bridge-capture.json"
+    if not capture_path.exists():
+        return RpBridgeCaptureArtifact()
+    artifact = store.read_artifact("rp-bridge-capture.json")
+    if not isinstance(artifact, dict):
+        raise AiwfError(f"Stored bridge capture artifact for run {store.run_id} is invalid")
+    try:
+        return RpBridgeCaptureArtifact.model_validate(artifact)
+    except Exception as exc:
+        raise AiwfError(f"Stored bridge capture artifact for run {store.run_id} is invalid: {exc}") from exc
+
+
+def _upsert_bridge_capture_record(store: ArtifactStore, record: RpBridgeCaptureRecord) -> None:
+    capture_artifact = _load_bridge_capture_artifact(store)
+    captures = [existing for existing in capture_artifact.captures if existing.stage != record.stage]
+    captures.append(record)
+    captures.sort(key=lambda item: item.stage)
+    store.write_json_artifact(
+        "rp-bridge-capture.json",
+        RpBridgeCaptureArtifact(version=capture_artifact.version, captures=captures),
+    )
+
+
+def _refresh_run_surfaces(ai_root: Path, repo_root: Path, run_id: str) -> None:
+    engine = _build_engine_from_stored_run(ai_root, repo_root, run_id)
+    meta = RunStateManager(ai_root).load_run(run_id)
+    workflow = str(meta.data.get("workflow", "")).strip() or "implement"
+    store = ArtifactStore(Path(meta.run_dir), state_manager=engine.state_manager)
+    engine._write_runtime_surfaces(store, workflow=workflow)  # noqa: SLF001 - shared CLI/runtime integration seam
+
+
+def _capture_bridge_stage(
+    ai_root: Path,
+    repo_root: Path,
+    *,
+    run_id: str,
+    stage: Literal["implement", "review"],
+    source: str,
+) -> dict[str, str]:
+    meta, host_contract, bridge_config = _resolve_bridge_capture_run(ai_root, run_id)
+    if meta.status is not RunStatus.blocked or meta.last_completed_stage != stage:
+        raise AiwfError(
+            f"Run {run_id} is not currently blocked at {stage}; current status={meta.status.value} "
+            f"last_completed_stage={meta.last_completed_stage or '-'}"
+        )
+
+    client = _build_bridge_capture_client(host_contract, bridge_config)
+    store = ArtifactStore(Path(meta.run_dir), state_manager=RunStateManager(ai_root))
+    read_result = client.read_file(
+        source,
+        workspace=bridge_config.workspace,
+        tab=bridge_config.tab,
+        context_id=bridge_config.context_id,
+    )
+    calls = [_bridge_tool_call_from_read_result(read_result, step=f"capture_{stage}")]
+    record_workspace = getattr(read_result, "workspace", None) or bridge_config.workspace
+    record_context_id = getattr(read_result, "context_id", None) or bridge_config.context_id
+
+    def refuse(summary: str) -> None:
+        _upsert_bridge_capture_record(
+            store,
+            RpBridgeCaptureRecord(
+                stage=stage,
+                source=source,
+                status="refused",
+                workspace=record_workspace,
+                context_id=record_context_id,
+                summary=summary,
+                calls=calls,
+            ),
+        )
+        _refresh_run_surfaces(ai_root, repo_root, run_id)
+
+    if not read_result.ok or read_result.content is None:
+        message = read_result.error.message if read_result.error is not None else "RP bridge read_file failed"
+        refuse(message)
+        raise AiwfError(f"Bridge capture failed for run {run_id} at {stage}: {message}")
+
+    response_artifact_name = "rp-agent-implement-response.md" if stage == "implement" else "rp-agent-review-response.md"
+    try:
+        if stage == "implement":
+            normalized_response = normalize_implement_capture(read_result.content)
+            store.write_text_artifact(response_artifact_name, normalized_response)
+            summary = f"Captured RepoPrompt implement response into {response_artifact_name}"
+            review_report_artifact = None
+        else:
+            existing_review_report = store.read_artifact("review-report.json")
+            if not isinstance(existing_review_report, dict):
+                raise AiwfError(f"Stored review-report.json for run {run_id} is invalid")
+            linked_field = host_contract.review.linked_report_artifact_field
+            linked_artifact_name = None
+            if linked_field is not None:
+                raw_linked_name = existing_review_report.get(linked_field)
+                if isinstance(raw_linked_name, str) and raw_linked_name.strip():
+                    linked_artifact_name = raw_linked_name.strip()
+            normalized_review_report = normalize_review_capture(
+                read_result.content,
+                contract=host_contract.review,
+                linked_artifact_name=linked_artifact_name,
+                response_artifact_name=response_artifact_name,
+                existing_report=existing_review_report,
+            )
+            store.write_text_artifact(response_artifact_name, read_result.content.strip() + "\n")
+            store.write_review_report(normalized_review_report)
+            summary = f"Captured RepoPrompt review response into {response_artifact_name} and normalized review-report.json"
+            review_report_artifact = "review-report.json"
+    except (AiwfError, RpBridgeNormalizationError) as exc:
+        refuse(str(exc))
+        raise AiwfError(f"Bridge capture refused for run {run_id} at {stage}: {exc}") from exc
+
+    _upsert_bridge_capture_record(
+        store,
+        RpBridgeCaptureRecord(
+            stage=stage,
+            source=source,
+            status="captured",
+            workspace=record_workspace,
+            context_id=record_context_id,
+            response_artifact=response_artifact_name,
+            review_report_artifact=review_report_artifact,
+            summary=summary,
+            calls=calls,
+        ),
+    )
+    _refresh_run_surfaces(ai_root, repo_root, run_id)
+    return {
+        "response_artifact": response_artifact_name,
+        "capture_artifact": "rp-bridge-capture.json",
+        "review_report_artifact": review_report_artifact or "",
+    }
 
 
 def _print_run_guidance(ai_root: Path, run_id: str) -> None:
@@ -610,6 +804,7 @@ def _build_inspection_payload(
     provenance = _load_optional_run_surface(ai_root, run_id, "run-provenance.json")
     review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
     bridge_seeding = _load_optional_run_surface(ai_root, run_id, "rp-bridge-seeding.json")
+    bridge_capture = _load_optional_run_surface(ai_root, run_id, "rp-bridge-capture.json")
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -618,12 +813,14 @@ def _build_inspection_payload(
         "provenance": provenance,
         "review_report": review_report,
         "bridge_seeding": bridge_seeding,
+        "bridge_capture": bridge_capture,
         "rp_bridge": meta.data.get("rp_bridge") if "rp_bridge" in meta.data else None,
         "artifacts": {
             "diagnostics": str(_artifact_path(ai_root, run_id, "run-diagnostics.json")),
             "provenance": str(_artifact_path(ai_root, run_id, "run-provenance.json")),
             "review_report": str(_artifact_path(ai_root, run_id, "review-report.json")) if review_report is not None else None,
             "bridge_seeding": str(_artifact_path(ai_root, run_id, "rp-bridge-seeding.json")) if bridge_seeding is not None else None,
+            "bridge_capture": str(_artifact_path(ai_root, run_id, "rp-bridge-capture.json")) if bridge_capture is not None else None,
         },
     }
 
@@ -953,6 +1150,20 @@ def _print_inspection(
                     "bridge_probe="
                     f"{error.get('code') or 'UNKNOWN'}:{error.get('message') or 'bridge probe failed'}"
                 )
+    bridge_capture = payload.get("bridge_capture")
+    if isinstance(bridge_capture, Mapping):
+        captures = bridge_capture.get("captures")
+        if isinstance(captures, list) and captures:
+            capture_labels: list[str] = []
+            for capture in captures:
+                if not isinstance(capture, Mapping):
+                    continue
+                stage_name = str(capture.get("stage", "")).strip()
+                status_name = str(capture.get("status", "")).strip()
+                if stage_name and status_name:
+                    capture_labels.append(f"{stage_name}:{status_name}")
+            if capture_labels:
+                console.print(f"bridge_capture_status={_format_csv(capture_labels)}")
 
     _print_inspection_diff(payload)
 
@@ -1010,6 +1221,8 @@ def _print_inspection(
     console.print(f"provenance={artifacts['provenance']}")
     if artifacts.get("bridge_seeding"):
         console.print(f"bridge_seeding={artifacts['bridge_seeding']}")
+    if artifacts.get("bridge_capture"):
+        console.print(f"bridge_capture={artifacts['bridge_capture']}")
 
 
 @run_app.command("plan")
@@ -1120,6 +1333,35 @@ def resume(
         lambda: _build_engine_from_stored_run(ai_root, repo_root, run_id),
     )
     _execute_command("resume", ai_root, lambda: engine.resume(run_id))
+
+
+@bridge_app.command("capture")
+def rp_bridge_capture(
+    run_id: str,
+    stage: Annotated[
+        Literal["implement", "review"],
+        typer.Option("--stage", help="Bridge stage whose RepoPrompt-side output should be captured."),
+    ],
+    source: Annotated[
+        str,
+        typer.Option("--source", help="RepoPrompt-side source identifier/path consumed through bridge read_file."),
+    ],
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
+) -> None:
+    """Capture RepoPrompt-side manual-assist output back into aiwf artifacts."""
+    try:
+        result = _capture_bridge_stage(ai_root, repo_root, run_id=run_id, stage=stage, source=source)
+    except AiwfError as exc:
+        console.print(f"[red]rp bridge capture failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        "[green]rp bridge capture completed[/green] "
+        f"run_id={run_id} stage={stage} response={result['response_artifact']} capture={result['capture_artifact']}"
+    )
+    if result["review_report_artifact"]:
+        console.print(f"review_report={result['review_report_artifact']}")
 
 
 @app.command("inspect")

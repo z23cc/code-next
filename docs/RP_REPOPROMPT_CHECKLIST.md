@@ -125,16 +125,25 @@ Validation notes:
 
 目标：把 RepoPrompt 会话结果拉回 `aiwf`，并规范化为 run artifacts。
 
-- [ ] 新增 `aiwf rp bridge capture <run_id>`
-- [ ] implement capture 生成 `rp-agent-implement-response.md`
-- [ ] review capture 生成可校验的 `review-report.json`
-- [ ] normalization 逻辑 deterministic，不能伪造字段
-- [ ] end-to-end 测试覆盖 capture -> resume/review
+- [x] 新增 `aiwf rp bridge capture <run_id>`
+- [x] implement capture 生成 `rp-agent-implement-response.md`
+- [x] review capture 生成可校验的 `review-report.json`
+- [x] normalization 逻辑 deterministic，不能伪造字段
+- [x] end-to-end 测试覆盖 capture -> resume/review
 
 Exit criteria:
 
-- [ ] operator 不需要手工整理 RepoPrompt 输出到 aiwf artifacts
-- [ ] review contract 在 happy path 下可自动满足
+- [x] operator 不需要手工整理 RepoPrompt 输出到 aiwf artifacts
+- [x] review contract 在 happy path 下可自动满足
+
+Validation notes:
+
+- 日期：2026-04-16
+- P4 结论：bridge manual-assist 现在可以通过只读 `read_file` surface 将 RepoPrompt 侧 implement/review 输出拉回 aiwf run，并分别落盘到 `rp-agent-implement-response.md`、`rp-agent-review-response.md`、`review-report.json` 与 `rp-bridge-capture.json`。review capture 在缺失 contract 必需字段时会 deterministic 地拒绝并保持 run `blocked`，不会伪造字段或破坏既有 manual fallback。
+- 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_rp_bridge_normalize.py tests/test_artifacts.py tests/test_cli.py -q`
+- 已执行命令：`uv run aiwf contracts lint`
+- 已执行命令：`uv run pytest tests/test_engine.py tests/test_cli.py tests/test_rp_cli_bridge.py tests/test_rp_bridge_normalize.py tests/test_artifacts.py tests/test_adapter_contracts.py tests/test_adapter_rp.py tests/test_doctor.py -q`
+- 结果：focused pytest `71 passed`；final focused validation 中 `contracts lint` 通过，pytest `154 passed`
 
 ---
 
@@ -190,6 +199,6 @@ Exit criteria:
 - [x] P1 completed
 - [x] P2 completed
 - [x] P3 completed
-- [ ] P4 pending
+- [x] P4 completed
 - [ ] P5 pending
 - [ ] P6 pending

@@ -9,6 +9,8 @@ from aiwf.artifacts import ArtifactStore
 from aiwf.exceptions import ArtifactError, ErrorCode
 from aiwf.models import (
     ReviewReportContent,
+    RpBridgeCaptureArtifact,
+    RpBridgeCaptureRecord,
     RpBridgeSeedingArtifact,
     RpBridgeToolCall,
     RunDiagnostics,
@@ -272,3 +274,46 @@ def test_artifact_store_validates_rp_bridge_seeding_artifact(tmp_path: Path) -> 
 
     assert artifact.status == "seeded"
     assert artifact.calls[0].tool == "manage_selection"
+
+
+def test_artifact_store_validates_rp_bridge_capture_artifact(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Bridge capture", body="Store capture artifact."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+
+    (run_dir / "rp-bridge-capture.json").write_text(
+        json.dumps(
+            RpBridgeCaptureArtifact(
+                captures=[
+                    RpBridgeCaptureRecord(
+                        stage="implement",
+                        source="implement-response.md",
+                        status="captured",
+                        workspace="workspace-alpha",
+                        context_id="ctx-123",
+                        response_artifact="rp-agent-implement-response.md",
+                        summary="Captured RepoPrompt implement response into rp-agent-implement-response.md",
+                        calls=[
+                            RpBridgeToolCall(
+                                step="capture_implement",
+                                tool="read_file",
+                                ok=True,
+                                command=["rp", "--read-file"],
+                                summary="Captured RepoPrompt source via read_file",
+                            )
+                        ],
+                    )
+                ]
+            ).model_dump(mode="json"),
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    artifact = store.read_validated_artifact("rp-bridge-capture.json")
+
+    assert artifact.captures[0].stage == "implement"
+    assert artifact.captures[0].response_artifact == "rp-agent-implement-response.md"

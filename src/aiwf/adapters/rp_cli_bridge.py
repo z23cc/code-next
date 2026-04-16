@@ -74,6 +74,22 @@ class RpManageSelectionResult:
 
 
 @dataclass(frozen=True)
+class RpReadFileResult:
+    """Typed result of a bridge-side `read_file` call."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    source: str
+    content: str | None = None
+    workspace: str | None = None
+    context_id: str | None = None
+    error: RpBridgeError | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
 class RpBridgeProbeResult:
     """Top-level availability result for a bridge candidate."""
 
@@ -281,6 +297,78 @@ class RpCliBridgeClient:
             raw_stderr=invocation.stderr,
         )
 
+    def read_file(
+        self,
+        source: str,
+        *,
+        workspace: str | None = None,
+        tab: str | None = None,
+        context_id: str | None = None,
+    ) -> RpReadFileResult:
+        normalized_source = source.strip()
+        if not normalized_source:
+            raise ValueError("read_file requires a non-empty source")
+        payload: dict[str, Any] = {"source": normalized_source}
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if tab is not None:
+            payload["tab"] = tab
+        if context_id is not None:
+            payload["context_id"] = context_id
+
+        invocation = self._run_command("--read-file", json.dumps(payload, ensure_ascii=False))
+        if not invocation.ok:
+            return RpReadFileResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                source=normalized_source,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="read_file")
+        if not isinstance(response, dict):
+            return RpReadFileResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                source=normalized_source,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="read_file",
+                    message="read_file did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        content = response.get("content")
+        if not isinstance(content, str):
+            return RpReadFileResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                source=normalized_source,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="read_file",
+                    message="read_file did not include string content",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpReadFileResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            source=normalized_source,
+            content=content,
+            workspace=self._optional_string(response.get("workspace")) or workspace,
+            context_id=self._optional_string(response.get("context_id")) or context_id,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
     def _run_command(self, *arguments: str) -> _RpInvocation:
         command = (*self.command, *arguments)
         try:
@@ -440,6 +528,7 @@ __all__ = [
     "RpBridgeProbeResult",
     "RpCliBridgeClient",
     "RpManageSelectionResult",
+    "RpReadFileResult",
     "RpToolInfo",
     "RpToolListResult",
     "RpWorkspaceContextResult",

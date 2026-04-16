@@ -672,6 +672,212 @@ def test_cli_inspect_surfaces_bridge_seeding_failure_without_breaking_manual_han
 
 
 
+def test_cli_rp_bridge_capture_round_trip_restores_review_flow_with_fake_cli(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="seed-capture-ok")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-workspace",
+            "workspace-alpha",
+            "--bridge-context-id",
+            "ctx-123",
+            "--bridge-timeout",
+            "30",
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    run_dir = ai_root / "runs" / run_id
+
+    capture_implement_result = runner.invoke(
+        app,
+        [
+            "rp",
+            "bridge",
+            "capture",
+            run_id,
+            "--stage",
+            "implement",
+            "--source",
+            "implement-response.md",
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert capture_implement_result.exit_code == 0
+    assert "rp bridge capture completed" in capture_implement_result.stdout
+    assert (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8") == "# Implemented from RepoPrompt\n"
+
+    implement_capture = json.loads((run_dir / "rp-bridge-capture.json").read_text(encoding="utf-8"))
+    assert implement_capture["captures"][0]["stage"] == "implement"
+    assert implement_capture["captures"][0]["status"] == "captured"
+    assert implement_capture["captures"][0]["response_artifact"] == "rp-agent-implement-response.md"
+
+    inspect_after_implement = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+    assert inspect_after_implement.exit_code == 0
+    inspect_payload = json.loads(inspect_after_implement.stdout)
+    assert inspect_payload["bridge_capture"]["captures"][0]["stage"] == "implement"
+    assert inspect_payload["artifacts"]["bridge_capture"].endswith("rp-bridge-capture.json")
+    artifact_names = {artifact["name"] for artifact in inspect_payload["provenance"]["artifact_index"]}
+    assert "rp-bridge-capture.json" in artifact_names
+    assert "rp-agent-implement-response.md" in artifact_names
+
+    resume_result = runner.invoke(
+        app,
+        ["resume", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+    assert resume_result.exit_code == 0
+    assert "status=needs_review" in resume_result.stdout
+
+    review_result = runner.invoke(
+        app,
+        ["run", "review", "--run-id", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+    assert review_result.exit_code == 0
+    assert (run_dir / "rp-agent-review-prompt.md").exists()
+
+    capture_review_result = runner.invoke(
+        app,
+        [
+            "rp",
+            "bridge",
+            "capture",
+            run_id,
+            "--stage",
+            "review",
+            "--source",
+            "review-response.json",
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert capture_review_result.exit_code == 0
+    review_report = json.loads((run_dir / "review-report.json").read_text(encoding="utf-8"))
+    capture_artifact = json.loads((run_dir / "rp-bridge-capture.json").read_text(encoding="utf-8"))
+    assert review_report["summary"] == "Looks good overall"
+    assert review_report["issues"] == [{"severity": "low", "message": "Add one regression test"}]
+    assert review_report["mode"] == "manual"
+    assert review_report["prompt_file"] == "rp-agent-review-prompt.md"
+    assert review_report["response_file"] == "rp-agent-review-response.md"
+    assert (run_dir / "rp-agent-review-response.md").exists()
+    assert {capture["stage"] for capture in capture_artifact["captures"]} == {"implement", "review"}
+
+    inspect_text = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root)])
+    assert inspect_text.exit_code == 0
+    assert "bridge_capture=" in inspect_text.stdout
+    assert "bridge_capture_status=implement:captured,review:captured" in inspect_text.stdout
+
+    final_resume = runner.invoke(
+        app,
+        ["resume", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+    assert final_resume.exit_code == 0
+    assert RunStateManager(ai_root).load_run(run_id).status.value == "passed"
+
+
+
+def test_cli_rp_bridge_capture_review_refuses_missing_required_fields(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="seed-capture-review-invalid")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-workspace",
+            "workspace-alpha",
+        ],
+        env={"PATH": fake_path},
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    resume_result = runner.invoke(
+        app,
+        ["resume", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+    assert resume_result.exit_code == 0
+
+    review_result = runner.invoke(
+        app,
+        ["run", "review", "--run-id", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+    assert review_result.exit_code == 0
+
+    capture_result = runner.invoke(
+        app,
+        [
+            "rp",
+            "bridge",
+            "capture",
+            run_id,
+            "--stage",
+            "review",
+            "--source",
+            "review-response.json",
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert capture_result.exit_code == 1
+    assert "Review capture is missing required" in capture_result.stdout
+    assert "summary" in capture_result.stdout
+
+    run_dir = ai_root / "runs" / run_id
+    review_report = json.loads((run_dir / "review-report.json").read_text(encoding="utf-8"))
+    capture_artifact = json.loads((run_dir / "rp-bridge-capture.json").read_text(encoding="utf-8"))
+    assert review_report["summary"].startswith("RepoPrompt review handoff prompt written")
+    assert capture_artifact["captures"][0]["stage"] == "review"
+    assert capture_artifact["captures"][0]["status"] == "refused"
+    assert "missing required string field 'summary'" in capture_artifact["captures"][0]["summary"]
+    assert RunStateManager(ai_root).load_run(run_id).status.value == "blocked"
+
+
+
 def test_cli_codex_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
 
@@ -2312,10 +2518,36 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
+            "if '--read-file' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    if MODE == 'capture-read-fail':\n"
+            "        sys.stderr.write('read file failed\\n')\n"
+            "        raise SystemExit(6)\n"
+            "    if MODE == 'capture-read-malformed':\n"
+            "        sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'body': 'missing content'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    source = payload.get('source')\n"
+            "    if source == 'implement-response.md':\n"
+            "        content = '# Implemented from RepoPrompt\\n'\n"
+            "    elif source == 'review-response.json':\n"
+            "        if MODE == 'seed-capture-review-invalid':\n"
+            "            content = json.dumps({'issues': []})\n"
+            "        else:\n"
+            "            content = json.dumps({'summary': 'Looks good overall', 'issues': [{'severity': 'low', 'message': 'Add one regression test'}]})\n"
+            "    else:\n"
+            "        content = f'Captured {source}\\n'\n"
+            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'content': content}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
             "sys.stderr.write('unsupported invocation\\n')\n"
             "raise SystemExit(2)\n"
         ),
         encoding="utf-8",
     )
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
+    for alias in (tmp_path / "rp", tmp_path / "rp-cli"):
+        alias.write_text(script_path.read_text(encoding="utf-8"), encoding="utf-8")
+        alias.chmod(alias.stat().st_mode | stat.S_IXUSR)
     return script_path
