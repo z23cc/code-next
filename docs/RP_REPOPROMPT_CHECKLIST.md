@@ -209,6 +209,7 @@ Validation notes:
 5. P4
 6. P5
 7. P6
+8. P7
 
 当前阶段：
 
@@ -219,3 +220,4 @@ Validation notes:
 - [x] P4 completed
 - [x] P5 completed
 - [x] P6 completed
+- [x] P7 completed (session/workspace foundation + orchestration/operator wiring)

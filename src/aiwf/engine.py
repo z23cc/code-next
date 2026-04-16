@@ -468,8 +468,11 @@ class WorkflowEngine:
             "workflow": workflow,
             "host_contract": self.host_contract.to_metadata(),
         }
-        if self.bridge_config is not None:
-            data["rp_bridge"] = self.bridge_config.model_dump(mode="json")
+        adapter_bridge_config = getattr(self.adapter, "bridge_config", None)
+        bridge_config = adapter_bridge_config if adapter_bridge_config is not None else self.bridge_config
+        if bridge_config is not None:
+            self.bridge_config = bridge_config
+            data["rp_bridge"] = bridge_config.model_dump(mode="json")
         return data
 
     def _restore_execution_metadata(self, meta: RunMeta, *, stage: str) -> None:
@@ -743,6 +746,22 @@ class WorkflowEngine:
                 if artifact_name in artifact_refs and artifact_name != "rp-bridge-agent-log.json"
             ],
         )
+        latest_bridge_agent_record = self._latest_bridge_agent_record(store.run_dir)
+        if latest_bridge_agent_record is not None:
+            if latest_bridge_agent_record.transcript_artifact:
+                add_artifact(
+                    latest_bridge_agent_record.transcript_artifact,
+                    stage=latest_bridge_agent_record.stage,
+                    category="bridge_agent_transcript",
+                    related_artifacts=["rp-bridge-agent-log.json"],
+                )
+            if latest_bridge_agent_record.handoff_artifact:
+                add_artifact(
+                    latest_bridge_agent_record.handoff_artifact,
+                    stage=latest_bridge_agent_record.stage,
+                    category="bridge_agent_handoff",
+                    related_artifacts=["rp-bridge-agent-log.json"],
+                )
         for artifact_name in implement_output_names:
             if artifact_name == "rp-bridge-seeding.json":
                 add_artifact(
@@ -977,12 +996,16 @@ class WorkflowEngine:
         if self.bridge_config is None:
             return None
         parts: list[str] = []
-        if self.bridge_config.workspace:
-            parts.append(f"workspace={self.bridge_config.workspace}")
-        if self.bridge_config.tab:
-            parts.append(f"tab={self.bridge_config.tab}")
-        if self.bridge_config.context_id:
-            parts.append(f"context_id={self.bridge_config.context_id}")
+        resolved = self.bridge_config.resolved
+        workspace = resolved.resolved_workspace_name if resolved is not None else None
+        tab = resolved.resolved_tab_name if resolved is not None else None
+        context_id = resolved.resolved_context_id if resolved is not None else None
+        if workspace or self.bridge_config.workspace:
+            parts.append(f"workspace={workspace or self.bridge_config.workspace}")
+        if tab or self.bridge_config.tab:
+            parts.append(f"tab={tab or self.bridge_config.tab}")
+        if context_id or self.bridge_config.context_id:
+            parts.append(f"context_id={context_id or self.bridge_config.context_id}")
         if self.bridge_config.agent_role:
             parts.append(f"agent_role={self.bridge_config.agent_role}")
         return ", ".join(parts) if parts else None
@@ -1017,6 +1040,7 @@ class WorkflowEngine:
             agent_role=self.bridge_config.agent_role,
             timeout_seconds=self.bridge_config.timeout_seconds,
             export_transcript=self.bridge_config.export_transcript,
+            resolved=self.bridge_config.resolved,
             summary=self._bridge_summary(meta, handoff_artifacts, latest_agent_record),
             handoff_artifacts=handoff_artifacts,
             seeding_artifact="rp-bridge-seeding.json" if bridge_seeding is not None else None,
@@ -1025,6 +1049,9 @@ class WorkflowEngine:
             agent_log_artifact="rp-bridge-agent-log.json" if bridge_agent_log is not None else None,
             agent_status=latest_agent_record.status if latest_agent_record is not None else None,
             agent_session_id=latest_agent_record.session_id if latest_agent_record is not None else None,
+            agent_transcript_artifact=latest_agent_record.transcript_artifact if latest_agent_record is not None else None,
+            agent_handoff_artifact=latest_agent_record.handoff_artifact if latest_agent_record is not None else None,
+            agent_recovery=latest_agent_record.recovery if latest_agent_record is not None else None,
         )
 
     def _bridge_summary(
@@ -1036,16 +1063,17 @@ class WorkflowEngine:
         artifact_phrase = f" using {', '.join(handoff_artifacts)}" if handoff_artifacts else ""
         if self.bridge_config is not None and self.bridge_config.mode == "managed-agent" and agent_record is not None:
             stage_label = "implement" if agent_record.stage == "implement" else "review"
+            recovery_phrase = " after resuming the same RepoPrompt session" if agent_record.recovery == "resumed" else ""
             if agent_record.status == "waiting_for_input":
                 return (
                     f"RepoPrompt managed-agent is active for {stage_label} and is waiting for operator input"
-                    f"{artifact_phrase}; keep the session open, satisfy the pending prompt, then resume."
+                    f"{recovery_phrase}{artifact_phrase}; keep the session open, satisfy the pending prompt, then resume."
                 )
             if agent_record.status == "completed":
                 if agent_record.stage == "review" and meta.status is RunStatus.passed:
                     return "RepoPrompt managed-agent metadata persisted cleanly across implement, review, and resume."
                 return (
-                    f"RepoPrompt managed-agent completed the {stage_label} stage"
+                    f"RepoPrompt managed-agent completed the {stage_label} stage{recovery_phrase}"
                     f"{artifact_phrase}; aiwf recorded the session log and normalized artifacts."
                 )
             if agent_record.status == "timeout":

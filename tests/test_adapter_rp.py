@@ -162,7 +162,12 @@ def test_rp_agent_adapter_manual_bridge_seeding_writes_artifact_and_keeps_manual
     assert result.metadata["bridge_seeding_status"] == "seeded"
     assert seeding_artifact["status"] == "seeded"
     assert seeding_artifact["selected_artifacts"] == ["context-pack.md", "exec-plan.md"]
-    assert seeding_artifact["attempted_tools"] == ["manage_selection", "workspace_context"]
+    assert seeding_artifact["attempted_tools"] == [
+        "bind_context",
+        "manage_selection",
+        "manage_workspaces",
+        "workspace_context",
+    ]
     assert seeding_artifact["selected_paths"] == [".ai/runs/test-run/context-pack.md", ".ai/runs/test-run/exec-plan.md"]
     assert "bridge_seeding_artifact: rp-bridge-seeding.json" in prompt_text
     assert "bridge_seeding_status: seeded" in prompt_text
@@ -247,6 +252,43 @@ def test_rp_agent_adapter_managed_agent_execute_running_snapshot_blocks_with_res
     assert "waiting for operator input" in result.summary.lower()
     assert agent_log["sessions"][-1]["status"] == "waiting_for_input"
     assert (run_dir / "rp-agent-implement-response.md").exists() is False
+
+
+def test_rp_agent_adapter_managed_agent_resume_reuses_existing_session_and_persists_recovery_metadata(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(
+        mode="managed-agent",
+        workspace="workspace-alpha",
+        tab="implement-tab",
+        export_transcript=True,
+    )
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-resume-complete")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    blocked = adapter.execute(task, plan, run_dir)
+    resumed = adapter.execute(task, plan, run_dir)
+
+    assert blocked.status is RunStatus.blocked
+    assert resumed.status is RunStatus.passed
+    start_count = int((tmp_path / "managed-resume-complete-start-count.txt").read_text(encoding="utf-8"))
+    assert start_count == 1
+
+    assert bridge_config.resolved is not None
+    assert bridge_config.resolved.resolved_workspace_id == "workspace-1"
+    assert bridge_config.resolved.resolved_tab_id == "tab-1"
+    assert bridge_config.resolved.resolved_context_id == "ctx-456"
+
+    agent_log = json.loads((run_dir / "rp-bridge-agent-log.json").read_text(encoding="utf-8"))
+    implement_sessions = [session for session in agent_log["sessions"] if session["stage"] == "implement"]
+    assert [session["status"] for session in implement_sessions] == ["waiting_for_input", "completed"]
+    assert implement_sessions[-1]["recovery"] == "resumed"
+    assert implement_sessions[-1]["session_id"] == "implement-session-123"
+    assert implement_sessions[-1]["transcript_artifact"] == "rp-bridge-agent-implement-transcript.json"
+    assert implement_sessions[-1]["handoff_artifact"] == "rp-bridge-agent-implement-handoff.xml"
+    assert (run_dir / "rp-bridge-agent-implement-transcript.json").exists()
+    assert (run_dir / "rp-bridge-agent-implement-handoff.xml").exists()
 
 
 def test_rp_agent_adapter_managed_agent_transport_unavailable_maps_to_adapter_unavailable(tmp_path: Path) -> None:
@@ -637,8 +679,10 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             f"#!{sys.executable}\n"
             "import json\n"
             "import sys\n"
+            "from pathlib import Path\n"
             "\n"
             f"MODE = {mode!r}\n"
+            f"STATE_DIR = Path({str(tmp_path)!r})\n"
             "\n"
             "def _tool_and_payload(argv):\n"
             "    if '-c' not in argv:\n"
@@ -660,7 +704,7 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    raise SystemExit(0)\n"
             "\n"
             "if '--tools-schema' in sys.argv:\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces'}, {'name': 'bind_context'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run'}, {'name': 'agent_manage'}, {'name': 'read_file'}, {'name': 'file_search'}]}))\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces', 'inputSchema': {'properties': {'action': {'enum': ['list']}}}}, {'name': 'bind_context', 'inputSchema': {'properties': {'op': {'enum': ['list', 'status', 'bind']}}}}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run', 'inputSchema': {'properties': {'op': {'enum': ['start', 'poll', 'wait', 'cancel']}}}}, {'name': 'agent_manage', 'inputSchema': {'properties': {'op': {'enum': ['get_log', 'list_sessions', 'resume_session', 'extract_handoff', 'get_transcript']}}}}, {'name': 'read_file'}, {'name': 'file_search'}]}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
@@ -668,6 +712,23 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "if tool is None:\n"
             "    sys.stderr.write('unsupported invocation\\n')\n"
             "    raise SystemExit(2)\n"
+            "\n"
+            "if tool == 'manage_workspaces':\n"
+            "    if MODE == 'managed-resume-complete' and payload.get('action') == 'list':\n"
+            "        sys.stdout.write(json.dumps({'workspaces': [{'id': 'workspace-1', 'name': 'workspace-alpha', 'repo_paths': ['/tmp/repo-alpha'], 'window_ids': [11], 'is_hidden': False}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    sys.stdout.write(json.dumps({'workspaces': []}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'bind_context':\n"
+            "    if MODE == 'managed-resume-complete':\n"
+            "        sys.stdout.write(json.dumps({'workspace': 'workspace-alpha', 'workspace_id': 'workspace-1', 'window_id': 11, 'tab': 'implement-tab', 'tab_id': 'tab-1', 'context_id': 'ctx-456', 'windows': [{'window_id': 11, 'tabs': [{'id': 'tab-1', 'name': 'implement-tab', 'context_id': 'ctx-456'}]}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    sys.stderr.write('unknown tool bind_context\\n')\n"
+            "    raise SystemExit(3)\n"
             "\n"
             "if tool == 'file_search':\n"
             "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
@@ -694,12 +755,16 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        raise SystemExit(6)\n"
             "    op = payload.get('op')\n"
             "    if op == 'start':\n"
+            "        count_path = STATE_DIR / f'{MODE}-start-count.txt'\n"
+            "        current_count = int(count_path.read_text(encoding='utf-8').strip()) if count_path.exists() else 0\n"
+            "        count_path.write_text(str(current_count + 1), encoding='utf-8')\n"
             "        status = 'started'\n"
             "        sys.stdout.write(json.dumps({'session_id': f\"{payload.get('stage')}-session-123\", 'status': status, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
             "        sys.stdout.write('\\n')\n"
             "        raise SystemExit(0)\n"
             "    if op == 'wait':\n"
             "        session_id = payload.get('session_id')\n"
+            "        state_file = STATE_DIR / f'{MODE}-{session_id}.state'\n"
             "        if MODE == 'managed-waiting':\n"
             "            status = 'waiting_for_input'\n"
             "            output = None\n"
@@ -711,6 +776,10 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "            output = None\n"
             "        elif MODE == 'managed-timeout':\n"
             "            status = 'timeout'\n"
+            "            output = None\n"
+            "        elif MODE == 'managed-resume-complete' and session_id and session_id.startswith('implement-') and not state_file.exists():\n"
+            "            state_file.write_text('waiting\\n', encoding='utf-8')\n"
+            "            status = 'waiting_for_input'\n"
             "            output = None\n"
             "        elif session_id and session_id.startswith('review-'):\n"
             "            status = 'completed'\n"
@@ -724,6 +793,22 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "\n"
             "if tool == 'agent_manage':\n"
             "    session_id = payload.get('session_id')\n"
+            "    op = payload.get('op')\n"
+            "    state_file = STATE_DIR / f'{MODE}-{session_id}.state'\n"
+            "    if MODE == 'managed-resume-complete' and op == 'resume_session':\n"
+            "        sys.stdout.write(json.dumps({'session_id': session_id, 'status': 'waiting_for_input'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if MODE == 'managed-resume-complete' and op == 'extract_handoff':\n"
+            "        output_path = payload.get('output_path')\n"
+            "        Path(output_path).write_text('<handoff />\\n', encoding='utf-8')\n"
+            "        sys.stdout.write(json.dumps({'session_id': session_id, 'status': 'completed', 'output_path': output_path, 'handoff_summary': 'handoff ready'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if MODE == 'managed-resume-complete' and op == 'get_transcript':\n"
+            "        sys.stdout.write(json.dumps({'session_id': session_id, 'status': 'completed', 'transcript': '# transcript from get_transcript\\n', 'events': [{'kind': 'agent-log'}], 'handoff_summary': 'transcript summary'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "    if MODE == 'managed-waiting':\n"
             "        status = 'waiting_for_input'\n"
             "        output = None\n"
@@ -735,6 +820,9 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        output = None\n"
             "    elif MODE == 'managed-timeout':\n"
             "        status = 'timeout'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-resume-complete' and session_id and session_id.startswith('implement-') and state_file.exists() and state_file.read_text(encoding='utf-8').strip() == 'waiting':\n"
+            "        status = 'waiting_for_input'\n"
             "        output = None\n"
             "    elif session_id and session_id.startswith('review-'):\n"
             "        status = 'completed'\n"

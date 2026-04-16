@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from aiwf.adapters import ADAPTER_SPECS
-from aiwf.adapters.rp_cli_bridge import RpBridgeProbeResult, RpCliBridgeClient
+from aiwf.adapters.rp_cli_bridge import RpBridgeProbeResult, RpCliBridgeClient, RpToolInfo
 from aiwf.adapters.base import HostContract
 from aiwf.loader import load_gate_set, load_policy, load_runbook
 
@@ -410,6 +410,41 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
             if probe_result.available:
                 tools_detected = [tool.name for tool in probe_result.tools]
                 tool_detail = ", ".join(tools_detected) if tools_detected else "no tools reported"
+                readiness_hints: list[str] = []
+                workspace_hint = ""
+                if _probe_has_operation(probe_result, tool_name="manage_workspaces", operation="list"):
+                    workspace_result = RpCliBridgeClient((resolved,), timeout_seconds=5).manage_workspaces_list()
+                    if workspace_result.ok:
+                        workspace_hint = (
+                            f" Workspace inventory probe succeeded with {len(workspace_result.workspaces)} visible workspaces."
+                        )
+                        readiness_hints.append("workspace-resolution=ready")
+                    else:
+                        workspace_hint = (
+                            " Workspace inventory probe was advertised but did not return a usable list."
+                        )
+                        readiness_hints.append("workspace-resolution=degraded")
+                elif any(tool.name == "manage_workspaces" for tool in probe_result.tools):
+                    readiness_hints.append("workspace-resolution=advertised")
+
+                if _probe_has_operation(probe_result, tool_name="bind_context", operation="bind"):
+                    readiness_hints.append("bind-context=ready")
+                elif any(tool.name == "bind_context" for tool in probe_result.tools):
+                    readiness_hints.append("bind-context=advertised")
+
+                if _probe_has_operation(probe_result, tool_name="agent_manage", operation="resume_session"):
+                    readiness_hints.append("session-recovery=ready")
+                elif any(tool.name == "agent_manage" for tool in probe_result.tools):
+                    readiness_hints.append("session-recovery=advertised")
+
+                if _probe_has_operation(probe_result, tool_name="agent_manage", operation="get_transcript"):
+                    readiness_hints.append("transcript=ready")
+                elif _probe_has_operation(probe_result, tool_name="agent_manage", operation="get_log"):
+                    readiness_hints.append("transcript=fallback:get_log")
+                elif any(tool.name == "agent_manage" for tool in probe_result.tools):
+                    readiness_hints.append("transcript=advertised")
+
+                readiness_suffix = f" Readiness hints: {', '.join(readiness_hints)}." if readiness_hints else ""
                 return DoctorCheck(
                     status="ok",
                     category="tool",
@@ -428,7 +463,10 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                                 "read-only reconnaissance rather than provider certification"
                             ),
                         )
-                        + ". Manual handoff remains the stable supported path."
+                        + "."
+                        + workspace_hint
+                        + readiness_suffix
+                        + " Manual handoff remains the stable supported path."
                     ),
                     path=resolved,
                     bridge_tools_detected=tools_detected,
@@ -468,6 +506,39 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
 def _probe_bridge_runtime(command_path: str) -> RpBridgeProbeResult:
     client = RpCliBridgeClient((command_path,), timeout_seconds=5)
     return client.probe_available()
+
+
+def _probe_has_operation(probe_result: RpBridgeProbeResult, *, tool_name: str, operation: str) -> bool:
+    for tool in probe_result.tools:
+        if tool.name != tool_name:
+            continue
+        operations = _tool_operations(tool)
+        if not operations:
+            return tool_name in {"manage_workspaces", "bind_context", "agent_manage"}
+        return operation in operations
+    return False
+
+
+def _tool_operations(tool: RpToolInfo) -> set[str]:
+    metadata = tool.metadata if isinstance(tool.metadata, dict) else {}
+    input_schema = metadata.get("inputSchema")
+    if not isinstance(input_schema, dict):
+        return set()
+    properties = input_schema.get("properties")
+    if not isinstance(properties, dict):
+        return set()
+    operations: set[str] = set()
+    for key in ("op", "action"):
+        raw_property = properties.get(key)
+        if not isinstance(raw_property, dict):
+            continue
+        raw_enum = raw_property.get("enum")
+        if not isinstance(raw_enum, list):
+            continue
+        for value in raw_enum:
+            if isinstance(value, str) and value.strip():
+                operations.add(value.strip())
+    return operations
 
 
 def _probe_native_runtime_protocol(command_path: str) -> tuple[bool, int | None]:

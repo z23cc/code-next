@@ -18,7 +18,9 @@ from aiwf.adapters.rp_cli_bridge import RpCliBridgeClient
 from aiwf.exceptions import AdapterError, ErrorCode
 from aiwf.models import (
     RpBridgeAgentLogArtifact,
+    RpBridgeAgentTranscriptArtifact,
     RpBridgeManagedAgentRecord,
+    RpBridgeResolvedIdentity,
     RpBridgeRunConfig,
     RpBridgeSeedingArtifact,
     RpBridgeToolCall,
@@ -670,6 +672,16 @@ class RpAgentAdapter:
             f"- context_id: {bridge_config.context_id or '(unset)'}",
             f"- agent_role: {bridge_config.agent_role or '(unset)'}",
         ]
+        if bridge_config.resolved is not None:
+            resolved = bridge_config.resolved
+            lines.extend(
+                [
+                    f"- resolved_workspace_id: {resolved.resolved_workspace_id or '(unresolved)'}",
+                    f"- resolved_window_id: {resolved.resolved_window_id or '(unresolved)'}",
+                    f"- resolved_tab_id: {resolved.resolved_tab_id or '(unresolved)'}",
+                    f"- resolved_context_id: {resolved.resolved_context_id or '(unresolved)'}",
+                ]
+            )
         if stage == "implement" and bridge_seeding is not None:
             lines.extend(
                 [
@@ -721,6 +733,68 @@ class RpAgentAdapter:
             return None
         return bridge_config.model_dump(mode="json", exclude_none=True)
 
+    def _resolved_bridge_targets(self, bridge_config: RpBridgeRunConfig) -> tuple[str | None, str | None, str | None]:
+        resolved = bridge_config.resolved
+        workspace = resolved.resolved_workspace_name if resolved is not None else None
+        tab = resolved.resolved_tab_name if resolved is not None else None
+        context_id = resolved.resolved_context_id if resolved is not None else None
+        return workspace or bridge_config.workspace, tab or bridge_config.tab, context_id or bridge_config.context_id
+
+    def _update_bridge_resolved_identity(
+        self,
+        bridge_config: RpBridgeRunConfig,
+        *,
+        workspace_id: str | None = None,
+        workspace_name: str | None = None,
+        window_id: int | None = None,
+        tab_id: str | None = None,
+        tab_name: str | None = None,
+        context_id: str | None = None,
+    ) -> None:
+        resolved = bridge_config.resolved.model_copy(deep=True) if bridge_config.resolved is not None else RpBridgeResolvedIdentity()
+        if workspace_id:
+            resolved.resolved_workspace_id = workspace_id
+        if workspace_name:
+            resolved.resolved_workspace_name = workspace_name
+        if window_id is not None:
+            resolved.resolved_window_id = window_id
+        if tab_id:
+            resolved.resolved_tab_id = tab_id
+        if tab_name:
+            resolved.resolved_tab_name = tab_name
+        if context_id:
+            resolved.resolved_context_id = context_id
+        bridge_config.resolved = resolved
+
+    def _extract_tab_binding(
+        self,
+        windows: Sequence[dict[str, object]],
+        *,
+        tab_hint: str | None,
+    ) -> tuple[str | None, str | None, str | None, int | None]:
+        normalized_tab_hint = tab_hint.strip().casefold() if isinstance(tab_hint, str) and tab_hint.strip() else None
+        for window in windows:
+            window_id = self._json_int(window, "window_id") or self._json_int(window, "id")
+            for tabs_key in ("tabs", "compose_tabs"):
+                raw_tabs = window.get(tabs_key)
+                if not isinstance(raw_tabs, list):
+                    continue
+                for raw_tab in raw_tabs:
+                    if not isinstance(raw_tab, dict):
+                        continue
+                    tab_id = self._json_string(raw_tab, "id") or self._json_string(raw_tab, "tab_id")
+                    tab_name = self._json_string(raw_tab, "name") or self._json_string(raw_tab, "tab")
+                    context_id = self._json_string(raw_tab, "context_id")
+                    if normalized_tab_hint is None:
+                        if context_id:
+                            return tab_id, tab_name, context_id, window_id
+                        continue
+                    if tab_id and tab_id.casefold() == normalized_tab_hint:
+                        return tab_id, tab_name, context_id, window_id
+                    if tab_name and tab_name.casefold() == normalized_tab_hint:
+                        return tab_id, tab_name, context_id, window_id
+        return None, None, None, None
+
     def _execute_managed_agent(self, task: TaskSpec, plan: str, run_dir: Path) -> StageResult:
         bridge_config = self._require_bridge_config_mode("managed-agent")
         bridge_seeding = self._seed_bridge_context(run_dir)
@@ -743,6 +817,10 @@ class RpAgentAdapter:
             agent_role=bridge_config.agent_role,
         )
         outputs.append("rp-bridge-agent-log.json")
+        if record.transcript_artifact is not None:
+            outputs.append(record.transcript_artifact)
+        if record.handoff_artifact is not None:
+            outputs.append(record.handoff_artifact)
         if record.status == "waiting_for_input":
             metadata: dict[str, object] = {
                 "mode": "manual",
@@ -752,6 +830,9 @@ class RpAgentAdapter:
                     "status": record.status,
                     "session_id": record.session_id,
                     "log_artifact": "rp-bridge-agent-log.json",
+                    "recovery": record.recovery,
+                    "transcript_artifact": record.transcript_artifact,
+                    "handoff_artifact": record.handoff_artifact,
                 },
                 "blocked_resume_stage": "plan",
                 "agent_log_artifact": "rp-bridge-agent-log.json",
@@ -786,6 +867,9 @@ class RpAgentAdapter:
                 "status": record.status,
                 "session_id": record.session_id,
                 "log_artifact": "rp-bridge-agent-log.json",
+                "recovery": record.recovery,
+                "transcript_artifact": record.transcript_artifact,
+                "handoff_artifact": record.handoff_artifact,
             },
             "agent_log_artifact": "rp-bridge-agent-log.json",
         }
@@ -842,6 +926,9 @@ class RpAgentAdapter:
                 "status": record.status,
                 "session_id": record.session_id,
                 "log_artifact": "rp-bridge-agent-log.json",
+                "recovery": record.recovery,
+                "transcript_artifact": record.transcript_artifact,
+                "handoff_artifact": record.handoff_artifact,
             },
         }
         if record.status == "waiting_for_input":
@@ -902,15 +989,49 @@ class RpAgentAdapter:
         calls: list[RpBridgeToolCall] = []
         waiting_record = self._latest_managed_agent_record(run_dir, stage=stage, status="waiting_for_input")
         session_id = waiting_record.session_id if waiting_record is not None else None
-        resolved_workspace = workspace
-        resolved_tab = tab
-        resolved_context_id = context_id
+        resolved_workspace, resolved_tab, resolved_context_id = self._resolved_bridge_targets(bridge_config)
+        if resolved_workspace is None:
+            resolved_workspace = workspace
+        if resolved_tab is None:
+            resolved_tab = tab
+        if resolved_context_id is None:
+            resolved_context_id = context_id
+        recovery: str = "initial"
+
+        if session_id is not None:
+            recovery = "resumed"
+            resume_result = client.agent_manage_resume_session(session_id)
+            calls.append(
+                self._bridge_call(
+                    step="agent_manage_resume_session",
+                    tool="agent_manage.resume_session",
+                    ok=resume_result.ok,
+                    command=resume_result.command,
+                    summary=(
+                        f"Resumed RepoPrompt managed-agent session {resume_result.session_id or session_id}"
+                        if resume_result.ok
+                        else self._bridge_error_summary(
+                            resume_result.error,
+                            fallback="RepoPrompt managed-agent session recovery surface was unavailable",
+                        )
+                    ),
+                    error=resume_result.error,
+                    detail={
+                        "session_id": resume_result.session_id or session_id,
+                        "status": resume_result.status,
+                    },
+                )
+            )
+            if resume_result.ok and resume_result.session_id:
+                session_id = resume_result.session_id
+
+        start_result = None
         if session_id is None:
             start_result = client.agent_run_start(
                 prompt,
-                workspace=workspace,
-                tab=tab,
-                context_id=context_id,
+                workspace=resolved_workspace,
+                tab=resolved_tab,
+                context_id=resolved_context_id,
                 agent_role=agent_role,
                 stage=stage,
             )
@@ -943,11 +1064,12 @@ class RpAgentAdapter:
                     stage=stage,
                     session_id=start_result.session_id,
                     status="failed",
-                    workspace=workspace,
-                    tab=tab,
-                    context_id=context_id,
+                    workspace=resolved_workspace,
+                    tab=resolved_tab,
+                    context_id=resolved_context_id,
                     agent_role=agent_role,
                     prompt_artifact=prompt_artifact,
+                    recovery=recovery,
                     summary=failure_summary,
                     log=start_result.raw_payload or {},
                     calls=calls,
@@ -963,33 +1085,90 @@ class RpAgentAdapter:
                     error_code=ErrorCode.ADAPTER_UNAVAILABLE if start_transport_unavailable else ErrorCode.BRIDGE_AGENT_FAILURE,
                 )
             session_id = start_result.session_id
-            resolved_workspace = start_result.workspace or workspace
-            resolved_tab = start_result.tab or tab
-            resolved_context_id = start_result.context_id or context_id
-
-        wait_result = client.agent_run_wait(
-            session_id,
-            workspace=resolved_workspace,
-            tab=resolved_tab,
-            context_id=resolved_context_id,
-        )
-        calls.append(
-            self._bridge_call(
-                step="agent_run_wait",
-                tool="agent_run.wait",
-                ok=wait_result.ok,
-                command=wait_result.command,
-                summary=(
-                    f"RepoPrompt managed-agent session {session_id} reached status {wait_result.status}"
-                    if wait_result.ok and wait_result.status
-                    else self._bridge_error_summary(wait_result.error, fallback="RepoPrompt managed-agent wait failed")
-                ),
-                error=wait_result.error,
-                detail={"session_id": session_id, "status": wait_result.status},
+            resolved_workspace = start_result.workspace or resolved_workspace
+            resolved_tab = start_result.tab or resolved_tab
+            resolved_context_id = start_result.context_id or resolved_context_id
+            self._update_bridge_resolved_identity(
+                bridge_config,
+                workspace_name=resolved_workspace,
+                tab_name=resolved_tab,
+                context_id=resolved_context_id,
             )
-        )
+
+        snapshot_result = None
+        if recovery == "resumed" and session_id is not None:
+            poll_result = client.agent_run_poll(
+                session_id,
+                workspace=resolved_workspace,
+                tab=resolved_tab,
+                context_id=resolved_context_id,
+            )
+            calls.append(
+                self._bridge_call(
+                    step="agent_run_poll",
+                    tool="agent_run.poll",
+                    ok=poll_result.ok,
+                    command=poll_result.command,
+                    summary=(
+                        f"Polled RepoPrompt managed-agent session {session_id} with status {poll_result.status}"
+                        if poll_result.ok and poll_result.status
+                        else self._bridge_error_summary(poll_result.error, fallback="RepoPrompt managed-agent poll failed")
+                    ),
+                    error=poll_result.error,
+                    detail={"session_id": session_id, "status": poll_result.status},
+                )
+            )
+            if poll_result.ok:
+                resolved_workspace = poll_result.workspace or resolved_workspace
+                resolved_tab = poll_result.tab or resolved_tab
+                resolved_context_id = poll_result.context_id or resolved_context_id
+                self._update_bridge_resolved_identity(
+                    bridge_config,
+                    workspace_name=resolved_workspace,
+                    tab_name=resolved_tab,
+                    context_id=resolved_context_id,
+                )
+                snapshot_result = poll_result
+
+        wait_result = snapshot_result
+        wait_attempt = 0
+        while wait_result is None or wait_result.status in {"running", "started"}:
+            wait_result = client.agent_run_wait(
+                session_id,
+                workspace=resolved_workspace,
+                tab=resolved_tab,
+                context_id=resolved_context_id,
+            )
+            calls.append(
+                self._bridge_call(
+                    step="agent_run_wait" if wait_attempt == 0 else f"agent_run_wait_retry_{wait_attempt}",
+                    tool="agent_run.wait",
+                    ok=wait_result.ok,
+                    command=wait_result.command,
+                    summary=(
+                        f"RepoPrompt managed-agent session {session_id} reached status {wait_result.status}"
+                        if wait_result.ok and wait_result.status
+                        else self._bridge_error_summary(wait_result.error, fallback="RepoPrompt managed-agent wait failed")
+                    ),
+                    error=wait_result.error,
+                    detail={"session_id": session_id, "status": wait_result.status, "attempt": wait_attempt},
+                )
+            )
+            if not wait_result.ok or wait_result.status not in {"running", "started"} or wait_attempt >= 1:
+                break
+            wait_attempt += 1
+        if wait_result.ok:
+            self._update_bridge_resolved_identity(
+                bridge_config,
+                workspace_name=wait_result.workspace or resolved_workspace,
+                tab_name=wait_result.tab or resolved_tab,
+                context_id=wait_result.context_id or resolved_context_id,
+            )
+
         log_payload: dict[str, Any] = {}
         log_output: str | None = None
+        transcript_artifact: str | None = None
+        handoff_artifact: str | None = None
         if session_id is not None:
             log_result = client.agent_log(
                 session_id,
@@ -1000,7 +1179,7 @@ class RpAgentAdapter:
             calls.append(
                 self._bridge_call(
                     step="agent_log",
-                    tool="agent_manage.log",
+                    tool="agent_manage.get_log",
                     ok=log_result.ok,
                     command=log_result.command,
                     summary=(
@@ -1015,6 +1194,34 @@ class RpAgentAdapter:
             if log_result.ok:
                 log_payload = log_result.log
                 log_output = log_result.output
+            if bridge_config.export_transcript:
+                transcript_artifact, handoff_artifact = self._capture_managed_agent_session_artifacts(
+                    run_dir,
+                    stage=stage,
+                    session_id=session_id,
+                    log_result=log_result,
+                    client=client,
+                    calls=calls,
+                )
+
+        if wait_result.ok:
+            resolved_workspace = wait_result.workspace or resolved_workspace
+            resolved_tab = wait_result.tab or resolved_tab
+            resolved_context_id = wait_result.context_id or resolved_context_id
+            self._update_bridge_resolved_identity(
+                bridge_config,
+                workspace_name=resolved_workspace,
+                tab_name=resolved_tab,
+                context_id=resolved_context_id,
+            )
+            resolved_workspace, resolved_tab, resolved_context_id = self._refresh_bridge_binding_identity(
+                client,
+                bridge_config,
+                calls,
+                workspace=resolved_workspace,
+                tab=resolved_tab,
+                context_id=resolved_context_id,
+            )
 
         if not wait_result.ok:
             timeout = wait_result.error is not None and wait_result.error.code == "TIMEOUT"
@@ -1029,6 +1236,9 @@ class RpAgentAdapter:
                 context_id=resolved_context_id,
                 agent_role=agent_role,
                 prompt_artifact=prompt_artifact,
+                transcript_artifact=transcript_artifact,
+                handoff_artifact=handoff_artifact,
+                recovery=recovery,
                 summary=(
                     "RepoPrompt managed-agent session timed out while waiting for a terminal state."
                     if timeout
@@ -1071,6 +1281,9 @@ class RpAgentAdapter:
                 agent_role=agent_role,
                 prompt_artifact=prompt_artifact,
                 response_artifact=response_artifact,
+                transcript_artifact=transcript_artifact,
+                handoff_artifact=handoff_artifact,
+                recovery=recovery,
                 summary="RepoPrompt managed-agent session completed successfully.",
                 log=log_payload or (wait_result.raw_payload or {}),
                 calls=calls,
@@ -1093,6 +1306,9 @@ class RpAgentAdapter:
                 context_id=wait_result.context_id or resolved_context_id,
                 agent_role=agent_role,
                 prompt_artifact=prompt_artifact,
+                transcript_artifact=transcript_artifact,
+                handoff_artifact=handoff_artifact,
+                recovery=recovery,
                 summary=summary,
                 log=log_payload or (wait_result.raw_payload or {}),
                 calls=calls,
@@ -1110,6 +1326,9 @@ class RpAgentAdapter:
                 context_id=wait_result.context_id or resolved_context_id,
                 agent_role=agent_role,
                 prompt_artifact=prompt_artifact,
+                transcript_artifact=transcript_artifact,
+                handoff_artifact=handoff_artifact,
+                recovery=recovery,
                 summary="RepoPrompt managed-agent session reported timeout.",
                 log=log_payload or (wait_result.raw_payload or {}),
                 calls=calls,
@@ -1132,6 +1351,9 @@ class RpAgentAdapter:
                 context_id=wait_result.context_id or resolved_context_id,
                 agent_role=agent_role,
                 prompt_artifact=prompt_artifact,
+                transcript_artifact=transcript_artifact,
+                handoff_artifact=handoff_artifact,
+                recovery=recovery,
                 summary="RepoPrompt managed-agent session was cancelled.",
                 log=log_payload or (wait_result.raw_payload or {}),
                 calls=calls,
@@ -1153,6 +1375,9 @@ class RpAgentAdapter:
             context_id=wait_result.context_id or resolved_context_id,
             agent_role=agent_role,
             prompt_artifact=prompt_artifact,
+            transcript_artifact=transcript_artifact,
+            handoff_artifact=handoff_artifact,
+            recovery=recovery,
             summary=f"RepoPrompt managed-agent session ended with status {terminal_status}.",
             log=log_payload or (wait_result.raw_payload or {}),
             calls=calls,
@@ -1215,6 +1440,314 @@ class RpAgentAdapter:
             json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+
+    def _capture_managed_agent_session_artifacts(
+        self,
+        run_dir: Path,
+        *,
+        stage: str,
+        session_id: str,
+        log_result: object,
+        client: RpCliBridgeClient,
+        calls: list[RpBridgeToolCall],
+    ) -> tuple[str | None, str | None]:
+        transcript_artifact = f"rp-bridge-agent-{stage}-transcript.json"
+        transcript_markdown_artifact = f"rp-bridge-agent-{stage}-transcript.md"
+        handoff_artifact = f"rp-bridge-agent-{stage}-handoff.xml"
+
+        transcript_result = client.agent_manage_transcript(session_id)
+        transcript_tool = (
+            "agent_manage.get_transcript"
+            if transcript_result.source_operation == "get_transcript"
+            else "agent_manage.get_log"
+        )
+        calls.append(
+            self._bridge_call(
+                step="agent_manage_transcript",
+                tool=transcript_tool,
+                ok=transcript_result.ok,
+                command=transcript_result.command,
+                summary=(
+                    f"Captured RepoPrompt managed-agent transcript for session {session_id}"
+                    if transcript_result.ok
+                    else self._bridge_error_summary(
+                        transcript_result.error,
+                        fallback="RepoPrompt managed-agent transcript export was unavailable",
+                    )
+                ),
+                error=transcript_result.error,
+                detail={
+                    "session_id": session_id,
+                    "status": transcript_result.status,
+                    "source_operation": transcript_result.source_operation,
+                },
+            )
+        )
+
+        transcript_text = transcript_result.transcript if transcript_result.ok else getattr(log_result, "output", None)
+        transcript_events: list[dict[str, object]] = []
+        handoff_summary = transcript_result.handoff_summary if transcript_result.ok else None
+        if transcript_result.ok:
+            transcript_events = [event for event in transcript_result.events if isinstance(event, dict)]
+        elif getattr(log_result, "ok", False):
+            log_payload = getattr(log_result, "log", {})
+            raw_events = log_payload.get("events") if isinstance(log_payload, dict) else None
+            transcript_events = [event for event in raw_events if isinstance(event, dict)] if isinstance(raw_events, list) else []
+
+        if transcript_text or transcript_events:
+            transcript_payload = RpBridgeAgentTranscriptArtifact(
+                session_id=session_id,
+                transcript=transcript_text,
+                events=transcript_events,
+                handoff_summary=handoff_summary,
+            )
+            (run_dir / transcript_artifact).write_text(
+                json.dumps(transcript_payload.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            if transcript_text:
+                (run_dir / transcript_markdown_artifact).write_text(transcript_text, encoding="utf-8")
+        else:
+            transcript_artifact = None
+
+        handoff_result = client.agent_manage_extract_handoff(
+            session_id,
+            output_path=str((run_dir / handoff_artifact).resolve()),
+            inline=False,
+        )
+        calls.append(
+            self._bridge_call(
+                step="agent_manage_extract_handoff",
+                tool="agent_manage.extract_handoff",
+                ok=handoff_result.ok,
+                command=handoff_result.command,
+                summary=(
+                    f"Exported RepoPrompt managed-agent handoff for session {session_id}"
+                    if handoff_result.ok
+                    else self._bridge_error_summary(
+                        handoff_result.error,
+                        fallback="RepoPrompt managed-agent handoff export was unavailable",
+                    )
+                ),
+                error=handoff_result.error,
+                detail={
+                    "session_id": session_id,
+                    "output_path": handoff_result.output_path,
+                    "status": handoff_result.status,
+                },
+            )
+        )
+        if not handoff_result.ok:
+            return transcript_artifact, None
+        handoff_path = run_dir / handoff_artifact
+        if handoff_result.handoff_xml and not handoff_path.exists():
+            handoff_path.write_text(handoff_result.handoff_xml, encoding="utf-8")
+        if transcript_artifact is not None:
+            transcript_path = run_dir / transcript_artifact
+            try:
+                payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+                transcript_payload = RpBridgeAgentTranscriptArtifact.model_validate(payload)
+                transcript_payload.handoff_summary = handoff_result.handoff_summary or (
+                    f"Handoff exported to {handoff_result.output_path or handoff_artifact}"
+                )
+                transcript_path.write_text(
+                    json.dumps(transcript_payload.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass
+        return transcript_artifact, handoff_artifact if handoff_path.exists() else None
+
+    def _refresh_bridge_binding_identity(
+        self,
+        client: RpCliBridgeClient,
+        bridge_config: RpBridgeRunConfig,
+        calls: list[RpBridgeToolCall],
+        *,
+        workspace: str | None,
+        tab: str | None,
+        context_id: str | None,
+    ) -> tuple[str | None, str | None, str | None]:
+        status_result = client.bind_context_status()
+        calls.append(
+            self._bridge_call(
+                step="bind_context_status",
+                tool="bind_context.status",
+                ok=status_result.ok,
+                command=status_result.command,
+                summary=(
+                    "Captured bind_context status snapshot for managed-agent recovery"
+                    if status_result.ok
+                    else self._bridge_error_summary(
+                        status_result.error,
+                        fallback="RepoPrompt bind_context status probe was unavailable",
+                    )
+                ),
+                error=status_result.error,
+                detail={
+                    "workspace": status_result.workspace,
+                    "workspace_id": status_result.workspace_id,
+                    "window_id": status_result.window_id,
+                    "tab": status_result.tab,
+                    "tab_id": status_result.tab_id,
+                    "context_id": status_result.context_id,
+                },
+            )
+        )
+        if not status_result.ok:
+            return workspace, tab, context_id
+        resolved_workspace = status_result.workspace or workspace
+        resolved_tab = status_result.tab or tab
+        resolved_context_id = status_result.context_id or context_id
+        self._update_bridge_resolved_identity(
+            bridge_config,
+            workspace_id=status_result.workspace_id,
+            workspace_name=resolved_workspace,
+            window_id=status_result.window_id,
+            tab_id=status_result.tab_id,
+            tab_name=resolved_tab,
+            context_id=resolved_context_id,
+        )
+        return resolved_workspace, resolved_tab, resolved_context_id
+
+    def _resolve_bridge_identity(
+        self,
+        *,
+        client: RpCliBridgeClient,
+        bridge_config: RpBridgeRunConfig,
+        calls: list[RpBridgeToolCall],
+        attempted_tools: list[str],
+    ) -> tuple[str | None, str | None, str | None]:
+        resolved_workspace, resolved_tab, resolved_context_id = self._resolved_bridge_targets(bridge_config)
+        resolved_window_id = bridge_config.resolved.resolved_window_id if bridge_config.resolved is not None else None
+        repo_working_dir = str(self.repo_root.resolve())
+
+        if bridge_config.workspace:
+            attempted_tools.append("manage_workspaces")
+            workspace_result = client.manage_workspaces_resolve(bridge_config.workspace)
+            calls.append(
+                self._bridge_call(
+                    step="manage_workspaces_resolve",
+                    tool="manage_workspaces.list",
+                    ok=workspace_result.ok,
+                    command=workspace_result.command,
+                    summary=(
+                        f"Resolved RepoPrompt workspace {workspace_result.workspace or bridge_config.workspace}"
+                        if workspace_result.ok
+                        else self._bridge_error_summary(
+                            workspace_result.error,
+                            fallback="RepoPrompt workspace resolution was skipped",
+                        )
+                    ),
+                    error=workspace_result.error,
+                    detail={
+                        "workspace": workspace_result.workspace,
+                        "workspace_id": workspace_result.workspace_id,
+                        "window_ids": list(workspace_result.window_ids),
+                        "matched_by": workspace_result.matched_by,
+                    },
+                )
+            )
+            if workspace_result.ok:
+                resolved_workspace = workspace_result.workspace or resolved_workspace
+                resolved_window_id = workspace_result.window_ids[0] if workspace_result.window_ids else resolved_window_id
+                self._update_bridge_resolved_identity(
+                    bridge_config,
+                    workspace_id=workspace_result.workspace_id,
+                    workspace_name=workspace_result.workspace or bridge_config.workspace,
+                    window_id=resolved_window_id,
+                )
+
+        bind_list_result = None
+        if bridge_config.tab and resolved_window_id is not None:
+            attempted_tools.append("bind_context")
+            bind_list_result = client.bind_context_list(window_id=resolved_window_id)
+            calls.append(
+                self._bridge_call(
+                    step="bind_context_list",
+                    tool="bind_context.list",
+                    ok=bind_list_result.ok,
+                    command=bind_list_result.command,
+                    summary=(
+                        f"Loaded bind_context window inventory for window {resolved_window_id}"
+                        if bind_list_result.ok
+                        else self._bridge_error_summary(
+                            bind_list_result.error,
+                            fallback="RepoPrompt bind_context inventory was unavailable",
+                        )
+                    ),
+                    error=bind_list_result.error,
+                    detail={"window_id": resolved_window_id, "tab": bridge_config.tab},
+                )
+            )
+            if bind_list_result.ok:
+                tab_id, tab_name, matched_context_id, matched_window_id = self._extract_tab_binding(
+                    bind_list_result.windows,
+                    tab_hint=bridge_config.tab,
+                )
+                if matched_window_id is not None:
+                    resolved_window_id = matched_window_id
+                if tab_name:
+                    resolved_tab = tab_name
+                if matched_context_id:
+                    resolved_context_id = matched_context_id
+                self._update_bridge_resolved_identity(
+                    bridge_config,
+                    window_id=resolved_window_id,
+                    tab_id=tab_id,
+                    tab_name=tab_name,
+                    context_id=matched_context_id,
+                )
+
+        if resolved_context_id:
+            attempted_tools.append("bind_context")
+            bind_result = client.bind_context_bind(context_id=resolved_context_id)
+        else:
+            attempted_tools.append("bind_context")
+            bind_result = client.bind_context_bind(
+                working_dirs=[repo_working_dir],
+                window_id=resolved_window_id,
+            )
+        calls.append(
+            self._bridge_call(
+                step="bind_context_bind",
+                tool="bind_context.bind",
+                ok=bind_result.ok,
+                command=bind_result.command,
+                summary=(
+                    f"Bound RepoPrompt context {bind_result.context_id or resolved_context_id or '(window affinity)'}"
+                    if bind_result.ok
+                    else self._bridge_error_summary(
+                        bind_result.error,
+                        fallback="RepoPrompt context binding was unavailable",
+                    )
+                ),
+                error=bind_result.error,
+                detail={
+                    "workspace": bind_result.workspace,
+                    "workspace_id": bind_result.workspace_id,
+                    "window_id": bind_result.window_id,
+                    "tab": bind_result.tab,
+                    "tab_id": bind_result.tab_id,
+                    "context_id": bind_result.context_id,
+                },
+            )
+        )
+        if bind_result.ok:
+            resolved_workspace = bind_result.workspace or resolved_workspace
+            resolved_tab = bind_result.tab or resolved_tab
+            resolved_context_id = bind_result.context_id or resolved_context_id
+            self._update_bridge_resolved_identity(
+                bridge_config,
+                workspace_id=bind_result.workspace_id,
+                workspace_name=bind_result.workspace or resolved_workspace,
+                window_id=bind_result.window_id or resolved_window_id,
+                tab_id=bind_result.tab_id,
+                tab_name=bind_result.tab or resolved_tab,
+                context_id=bind_result.context_id or resolved_context_id,
+            )
+
+        return self._resolved_bridge_targets(bridge_config)
 
     def _seed_bridge_context(self, run_dir: Path) -> RpBridgeSeedingArtifact | None:
         bridge_config = self._active_bridge_config()
@@ -1284,9 +1817,14 @@ class RpAgentAdapter:
                 return artifact
 
             attempted_tools: list[str] = []
-            current_context_id = bridge_config.context_id
+            resolved_workspace, _, current_context_id = self._resolve_bridge_identity(
+                client=client,
+                bridge_config=bridge_config,
+                calls=calls,
+                attempted_tools=attempted_tools,
+            )
             attempted_tools.append("workspace_context")
-            context_result = client.workspace_context(bridge_config.workspace)
+            context_result = client.workspace_context(resolved_workspace)
             calls.append(
                 self._bridge_call(
                     step="workspace_context_before",
@@ -1312,7 +1850,7 @@ class RpAgentAdapter:
             attempted_tools.append("manage_selection")
             manage_result = client.manage_selection_add(
                 seed_paths,
-                workspace=bridge_config.workspace,
+                workspace=resolved_workspace,
                 tab=bridge_config.tab,
                 context_id=current_context_id,
             )
@@ -1341,7 +1879,7 @@ class RpAgentAdapter:
                 artifact = RpBridgeSeedingArtifact(
                     mode=bridge_config.mode,
                     status="failed",
-                    workspace=bridge_config.workspace,
+                    workspace=resolved_workspace or bridge_config.workspace,
                     tab=bridge_config.tab,
                     context_id=current_context_id,
                     agent_role=bridge_config.agent_role,
@@ -1359,10 +1897,16 @@ class RpAgentAdapter:
 
             final_context_id = manage_result.context_id or current_context_id
             final_selected_paths = list(manage_result.selected_paths or manage_result.added_paths or seed_paths)
+            if final_context_id:
+                self._update_bridge_resolved_identity(
+                    bridge_config,
+                    workspace_name=manage_result.workspace or resolved_workspace or bridge_config.workspace,
+                    context_id=final_context_id,
+                )
             artifact = RpBridgeSeedingArtifact(
                 mode=bridge_config.mode,
                 status="seeded",
-                workspace=manage_result.workspace or bridge_config.workspace,
+                workspace=manage_result.workspace or resolved_workspace or bridge_config.workspace,
                 tab=bridge_config.tab,
                 context_id=final_context_id,
                 agent_role=bridge_config.agent_role,
@@ -1662,6 +2206,10 @@ class RpAgentAdapter:
     def _json_string(self, payload: dict[str, Any], key: str) -> str | None:
         value = payload.get(key)
         return value.strip() if isinstance(value, str) and value.strip() else None
+
+    def _json_int(self, payload: dict[str, Any], key: str) -> int | None:
+        value = payload.get(key)
+        return value if isinstance(value, int) else None
 
 
 class _GitIgnoreMatcher:

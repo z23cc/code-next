@@ -9,7 +9,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from aiwf.cli import app
-from aiwf.adapters.rp_cli_bridge import RpBridgeError, RpBridgeProbeResult, RpToolInfo
+from aiwf.adapters.rp_cli_bridge import RpBridgeError, RpBridgeProbeResult, RpToolInfo, RpWorkspaceListResult
 from aiwf.doctor import render_doctor_report, run_doctor
 
 
@@ -207,6 +207,64 @@ def test_run_doctor_reports_rp_bridge_candidate_when_runtime_found(tmp_path: Pat
     assert bridge_check.protocol_version is None
     assert bridge_check.bridge_tools_detected == ["file_search", "manage_selection"]
     assert bridge_check.runtime_detection == "non-stub-like"
+
+
+def test_run_doctor_reports_bridge_readiness_hints_from_tool_operations(tmp_path: Path, monkeypatch) -> None:
+    repo_root, ai_root = _create_workspace(tmp_path, gate_command='python -c "print(\'ok\')"')
+    _mock_which(
+        monkeypatch,
+        {
+            "python": "/usr/bin/python",
+            "uv": "/usr/bin/uv",
+            "git": "/usr/bin/git",
+            "rp-cli": "/usr/local/bin/rp-cli",
+        },
+    )
+    _mock_protocol_probe(monkeypatch, {"/usr/local/bin/rp-cli": 1})
+
+    def fake_probe(command_path: str) -> RpBridgeProbeResult:
+        assert command_path == "/usr/local/bin/rp-cli"
+        return RpBridgeProbeResult(
+            available=True,
+            command=(command_path,),
+            path=command_path,
+            tools=(
+                RpToolInfo(
+                    name="manage_workspaces",
+                    metadata={"inputSchema": {"properties": {"action": {"enum": ["list"]}}}},
+                ),
+                RpToolInfo(
+                    name="bind_context",
+                    metadata={"inputSchema": {"properties": {"op": {"enum": ["status", "bind"]}}}},
+                ),
+                RpToolInfo(
+                    name="agent_manage",
+                    metadata={
+                        "inputSchema": {
+                            "properties": {"op": {"enum": ["resume_session", "get_transcript", "extract_handoff"]}}
+                        }
+                    },
+                ),
+            ),
+            error=None,
+        )
+
+    def fake_workspace_list(self, *, include_hidden: bool = False) -> RpWorkspaceListResult:
+        del include_hidden
+        return RpWorkspaceListResult(ok=True, command=("/usr/local/bin/rp-cli",), path="/usr/local/bin/rp-cli", workspaces=())
+
+    monkeypatch.setattr("aiwf.doctor._probe_bridge_runtime", fake_probe)
+    monkeypatch.setattr("aiwf.doctor.RpCliBridgeClient.manage_workspaces_list", fake_workspace_list)
+
+    report = run_doctor(ai_root=ai_root, repo_root=repo_root)
+
+    bridge_check = next(check for check in report.checks if check.name == "rp-bridge")
+    assert bridge_check.status == "ok"
+    assert "Readiness hints:" in bridge_check.detail
+    assert "workspace-resolution=ready" in bridge_check.detail
+    assert "bind-context=ready" in bridge_check.detail
+    assert "session-recovery=ready" in bridge_check.detail
+    assert "transcript=ready" in bridge_check.detail
 
 
 def test_run_doctor_warns_when_bridge_probe_fails(tmp_path: Path, monkeypatch) -> None:

@@ -442,6 +442,7 @@ def test_cli_rp_bridge_plan_command_persists_bridge_metadata(tmp_path: Path) -> 
         "agent_role": None,
         "timeout_seconds": None,
         "export_transcript": False,
+        "resolved": None,
     }
 
 
@@ -455,6 +456,7 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
         "agent_role": "implementer",
         "timeout_seconds": 900,
         "export_transcript": True,
+        "resolved": None,
     }
 
     implement_result = runner.invoke(
@@ -612,7 +614,9 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     inspect_payload = json.loads(inspect_json_result.stdout)
     assert inspect_payload["rp_bridge"] == bridge_payload
     assert inspect_payload["diagnostics"]["bridge"]["handoff_artifacts"] == ["rp-agent-review-prompt.md"]
-    assert inspect_payload["review_report"]["bridge"] == bridge_payload
+    expected_review_bridge = dict(bridge_payload)
+    expected_review_bridge.pop("resolved", None)
+    assert inspect_payload["review_report"]["bridge"] == expected_review_bridge
 
     final_resume = runner.invoke(
         app,
@@ -974,6 +978,7 @@ def test_cli_rp_managed_agent_implement_waiting_for_input_blocks_and_resume_cont
             "workspace-alpha",
             "--bridge-context-id",
             "ctx-123",
+            "--bridge-export-transcript",
         ],
         env={"PATH": fake_path},
     )
@@ -999,9 +1004,24 @@ def test_cli_rp_managed_agent_implement_waiting_for_input_blocks_and_resume_cont
 
     assert resume_result.exit_code == 0
     assert "status=needs_review" in resume_result.stdout
-    agent_log = json.loads((ai_root / "runs" / run_id / "rp-bridge-agent-log.json").read_text(encoding="utf-8"))
+    run_dir = ai_root / "runs" / run_id
+    agent_log = json.loads((run_dir / "rp-bridge-agent-log.json").read_text(encoding="utf-8"))
     implement_sessions = [session for session in agent_log["sessions"] if session["stage"] == "implement"]
     assert [session["status"] for session in implement_sessions] == ["waiting_for_input", "completed"]
+    assert implement_sessions[-1]["recovery"] == "resumed"
+    assert implement_sessions[-1]["transcript_artifact"] == "rp-bridge-agent-implement-transcript.json"
+    assert implement_sessions[-1]["handoff_artifact"] == "rp-bridge-agent-implement-handoff.xml"
+    start_count = int((tmp_path / "managed-implement-wait-then-complete-start-count.txt").read_text(encoding="utf-8"))
+    assert start_count == 1
+
+    inspect_after_resume = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+    assert inspect_after_resume.exit_code == 0
+    inspect_payload_after_resume = json.loads(inspect_after_resume.stdout)
+    assert inspect_payload_after_resume["diagnostics"]["bridge"]["agent_recovery"] == "resumed"
+    assert inspect_payload_after_resume["rp_bridge"]["resolved"]["resolved_workspace_name"] == "workspace-alpha"
+    assert inspect_payload_after_resume["rp_bridge"]["resolved"]["resolved_context_id"] == "ctx-456"
+    assert (run_dir / "rp-bridge-agent-implement-transcript.json").exists()
+    assert (run_dir / "rp-bridge-agent-implement-handoff.xml").exists()
 
 
 
@@ -1530,6 +1550,15 @@ def test_cli_review_builds_engine_from_stored_bridge_metadata(tmp_path: Path, mo
                 "agent_role": "implementer",
                 "timeout_seconds": 900,
                 "export_transcript": True,
+                "resolved": {
+                    "resolved_workspace_id": "workspace-1",
+                    "resolved_workspace_name": "workspace-alpha",
+                    "resolved_window_id": 11,
+                    "resolved_tab_id": "tab-1",
+                    "resolved_tab_name": "implement-tab",
+                    "resolved_context_id": "ctx-456",
+                    "resolved_at": "2026-04-17T00:00:00Z",
+                },
             },
         },
     )
@@ -1589,6 +1618,15 @@ def test_cli_review_builds_engine_from_stored_bridge_metadata(tmp_path: Path, mo
         agent_role="implementer",
         timeout_seconds=900,
         export_transcript=True,
+        resolved={
+            "resolved_workspace_id": "workspace-1",
+            "resolved_workspace_name": "workspace-alpha",
+            "resolved_window_id": 11,
+            "resolved_tab_id": "tab-1",
+            "resolved_tab_name": "implement-tab",
+            "resolved_context_id": "ctx-456",
+            "resolved_at": "2026-04-17T00:00:00Z",
+        },
     )
 
 
@@ -1631,6 +1669,15 @@ def test_cli_resume_builds_engine_from_stored_bridge_metadata(tmp_path: Path, mo
                 "agent_role": "implementer",
                 "timeout_seconds": 900,
                 "export_transcript": True,
+                "resolved": {
+                    "resolved_workspace_id": "workspace-1",
+                    "resolved_workspace_name": "workspace-alpha",
+                    "resolved_window_id": 11,
+                    "resolved_tab_id": "tab-1",
+                    "resolved_tab_name": "implement-tab",
+                    "resolved_context_id": "ctx-456",
+                    "resolved_at": "2026-04-17T00:00:00Z",
+                },
             },
         },
     )
@@ -1688,6 +1735,15 @@ def test_cli_resume_builds_engine_from_stored_bridge_metadata(tmp_path: Path, mo
         agent_role="implementer",
         timeout_seconds=900,
         export_transcript=True,
+        resolved={
+            "resolved_workspace_id": "workspace-1",
+            "resolved_workspace_name": "workspace-alpha",
+            "resolved_window_id": 11,
+            "resolved_tab_id": "tab-1",
+            "resolved_tab_name": "implement-tab",
+            "resolved_context_id": "ctx-456",
+            "resolved_at": "2026-04-17T00:00:00Z",
+        },
     )
 
 
@@ -2805,6 +2861,20 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
+            "if tool == 'manage_workspaces':\n"
+            "    if payload.get('action') == 'list':\n"
+            "        sys.stdout.write(json.dumps({'workspaces': [{'id': 'workspace-1', 'name': 'workspace-alpha', 'repo_paths': ['/tmp/repo-alpha'], 'window_ids': [11], 'is_hidden': False}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    sys.stdout.write(json.dumps({'workspaces': []}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'bind_context':\n"
+            "    sys.stdout.write(json.dumps({'workspace': 'workspace-alpha', 'workspace_id': 'workspace-1', 'window_id': 11, 'tab': 'implement-tab', 'tab_id': 'tab-1', 'context_id': 'ctx-456', 'windows': [{'window_id': 11, 'tabs': [{'id': 'tab-1', 'name': 'implement-tab', 'context_id': 'ctx-456'}]}]}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
             "if tool == 'manage_selection':\n"
             "    if MODE == 'seed-manage-fail':\n"
             "        sys.stderr.write('manage selection failed\\n')\n"
@@ -2840,6 +2910,9 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    op = payload.get('op')\n"
             "    if op == 'start':\n"
             "        stage = payload.get('stage') or 'implement'\n"
+            "        count_path = STATE_DIR / f'{MODE}-start-count.txt'\n"
+            "        current_count = int(count_path.read_text(encoding='utf-8').strip()) if count_path.exists() else 0\n"
+            "        count_path.write_text(str(current_count + 1), encoding='utf-8')\n"
             "        sys.stdout.write(json.dumps({'session_id': f'{stage}-session-123', 'status': 'started', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
             "        sys.stdout.write('\\n')\n"
             "        raise SystemExit(0)\n"
@@ -2881,8 +2954,19 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "\n"
             "if tool == 'agent_manage':\n"
             "    session_id = payload.get('session_id')\n"
+            "    op = payload.get('op')\n"
             "    stage = 'review' if str(session_id).startswith('review-') else 'implement'\n"
             "    state_file = STATE_DIR / f'{MODE}-{session_id}.state'\n"
+            "    if op == 'resume_session':\n"
+            "        sys.stdout.write(json.dumps({'session_id': session_id, 'status': 'waiting_for_input'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if op == 'extract_handoff':\n"
+            "        output_path = payload.get('output_path')\n"
+            "        Path(output_path).write_text('<handoff />\\n', encoding='utf-8')\n"
+            "        sys.stdout.write(json.dumps({'session_id': session_id, 'status': 'completed', 'output_path': output_path, 'handoff_summary': 'handoff ready'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "    if MODE == 'managed-implement-failed' and stage == 'implement':\n"
             "        status = 'failed'\n"
             "        output = None\n"
