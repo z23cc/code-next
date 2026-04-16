@@ -86,8 +86,8 @@ Exit criteria:
 
 Validation notes:
 
-- 日期：2026-04-16
-- P2 结论：`RpCliBridgeClient` 已提供 typed read-only probe result；`doctor` 与 `inspect --bridge-probe` 可以安全暴露 bridge tool surface，但不会把这类信号误表述为 real provider/runtime support。
+- 日期：2026-04-16（updated 2026-04-17）
+- P2 结论：`RpCliBridgeClient` 已提供 typed read-only probe result；`doctor` 与 `inspect --bridge-probe` 现在按 capability-based MCP tool invocation 语义暴露 bridge readiness（不再依赖伪造 `--list-tools` flag 语义），且不会把这类信号误表述为 real provider/runtime support。
 - 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_doctor.py tests/test_cli.py -q`
 - 已执行命令：`uv run aiwf contracts lint`
 - 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_doctor.py tests/test_cli.py tests/test_adapter_contracts.py tests/test_adapter_rp.py tests/test_compile.py -q`
@@ -165,8 +165,8 @@ Exit criteria:
 
 Validation notes:
 
-- 日期：2026-04-16
-- P5 结论：`rp/manual + --bridge-mode managed-agent` 现在可以由 `aiwf` 驱动 RepoPrompt managed-agent implement/review，并把 session state、session id、prompt/response artifact 与 `rp-bridge-agent-log.json` 一起持久化。`waiting_for_input` 会 deterministic 地停在 `blocked`，`resume` 会继续同一 session；`failed` / `timeout` 会明确落成 `failed` 并保留 bridge log；review 完成态会在不伪造字段的前提下规范化 `review-report.json` 并通过现有 review contract。
+- 日期：2026-04-16（updated 2026-04-17）
+- P5 结论：`rp/manual + --bridge-mode managed-agent` 现在可以由 `aiwf` 驱动 RepoPrompt managed-agent implement/review，并把 session state、session id、prompt/response artifact 与 `rp-bridge-agent-log.json` 一起持久化。managed-agent transport 已明确映射到 `agent_run` / `agent_manage`，且当 bridge runtime 不支持该 surface（如 `BRIDGE_TOOL_INVOCATION_UNSUPPORTED` / `TOOL_UNAVAILABLE`）时会归类为 `ADAPTER_UNAVAILABLE` 并给出 manual-assist fallback 指引。`waiting_for_input` 会 deterministic 地停在 `blocked`，`resume` 会继续同一 session；`failed` / `timeout` 会明确落成 `failed` 并保留 bridge log；review 完成态会在不伪造字段的前提下规范化 `review-report.json` 并通过现有 review contract。
 - 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_adapter_rp.py tests/test_engine.py tests/test_cli.py tests/test_adapter_contracts.py tests/test_compile.py -q`
 - 已执行命令：`uv run aiwf contracts lint`
 - 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_adapter_rp.py tests/test_engine.py tests/test_cli.py tests/test_adapter_contracts.py tests/test_compile.py tests/test_artifacts.py tests/test_models.py -q`

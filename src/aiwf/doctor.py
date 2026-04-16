@@ -416,7 +416,7 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                     name=bridge_name,
                     detail=(
                         f"experimental RP bridge candidate detected via {command} at {resolved}; read-only bridge probe "
-                        f"detected tools: {tool_detail}. "
+                        f"reports the CLI supports MCP tool invocation; inventoried tools: {tool_detail}. "
                         + _runtime_detection_detail(
                             detection,
                             detection_reason,

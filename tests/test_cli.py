@@ -19,6 +19,19 @@ from aiwf.state import RunStateManager
 
 runner = CliRunner()
 
+EXPECTED_BRIDGE_TOOLS = [
+    "manage_workspaces",
+    "bind_context",
+    "manage_selection",
+    "workspace_context",
+    "context_builder",
+    "ask_oracle",
+    "agent_run",
+    "agent_manage",
+    "read_file",
+    "file_search",
+]
+
 
 def test_cli_run_plan_command_succeeds(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
@@ -1946,7 +1959,7 @@ def test_cli_inspect_bridge_probe_surfaces_read_only_tool_probe(tmp_path: Path) 
     assert inspect_result.exit_code == 0
     assert "bridge_probe=available" in inspect_result.stdout
     assert fake_cli.name in inspect_result.stdout
-    assert "bridge_probe_tools=file_search,manage_selection,workspace_context" in inspect_result.stdout
+    assert "bridge_probe_tools=" in inspect_result.stdout
 
     inspect_json_result = runner.invoke(
         app,
@@ -1964,7 +1977,7 @@ def test_cli_inspect_bridge_probe_surfaces_read_only_tool_probe(tmp_path: Path) 
     payload = json.loads(inspect_json_result.stdout)
     assert payload["bridge_probe"]["available"] is True
     assert payload["bridge_probe"]["path"] == str(fake_cli)
-    assert [tool["name"] for tool in payload["bridge_probe"]["tools"]] == ["file_search", "manage_selection", "workspace_context"]
+    assert [tool["name"] for tool in payload["bridge_probe"]["tools"]] == EXPECTED_BRIDGE_TOOLS
     assert payload["bridge_probe"]["error"] is None
 
 
@@ -2737,7 +2750,31 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             f"MODE = {mode!r}\n"
             f"STATE_DIR = Path({str(tmp_path)!r})\n"
             "\n"
-            "if '--list-tools' in sys.argv:\n"
+            "def _tool_and_payload(argv):\n"
+            "    if '-e' not in argv:\n"
+            "        return None, {}\n"
+            "    idx = argv.index('-e')\n"
+            "    if idx + 1 >= len(argv):\n"
+            "        return None, {}\n"
+            "    tool = argv[idx + 1]\n"
+            "    payload = {}\n"
+            "    if '--arguments' in argv:\n"
+            "        aidx = argv.index('--arguments')\n"
+            "        if aidx + 1 < len(argv):\n"
+            "            payload = json.loads(argv[aidx + 1])\n"
+            "    return tool, payload\n"
+            "\n"
+            "if '--help' in sys.argv:\n"
+            "    sys.stdout.write('usage: rp-cli -e TOOL --raw-json [--arguments JSON]\\n')\n"
+            "    sys.stdout.write('tool mode with -e and --raw-json\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "tool, payload = _tool_and_payload(sys.argv)\n"
+            "if tool is None:\n"
+            "    sys.stderr.write('unsupported invocation\\n')\n"
+            "    raise SystemExit(2)\n"
+            "\n"
+            "if tool == 'file_search':\n"
             "    if MODE == 'timeout':\n"
             "        time.sleep(10)\n"
             "    if MODE == 'malformed':\n"
@@ -2746,18 +2783,16 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    if MODE == 'fail':\n"
             "        sys.stderr.write('tool listing failed\\n')\n"
             "        raise SystemExit(9)\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'file_search'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}]}))\n"
+            "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "if '--workspace-context' in sys.argv:\n"
-            "    workspace = sys.argv[-1] if len(sys.argv) >= 3 else None\n"
-            "    sys.stdout.write(json.dumps({'workspace': workspace, 'context_id': 'ctx-123', 'selected_paths': ['src/example.py']}))\n"
+            "if tool == 'workspace_context':\n"
+            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': 'ctx-123', 'selected_paths': ['src/example.py']}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "if '--manage-selection' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
+            "if tool == 'manage_selection':\n"
             "    if MODE == 'seed-manage-fail':\n"
             "        sys.stderr.write('manage selection failed\\n')\n"
             "        raise SystemExit(7)\n"
@@ -2766,8 +2801,7 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "if '--read-file' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
+            "if tool == 'read_file':\n"
             "    if MODE == 'capture-read-fail':\n"
             "        sys.stderr.write('read file failed\\n')\n"
             "        raise SystemExit(6)\n"
@@ -2789,52 +2823,50 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "if '--agent-run-start' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
-            "    stage = payload.get('stage') or 'implement'\n"
-            "    sys.stdout.write(json.dumps({'session_id': f'{stage}-session-123', 'status': 'started', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
-            "    sys.stdout.write('\\n')\n"
-            "    raise SystemExit(0)\n"
+            "if tool == 'agent_run':\n"
+            "    action = payload.get('action')\n"
+            "    if action == 'start':\n"
+            "        stage = payload.get('stage') or 'implement'\n"
+            "        sys.stdout.write(json.dumps({'session_id': f'{stage}-session-123', 'status': 'started', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if action == 'wait':\n"
+            "        session_id = payload.get('session_id')\n"
+            "        stage = 'review' if str(session_id).startswith('review-') else 'implement'\n"
+            "        state_file = STATE_DIR / f'{MODE}-{session_id}.state'\n"
+            "        if MODE == 'managed-implement-failed' and stage == 'implement':\n"
+            "            status = 'failed'\n"
+            "            output = None\n"
+            "        elif MODE == 'managed-implement-timeout' and stage == 'implement':\n"
+            "            status = 'timeout'\n"
+            "            output = None\n"
+            "        elif MODE == 'managed-implement-wait-then-complete' and stage == 'implement' and not state_file.exists():\n"
+            "            state_file.write_text('waiting\\n', encoding='utf-8')\n"
+            "            status = 'waiting_for_input'\n"
+            "            output = None\n"
+            "        elif MODE == 'managed-implement-wait-then-complete' and stage == 'implement':\n"
+            "            state_file.write_text('completed\\n', encoding='utf-8')\n"
+            "            status = 'completed'\n"
+            "            output = '# Managed implement output\\n'\n"
+            "        elif MODE == 'managed-review-wait-then-complete' and stage == 'review' and not state_file.exists():\n"
+            "            state_file.write_text('waiting\\n', encoding='utf-8')\n"
+            "            status = 'waiting_for_input'\n"
+            "            output = None\n"
+            "        elif MODE == 'managed-review-wait-then-complete' and stage == 'review':\n"
+            "            state_file.write_text('completed\\n', encoding='utf-8')\n"
+            "            status = 'completed'\n"
+            "            output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "        elif stage == 'review':\n"
+            "            status = 'completed'\n"
+            "            output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "        else:\n"
+            "            status = 'completed'\n"
+            "            output = '# Managed implement output\\n'\n"
+            "        sys.stdout.write(json.dumps({'session_id': session_id, 'status': status, 'output': output, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "\n"
-            "if '--agent-run-wait' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
-            "    session_id = payload.get('session_id')\n"
-            "    stage = 'review' if str(session_id).startswith('review-') else 'implement'\n"
-            "    state_file = STATE_DIR / f'{MODE}-{session_id}.state'\n"
-            "    if MODE == 'managed-implement-failed' and stage == 'implement':\n"
-            "        status = 'failed'\n"
-            "        output = None\n"
-            "    elif MODE == 'managed-implement-timeout' and stage == 'implement':\n"
-            "        status = 'timeout'\n"
-            "        output = None\n"
-            "    elif MODE == 'managed-implement-wait-then-complete' and stage == 'implement' and not state_file.exists():\n"
-            "        state_file.write_text('waiting\\n', encoding='utf-8')\n"
-            "        status = 'waiting_for_input'\n"
-            "        output = None\n"
-            "    elif MODE == 'managed-implement-wait-then-complete' and stage == 'implement':\n"
-            "        state_file.write_text('completed\\n', encoding='utf-8')\n"
-            "        status = 'completed'\n"
-            "        output = '# Managed implement output\\n'\n"
-            "    elif MODE == 'managed-review-wait-then-complete' and stage == 'review' and not state_file.exists():\n"
-            "        state_file.write_text('waiting\\n', encoding='utf-8')\n"
-            "        status = 'waiting_for_input'\n"
-            "        output = None\n"
-            "    elif MODE == 'managed-review-wait-then-complete' and stage == 'review':\n"
-            "        state_file.write_text('completed\\n', encoding='utf-8')\n"
-            "        status = 'completed'\n"
-            "        output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
-            "    elif stage == 'review':\n"
-            "        status = 'completed'\n"
-            "        output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
-            "    else:\n"
-            "        status = 'completed'\n"
-            "        output = '# Managed implement output\\n'\n"
-            "    sys.stdout.write(json.dumps({'session_id': session_id, 'status': status, 'output': output, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
-            "    sys.stdout.write('\\n')\n"
-            "    raise SystemExit(0)\n"
-            "\n"
-            "if '--agent-log' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
+            "if tool == 'agent_manage':\n"
             "    session_id = payload.get('session_id')\n"
             "    stage = 'review' if str(session_id).startswith('review-') else 'implement'\n"
             "    state_file = STATE_DIR / f'{MODE}-{session_id}.state'\n"
@@ -2860,8 +2892,8 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "sys.stderr.write('unsupported invocation\\n')\n"
-            "raise SystemExit(2)\n"
+            "sys.stderr.write('unknown tool ' + str(tool) + '\\n')\n"
+            "raise SystemExit(3)\n"
         ),
         encoding="utf-8",
     )

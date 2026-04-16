@@ -40,6 +40,7 @@ Look at the `rp` and `rp-bridge` checks:
 
 - `runtime_detection=stub-like` means the binary matched aiwf's **heuristics** for a reference harness or current Python-environment binary.
 - `runtime_detection=non-stub-like` means the binary did **not** match those heuristics.
+- `rp-bridge` probe `available=true` means the CLI appears to support MCP tool invocation capability; it is not a provider certification signal.
 
 This is intentionally heuristic only. It is a labeling aid, not proof of product identity.
 
@@ -76,14 +77,16 @@ Use this only after confirming:
 
 Per `docs/RP_PROVIDER_GAP_ANALYSIS.md` §§1–3, the current real RepoPrompt CLI is expected to fail native-provider certification in common environments because:
 
-1. it may support `--list-tools` but **not** `--aiwf-protocol-version`,
-2. it exposes a workspace/agent orchestration CLI rather than a single-shot provider subprocess envelope, and
-3. its transport/response model may not match `aiwf-rp-native/v1`.
+1. it exposes a workspace/agent orchestration CLI rather than a single-shot provider subprocess envelope,
+2. its transport/response model may not match `aiwf-rp-native/v1`, and
+3. bridge capability detection is about MCP tool invocation readiness, not native-provider protocol compatibility.
 
 If that happens, the correct interpretation is:
 
 - keep certification posture at `reference-stub`, and
 - use the **bridge** path as the supported RP integration.
+
+Also note: a green bridge probe does not guarantee every tool is available at runtime (for example `agent_run` / `agent_manage` can still be unavailable and should be handled via manual-assist fallback).
 
 ## Decision rule
 

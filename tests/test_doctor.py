@@ -15,6 +15,19 @@ from aiwf.doctor import render_doctor_report, run_doctor
 
 runner = CliRunner()
 
+EXPECTED_BRIDGE_TOOLS = [
+    "manage_workspaces",
+    "bind_context",
+    "manage_selection",
+    "workspace_context",
+    "context_builder",
+    "ask_oracle",
+    "agent_run",
+    "agent_manage",
+    "read_file",
+    "file_search",
+]
+
 
 def test_run_doctor_reports_ok_for_valid_workspace(tmp_path: Path, monkeypatch) -> None:
     repo_root, ai_root = _create_workspace(tmp_path, gate_command='python -c "print(\'ok\')"')
@@ -185,7 +198,10 @@ def test_run_doctor_reports_rp_bridge_candidate_when_runtime_found(tmp_path: Pat
     assert bridge_check.status == "ok"
     assert bridge_check.path == "/usr/local/bin/rp-cli"
     assert "experimental RP bridge candidate detected via rp-cli" in bridge_check.detail
-    assert "read-only bridge probe detected tools: file_search, manage_selection" in bridge_check.detail
+    assert (
+        "read-only bridge probe reports the CLI supports MCP tool invocation; "
+        "inventoried tools: file_search, manage_selection"
+    ) in bridge_check.detail
     assert "heuristic classifies this binary as non-stub-like" in bridge_check.detail
     assert bridge_check.protocol_supported is None
     assert bridge_check.protocol_version is None
@@ -248,7 +264,7 @@ def test_run_doctor_json_surfaces_bridge_tool_probe_info_with_fake_cli(tmp_path:
     payload = json.loads(result.stdout)
     bridge_check = next(check for check in payload["checks"] if check["name"] == "rp-bridge")
     assert bridge_check["status"] == "ok"
-    assert bridge_check["bridge_tools_detected"] == ["file_search", "manage_selection"]
+    assert bridge_check["bridge_tools_detected"] == EXPECTED_BRIDGE_TOOLS
     assert bridge_check["bridge_probe_error"] is None
     assert bridge_check["runtime_detection"] == "stub-like"
     assert "fake RP runtime/bridge harness" in bridge_check["runtime_detection_reason"]
@@ -489,13 +505,37 @@ def _write_fake_rp_bridge_cli(tmp_path: Path) -> Path:
             "import json\n"
             "import sys\n"
             "\n"
-            "if '--list-tools' in sys.argv:\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'file_search'}, {'name': 'manage_selection'}]}))\n"
+            "def _tool_and_payload(argv):\n"
+            "    if '-e' not in argv:\n"
+            "        return None, {}\n"
+            "    idx = argv.index('-e')\n"
+            "    if idx + 1 >= len(argv):\n"
+            "        return None, {}\n"
+            "    tool = argv[idx + 1]\n"
+            "    payload = {}\n"
+            "    if '--arguments' in argv:\n"
+            "        aidx = argv.index('--arguments')\n"
+            "        if aidx + 1 < len(argv):\n"
+            "            payload = json.loads(argv[aidx + 1])\n"
+            "    return tool, payload\n"
+            "\n"
+            "if '--help' in sys.argv:\n"
+            "    sys.stdout.write('usage: rp-cli -e TOOL --raw-json [--arguments JSON]\\n')\n"
+            "    sys.stdout.write('tool mode with -e and --raw-json\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "tool, payload = _tool_and_payload(sys.argv)\n"
+            "if tool is None:\n"
+            "    sys.stderr.write('unsupported invocation\\n')\n"
+            "    raise SystemExit(2)\n"
+            "\n"
+            "if tool == 'file_search':\n"
+            "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "sys.stderr.write('unsupported invocation\\n')\n"
-            "raise SystemExit(2)\n"
+            "sys.stderr.write('unknown tool ' + str(tool) + '\\n')\n"
+            "raise SystemExit(3)\n"
         ),
         encoding="utf-8",
     )

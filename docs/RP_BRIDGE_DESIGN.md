@@ -77,6 +77,12 @@ aiwf
 - 轮询 agent 状态
 - 导出 transcript / handoff / 日志
 
+bridge transport 采用真实 RepoPrompt CLI 的通用工具调用形态：
+
+- `rp-cli -e <tool> --raw-json --arguments <json>`
+
+并通过 capability probe 判定该调用面是否可用，而不是依赖伪造的单独 flag（例如 `--list-tools` / `--agent-run-start`）。
+
 ## 5. 建议的 bridge 模式
 
 建议分两级，而不是一上来追求单一路径：
@@ -281,15 +287,15 @@ bridge 更现实，原因有三点：
 
 ### Phase 2 — 只读 rp-cli reconnaissance（已落地）
 
-> **Status (2026-04-16): P2 completed.** 当前已落地的是一个只读 `RpCliBridgeClient`，它只做 bridge reconnaissance：探测 command candidate、读取 tool surface、读取 workspace context，并把成功/缺失/超时/非零退出/ malformed JSON 统一映射成 typed result。`doctor` 会把 bridge tool probe 结果作为 **bridge readiness hint** 暴露出来，`inspect --bridge-probe` 也可以按需运行同样的只读 probe。**这些结果不代表 `aiwf-rp-native/v1` provider 支持，也不会修改任何外部 workspace state。**
+> **Status (2026-04-16, updated 2026-04-17): P2 completed.** 当前已落地的是一个只读 `RpCliBridgeClient`，它先做 capability probe（help markers + safe tool probe）确认 CLI 是否支持 MCP tool invocation，再暴露静态工具清单并读取 workspace context。成功/缺失/超时/非零退出/ malformed JSON 都会统一映射为 typed result。`doctor` 会把 bridge probe 结果作为 **bridge readiness hint** 暴露出来，`inspect --bridge-probe` 也可以按需运行同样的只读 probe。**这些结果不代表 `aiwf-rp-native/v1` provider 支持，也不会修改任何外部 workspace state。**
 
 当前 P2 的实际能力是：
 
 - `RpCliBridgeClient.from_command_candidates(...)`
-- `RpCliBridgeClient.probe_available()`
-- `RpCliBridgeClient.list_tools()`
+- `RpCliBridgeClient.probe_available()`（capability-based）
+- `RpCliBridgeClient.list_tools()`（返回 capability 成立时的 MCP tool manifest）
 - `RpCliBridgeClient.workspace_context(...)`
-- `doctor` 中的 bridge tool probe surface
+- `doctor` 中的 bridge probe surface
 - `inspect --bridge-probe` 的 opt-in probe surface
 
 当前 P2 的明确边界仍然是：
@@ -323,6 +329,7 @@ bridge 更现实，原因有三点：
   - 继续生成 `rp-agent-implement-prompt.md`
   - 在 `rp-bridge-seeding.json` 中记录失败
   - 在 diagnostics / inspect next actions 中明确提示 operator 手工补齐上下文
+  - 不再依赖 `--list-tools` 的枚举语义，改为 capability probe + 实际调用结果判定
 
 当前 P3 的明确边界仍然是：
 
@@ -366,6 +373,7 @@ bridge 更现实，原因有三点：
 
 - `BridgeMode` 扩展到 `managed-agent`，并可通过 run metadata 恢复
 - CLI 支持 `--bridge-mode managed-agent`
+- managed-agent 调用映射到真实 tool surface：`agent_run` / `agent_manage`
 - implement：
   - 写出 `rp-agent-implement-prompt.md`
   - 启动/恢复 RepoPrompt managed-agent session
