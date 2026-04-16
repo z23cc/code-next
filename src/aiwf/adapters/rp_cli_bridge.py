@@ -6,8 +6,9 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -31,7 +32,7 @@ class RpToolInfo:
 
 @dataclass(frozen=True)
 class RpToolListResult:
-    """Typed result of a `--list-tools` probe."""
+    """Typed result of a tool probe/capability summary."""
 
     ok: bool
     command: tuple[str, ...]
@@ -157,6 +158,11 @@ class RpBridgeProbeResult:
     error: RpBridgeError | None = None
 
 
+class _ToolInvocationMode(Enum):
+    COMMAND_MODE_RAW_JSON = "command_mode_raw_json"
+    UNAVAILABLE = "unavailable"
+
+
 @dataclass(frozen=True)
 class _RpInvocation:
     command: tuple[str, ...]
@@ -165,6 +171,20 @@ class _RpInvocation:
     stdout: str | None = None
     stderr: str | None = None
     error: RpBridgeError | None = None
+
+
+_REPOPROMPT_MCP_TOOL_MANIFEST: tuple[RpToolInfo, ...] = (
+    RpToolInfo(name="manage_workspaces"),
+    RpToolInfo(name="bind_context"),
+    RpToolInfo(name="manage_selection"),
+    RpToolInfo(name="workspace_context"),
+    RpToolInfo(name="context_builder"),
+    RpToolInfo(name="ask_oracle"),
+    RpToolInfo(name="agent_run"),
+    RpToolInfo(name="agent_manage"),
+    RpToolInfo(name="read_file"),
+    RpToolInfo(name="file_search", description="Search files"),
+)
 
 
 def _resolve_candidate_path(candidate: str) -> str | None:
@@ -190,6 +210,8 @@ class RpCliBridgeClient:
             raise ValueError("timeout_seconds must be greater than 0")
         self.command = resolved_command
         self.timeout_seconds = timeout_seconds
+        self._invocation_mode: _ToolInvocationMode | None = None
+        self._invocation_detection_error: RpBridgeError | None = None
 
     @classmethod
     def from_command_candidates(
@@ -215,51 +237,35 @@ class RpCliBridgeClient:
         )
 
     def list_tools(self) -> RpToolListResult:
-        invocation = self._run_command("--list-tools")
-        if not invocation.ok:
+        mode = self._detect_invocation_mode()
+        if mode is _ToolInvocationMode.UNAVAILABLE:
             return RpToolListResult(
                 ok=False,
-                command=invocation.command,
-                path=invocation.path,
-                error=invocation.error,
-                raw_stdout=invocation.stdout,
-                raw_stderr=invocation.stderr,
-            )
-        payload = self._load_json_payload(invocation, context="tool list")
-        if payload is None:
-            return RpToolListResult(
-                ok=False,
-                command=invocation.command,
-                path=invocation.path,
-                error=self._malformed_response_error(invocation, context="tool list"),
-                raw_stdout=invocation.stdout,
-                raw_stderr=invocation.stderr,
-            )
-        try:
-            tools = self._parse_tools_payload(payload)
-        except ValueError as exc:
-            return RpToolListResult(
-                ok=False,
-                command=invocation.command,
-                path=invocation.path,
-                error=self._malformed_response_error(invocation, context="tool list", message=str(exc)),
-                raw_stdout=invocation.stdout,
-                raw_stderr=invocation.stderr,
+                command=self.command,
+                path=self.command[0],
+                error=self._invocation_detection_error
+                or RpBridgeError(
+                    code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                    message="RP bridge does not expose a supported MCP tool invocation surface",
+                    retriable=False,
+                ),
             )
         return RpToolListResult(
             ok=True,
-            command=invocation.command,
-            path=invocation.path,
-            tools=tools,
-            raw_stdout=invocation.stdout,
-            raw_stderr=invocation.stderr,
+            command=self.command,
+            path=self.command[0],
+            tools=_REPOPROMPT_MCP_TOOL_MANIFEST,
         )
 
     def workspace_context(self, workspace: str | None = None) -> RpWorkspaceContextResult:
-        args = ["--workspace-context"]
+        payload: dict[str, Any] = {}
         if workspace is not None:
-            args.append(workspace)
-        invocation = self._run_command(*args)
+            payload["workspace"] = workspace
+        invocation = self._invoke_tool(
+            "workspace_context",
+            payload or None,
+            context="workspace context",
+        )
         if not invocation.ok:
             return RpWorkspaceContextResult(
                 ok=False,
@@ -269,8 +275,8 @@ class RpCliBridgeClient:
                 raw_stdout=invocation.stdout,
                 raw_stderr=invocation.stderr,
             )
-        payload = self._load_json_payload(invocation, context="workspace context")
-        if not isinstance(payload, dict):
+        response = self._load_json_payload(invocation, context="workspace context")
+        if not isinstance(response, dict):
             return RpWorkspaceContextResult(
                 ok=False,
                 command=invocation.command,
@@ -287,9 +293,9 @@ class RpCliBridgeClient:
             ok=True,
             command=invocation.command,
             path=invocation.path,
-            workspace=self._optional_string(payload.get("workspace")),
-            context_id=self._optional_string(payload.get("context_id")),
-            selected_paths=self._extract_selected_paths(payload),
+            workspace=self._optional_string(response.get("workspace")),
+            context_id=self._optional_string(response.get("context_id")),
+            selected_paths=self._extract_selected_paths(response),
             raw_stdout=invocation.stdout,
             raw_stderr=invocation.stderr,
         )
@@ -318,7 +324,7 @@ class RpCliBridgeClient:
         if context_id is not None:
             payload["context_id"] = context_id
 
-        invocation = self._run_command("--manage-selection", json.dumps(payload, ensure_ascii=False))
+        invocation = self._invoke_tool("manage_selection", payload, context="manage_selection")
         if not invocation.ok:
             return RpManageSelectionResult(
                 ok=False,
@@ -373,7 +379,7 @@ class RpCliBridgeClient:
         if context_id is not None:
             payload["context_id"] = context_id
 
-        invocation = self._run_command("--read-file", json.dumps(payload, ensure_ascii=False))
+        invocation = self._invoke_tool("read_file", payload, context="read_file")
         if not invocation.ok:
             return RpReadFileResult(
                 ok=False,
@@ -438,7 +444,7 @@ class RpCliBridgeClient:
     ) -> RpAgentRunStartResult:
         if not prompt.strip():
             raise ValueError("agent_run_start requires a non-empty prompt")
-        payload: dict[str, Any] = {"prompt": prompt}
+        payload: dict[str, Any] = {"action": "start", "prompt": prompt}
         if workspace is not None:
             payload["workspace"] = workspace
         if tab is not None:
@@ -450,7 +456,7 @@ class RpCliBridgeClient:
         if stage is not None:
             payload["stage"] = stage
 
-        invocation = self._run_command("--agent-run-start", json.dumps(payload, ensure_ascii=False))
+        invocation = self._invoke_tool("agent_run", payload, context="agent_run_start")
         if not invocation.ok:
             return RpAgentRunStartResult(
                 ok=False,
@@ -513,7 +519,7 @@ class RpCliBridgeClient:
         normalized_session_id = session_id.strip()
         if not normalized_session_id:
             raise ValueError("agent_run_wait requires a non-empty session_id")
-        payload: dict[str, Any] = {"session_id": normalized_session_id}
+        payload: dict[str, Any] = {"action": "wait", "session_id": normalized_session_id}
         if workspace is not None:
             payload["workspace"] = workspace
         if tab is not None:
@@ -521,7 +527,7 @@ class RpCliBridgeClient:
         if context_id is not None:
             payload["context_id"] = context_id
 
-        invocation = self._run_command("--agent-run-wait", json.dumps(payload, ensure_ascii=False))
+        invocation = self._invoke_tool("agent_run", payload, context="agent_run_wait")
         if not invocation.ok:
             return RpAgentRunWaitResult(
                 ok=False,
@@ -588,7 +594,7 @@ class RpCliBridgeClient:
         normalized_session_id = session_id.strip()
         if not normalized_session_id:
             raise ValueError("agent_log requires a non-empty session_id")
-        payload: dict[str, Any] = {"session_id": normalized_session_id}
+        payload: dict[str, Any] = {"action": "get_log", "session_id": normalized_session_id}
         if workspace is not None:
             payload["workspace"] = workspace
         if tab is not None:
@@ -596,7 +602,7 @@ class RpCliBridgeClient:
         if context_id is not None:
             payload["context_id"] = context_id
 
-        invocation = self._run_command("--agent-log", json.dumps(payload, ensure_ascii=False))
+        invocation = self._invoke_tool("agent_manage", payload, context="agent_log")
         if not invocation.ok:
             return RpAgentLogResult(
                 ok=False,
@@ -639,13 +645,133 @@ class RpCliBridgeClient:
             raw_stderr=invocation.stderr,
         )
 
-    def _run_command(self, *arguments: str) -> _RpInvocation:
-        command = (*self.command, *arguments)
+    def _detect_invocation_mode(self) -> _ToolInvocationMode:
+        if self._invocation_mode is not None:
+            return self._invocation_mode
+
+        help_invocation = self._execute_command((*self.command, "--help"))
+        if not help_invocation.ok:
+            self._invocation_mode = _ToolInvocationMode.UNAVAILABLE
+            self._invocation_detection_error = help_invocation.error
+            return self._invocation_mode
+
+        help_text = "\n".join(
+            part for part in ((help_invocation.stdout or ""), (help_invocation.stderr or "")) if part
+        ).lower()
+        has_markers = "-e" in help_text and "--raw-json" in help_text
+        if not has_markers:
+            self._invocation_mode = _ToolInvocationMode.UNAVAILABLE
+            self._invocation_detection_error = RpBridgeError(
+                code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                message="RP bridge does not advertise MCP tool invocation flags (-e/--raw-json)",
+                retriable=False,
+            )
+            return self._invocation_mode
+
+        probe_invocation = self._invoke_tool_with_mode(
+            _ToolInvocationMode.COMMAND_MODE_RAW_JSON,
+            "file_search",
+            {"pattern": "", "count_only": True, "max_results": 1},
+            context="invocation probe",
+        )
+        if not probe_invocation.ok:
+            self._invocation_mode = _ToolInvocationMode.UNAVAILABLE
+            probe_error = probe_invocation.error
+            if probe_error is None:
+                self._invocation_detection_error = RpBridgeError(
+                    code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                    message="RP bridge MCP tool invocation probe failed",
+                    retriable=False,
+                )
+                return self._invocation_mode
+            if probe_error.code in {"TIMEOUT", "NOT_INSTALLED", "COMMAND_UNAVAILABLE"}:
+                self._invocation_detection_error = probe_error
+            else:
+                self._invocation_detection_error = RpBridgeError(
+                    code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                    message="RP bridge MCP tool invocation probe did not return valid JSON",
+                    retriable=False,
+                    detail={"probe_error": probe_error.code},
+                )
+            return self._invocation_mode
+
+        probe_payload = self._load_json_payload(probe_invocation, context="invocation probe")
+        if not isinstance(probe_payload, (dict, list)):
+            self._invocation_mode = _ToolInvocationMode.UNAVAILABLE
+            self._invocation_detection_error = RpBridgeError(
+                code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                message="RP bridge MCP tool invocation probe did not return valid JSON",
+                retriable=False,
+                detail={"stdout": (probe_invocation.stdout or "").strip()[:400]},
+            )
+            return self._invocation_mode
+
+        self._invocation_mode = _ToolInvocationMode.COMMAND_MODE_RAW_JSON
+        self._invocation_detection_error = None
+        return self._invocation_mode
+
+    def _invoke_tool(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any] | None,
+        *,
+        context: str,
+    ) -> _RpInvocation:
+        mode = self._detect_invocation_mode()
+        if mode is _ToolInvocationMode.UNAVAILABLE:
+            return _RpInvocation(
+                command=self.command,
+                path=self.command[0],
+                ok=False,
+                error=self._invocation_detection_error
+                or RpBridgeError(
+                    code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                    message="RP bridge does not expose a supported MCP tool invocation surface",
+                    retriable=False,
+                ),
+            )
+        return self._invoke_tool_with_mode(mode, tool, arguments, context=context)
+
+    def _invoke_tool_with_mode(
+        self,
+        mode: _ToolInvocationMode,
+        tool: str,
+        arguments: Mapping[str, Any] | None,
+        *,
+        context: str,
+    ) -> _RpInvocation:
+        del context
+        if mode is not _ToolInvocationMode.COMMAND_MODE_RAW_JSON:
+            return _RpInvocation(
+                command=self.command,
+                path=self.command[0],
+                ok=False,
+                error=RpBridgeError(
+                    code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                    message="RP bridge does not expose a supported MCP tool invocation surface",
+                    retriable=False,
+                ),
+            )
+
+        command = [*self.command, "-e", tool, "--raw-json"]
+        if arguments is not None:
+            command.extend(("--arguments", json.dumps(dict(arguments), ensure_ascii=False)))
+        invocation = self._execute_command(tuple(command), tool=tool)
+        return invocation
+
+    def _execute_command(
+        self,
+        command: tuple[str, ...],
+        *,
+        stdin_payload: str | None = None,
+        tool: str | None = None,
+    ) -> _RpInvocation:
         try:
             completed = subprocess.run(
                 list(command),
                 capture_output=True,
                 text=True,
+                input=stdin_payload,
                 check=False,
                 timeout=self.timeout_seconds,
             )
@@ -685,6 +811,29 @@ class RpCliBridgeClient:
             )
 
         if completed.returncode != 0:
+            stderr_text = (completed.stderr or "").lower()
+            if tool is not None and any(
+                marker in stderr_text
+                for marker in (
+                    "unknown tool",
+                    "tool not found",
+                    "no such tool",
+                    "unsupported tool",
+                )
+            ):
+                return _RpInvocation(
+                    command=command,
+                    path=self.command[0],
+                    ok=False,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    error=RpBridgeError(
+                        code="TOOL_UNAVAILABLE",
+                        message=f"RP bridge tool {tool!r} is not available in this runtime",
+                        retriable=False,
+                        detail={"returncode": completed.returncode, "tool": tool},
+                    ),
+                )
             return _RpInvocation(
                 command=command,
                 path=self.command[0],
@@ -717,13 +866,34 @@ class RpCliBridgeClient:
         stdout = (invocation.stdout or "").strip()
         if not stdout:
             return None
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError:
-            return None
+        payload = self._extract_embedded_json(stdout)
         if not isinstance(payload, (dict, list)):
             return None
         return payload
+
+    def _extract_embedded_json(self, raw_text: str) -> dict[str, Any] | list[Any] | None:
+        stripped = raw_text.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            return parsed
+
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(stripped):
+            if char not in "[{":
+                continue
+            fragment = stripped[index:]
+            try:
+                parsed_value, _ = decoder.raw_decode(fragment)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed_value, (dict, list)):
+                return parsed_value
+        return None
 
     def _parse_tools_payload(self, payload: dict[str, Any] | list[Any]) -> tuple[RpToolInfo, ...]:
         raw_tools: Any
