@@ -66,8 +66,25 @@ jobs:
       - name: Sync dependencies
         run: uv sync --extra dev
 
+      - name: Install rp-cli stub for smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv pip install --python .venv/bin/python ./tools/rp-cli-stub
+          ln -sf "$(pwd)/.venv/bin/rp-cli-stub" .venv/bin/rp-cli
+
+      - name: RP conformance smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run aiwf conformance rp --rp-command rp-cli-stub --json | tee rp-conformance-report.json
+
       - name: Doctor JSON gate
-        run: uv run aiwf doctor --json > doctor-report.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run aiwf doctor --json > doctor-report.json
+          uv run python -c "import json; report=json.load(open('doctor-report.json', encoding='utf-8')); rp=next(c for c in report['checks'] if c.get('category')=='tool' and c.get('name')=='rp'); assert rp.get('protocol_supported') is True, rp; assert rp.get('protocol_version')==1, rp"
 
       - name: Compile smoke
         shell: bash
@@ -78,9 +95,11 @@ jobs:
           uv run aiwf compile codex --ai-root .ai --output "$tmpdir/codex"
           uv run aiwf compile rp --ai-root .ai --output "$tmpdir/rp"
 
-      - name: Upload doctor report on failure
+      - name: Upload smoke reports on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: doctor-report
-          path: doctor-report.json
+          name: workflow-smoke-reports
+          path: |
+            doctor-report.json
+            rp-conformance-report.json
