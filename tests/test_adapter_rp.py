@@ -223,6 +223,29 @@ def test_rp_agent_adapter_manual_bridge_context_builder_opt_in_is_additive(tmp_p
     assert context_builder_artifact["status"] == "ok"
 
 
+def test_rp_agent_adapter_task_driven_bridge_search_adds_discovered_paths(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    task = task.model_copy(update={"body": "focus_query: AuthService\nfocus_paths: src/auth\n"})
+    bridge_config = RpBridgeRunConfig(mode="manual-assist", workspace="workspace-alpha", context_id="ctx-123")
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="seed-search-ok")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+
+    seeding_artifact = json.loads((run_dir / "rp-bridge-seeding.json").read_text(encoding="utf-8"))
+    search_artifact = json.loads((run_dir / "rp-bridge-search.json").read_text(encoding="utf-8"))
+
+    assert result.status is RunStatus.blocked
+    assert "file_search" in seeding_artifact["attempted_tools"]
+    assert seeding_artifact["search_artifact"] == "rp-bridge-search.json"
+    assert seeding_artifact["discovered_paths"] == ["src/auth/service.py"]
+    assert "src/auth/service.py" in seeding_artifact["selected_paths"]
+    assert search_artifact["queries"][0]["query"] == "AuthService"
+    assert search_artifact["queries"][0]["matched_paths"] == ["src/auth/service.py"]
+
+
 def test_rp_agent_adapter_review_oracle_capture_is_advisory_only(tmp_path: Path) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
     bridge_config = RpBridgeRunConfig(
@@ -777,6 +800,10 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    raise SystemExit(3)\n"
             "\n"
             "if tool == 'file_search':\n"
+            "    if MODE == 'seed-search-ok' and payload.get('pattern') == 'AuthService':\n"
+            "        sys.stdout.write(json.dumps({'count': 1, 'truncated': False, 'matches': [{'path': 'src/auth/service.py', 'line': 12, 'snippet': 'class AuthService:'}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"

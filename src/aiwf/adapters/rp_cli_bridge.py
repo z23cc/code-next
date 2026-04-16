@@ -172,7 +172,38 @@ class RpReadFileResult:
     content: str | None = None
     workspace: str | None = None
     context_id: str | None = None
+    resolved_source: str | None = None
+    start_line: int | None = None
+    limit: int | None = None
     error: RpBridgeError | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpFileSearchMatch:
+    """A single file_search match returned by the RP bridge."""
+
+    path: str
+    line: int | None = None
+    snippet: str | None = None
+    raw_payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RpFileSearchResult:
+    """Typed result of a bridge-side `file_search` call."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    query: str
+    matches: tuple[RpFileSearchMatch, ...] = ()
+    matched_paths: tuple[str, ...] = ()
+    count: int | None = None
+    truncated: bool = False
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
     raw_stdout: str | None = None
     raw_stderr: str | None = None
 
@@ -868,6 +899,8 @@ class RpCliBridgeClient:
         workspace: str | None = None,
         tab: str | None = None,
         context_id: str | None = None,
+        start_line: int | None = None,
+        limit: int | None = None,
     ) -> RpReadFileResult:
         capability_error = self._capability_error("read_file")
         if capability_error is not None:
@@ -882,6 +915,10 @@ class RpCliBridgeClient:
             payload["tab"] = tab
         if context_id is not None:
             payload["context_id"] = context_id
+        if start_line is not None:
+            payload["start_line"] = start_line
+        if limit is not None:
+            payload["limit"] = limit
 
         invocation = self._invoke_tool("read_file", payload, context="read_file")
         if not invocation.ok:
@@ -890,6 +927,8 @@ class RpCliBridgeClient:
                 command=invocation.command,
                 path=invocation.path,
                 source=normalized_source,
+                start_line=start_line,
+                limit=limit,
                 error=invocation.error,
                 raw_stdout=invocation.stdout,
                 raw_stderr=invocation.stderr,
@@ -901,6 +940,8 @@ class RpCliBridgeClient:
                 command=invocation.command,
                 path=invocation.path,
                 source=normalized_source,
+                start_line=start_line,
+                limit=limit,
                 error=self._malformed_response_error(
                     invocation,
                     context="read_file",
@@ -916,6 +957,8 @@ class RpCliBridgeClient:
                 command=invocation.command,
                 path=invocation.path,
                 source=normalized_source,
+                start_line=start_line,
+                limit=limit,
                 error=self._malformed_response_error(
                     invocation,
                     context="read_file",
@@ -932,6 +975,78 @@ class RpCliBridgeClient:
             content=content,
             workspace=self._optional_string(response.get("workspace")) or workspace,
             context_id=self._optional_string(response.get("context_id")) or context_id,
+            resolved_source=self._optional_string(response.get("source")) or self._optional_string(response.get("path")),
+            start_line=start_line,
+            limit=limit,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def file_search(
+        self,
+        query: str,
+        *,
+        scope_paths: Sequence[str] | None = None,
+        max_results: int | None = 20,
+        include_snippets: bool = True,
+    ) -> RpFileSearchResult:
+        capability_error = self._capability_error("file_search")
+        normalized_query = query.strip()
+        if capability_error is not None:
+            return RpFileSearchResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                query=normalized_query,
+                error=capability_error,
+            )
+        if not normalized_query:
+            raise ValueError("file_search requires a non-empty query")
+        payload: dict[str, Any] = {"pattern": normalized_query}
+        normalized_scope = [path.strip() for path in (scope_paths or ()) if isinstance(path, str) and path.strip()]
+        if normalized_scope:
+            payload["filter"] = {"paths": normalized_scope}
+        if max_results is not None:
+            payload["max_results"] = max_results
+        payload["context_lines"] = 1 if include_snippets else 0
+
+        invocation = self._invoke_tool("file_search", payload, context="file_search")
+        if not invocation.ok:
+            return RpFileSearchResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                query=normalized_query,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="file_search")
+        if response is not None and not isinstance(response, (dict, list)):
+            return RpFileSearchResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                query=normalized_query,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="file_search",
+                    message="file_search did not return a JSON object or list",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        parsed = self._extract_file_search_matches(response)
+        return RpFileSearchResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            query=normalized_query,
+            matches=parsed,
+            matched_paths=tuple(sorted({match.path for match in parsed})),
+            count=(len(parsed) if isinstance(response, list) else self._optional_int(response.get("count")) if isinstance(response, dict) else None),
+            truncated=self._optional_bool(response.get("truncated")) if isinstance(response, dict) else False,
+            raw_payload=response,
             raw_stdout=invocation.stdout,
             raw_stderr=invocation.stderr,
         )
@@ -2254,6 +2369,37 @@ class RpCliBridgeClient:
             return ()
         return tuple(path.strip() for path in raw_paths if isinstance(path, str) and path.strip())
 
+    def _extract_file_search_matches(self, payload: dict[str, Any] | list[Any] | None) -> tuple[RpFileSearchMatch, ...]:
+        if payload is None:
+            return ()
+        raw_matches: list[Any]
+        if isinstance(payload, list):
+            raw_matches = payload
+        elif isinstance(payload, dict):
+            candidate = payload.get("matches")
+            raw_matches = candidate if isinstance(candidate, list) else []
+        else:
+            raw_matches = []
+
+        matches: list[RpFileSearchMatch] = []
+        for raw_match in raw_matches:
+            if isinstance(raw_match, str) and raw_match.strip():
+                matches.append(RpFileSearchMatch(path=raw_match.strip()))
+                continue
+            if not isinstance(raw_match, dict):
+                continue
+            path = self._optional_string(raw_match.get("path")) or self._optional_string(raw_match.get("file"))
+            if path is None:
+                continue
+            line = self._optional_int(raw_match.get("line")) or self._optional_int(raw_match.get("line_number"))
+            snippet = (
+                self._optional_string(raw_match.get("snippet"))
+                or self._optional_string(raw_match.get("line_text"))
+                or self._optional_string(raw_match.get("text"))
+            )
+            matches.append(RpFileSearchMatch(path=path, line=line, snippet=snippet, raw_payload=dict(raw_match)))
+        return tuple(matches)
+
     def _extract_string_list(self, payload: dict[str, Any], *, keys: Sequence[str]) -> tuple[str, ...]:
         for key in keys:
             raw = payload.get(key)
@@ -2328,6 +2474,8 @@ __all__ = [
     "RpBridgeProbeResult",
     "RpCliBridgeClient",
     "RpContextBuilderResult",
+    "RpFileSearchMatch",
+    "RpFileSearchResult",
     "RpManageSelectionResult",
     "RpReadFileResult",
     "RpToolInfo",

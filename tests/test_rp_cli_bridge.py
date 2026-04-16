@@ -133,6 +133,35 @@ def test_rp_cli_bridge_read_file_success(tmp_path: Path) -> None:
     assert result.context_id == "ctx-123"
 
 
+def test_rp_cli_bridge_read_file_with_line_range_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="read-ok")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    result = client.read_file("implement-response.md", start_line=3, limit=2)
+
+    assert result.ok is True
+    assert result.start_line == 3
+    assert result.limit == 2
+    payload = json.loads(result.command[result.command.index("-j") + 1])
+    assert payload["start_line"] == 3
+    assert payload["limit"] == 2
+    assert "[range 3:2]" in (result.content or "")
+
+
+def test_rp_cli_bridge_file_search_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="read-ok")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    result = client.file_search("AuthService", scope_paths=["src/"], max_results=5)
+
+    assert result.ok is True
+    assert result.count == 2
+    assert result.truncated is False
+    assert result.matched_paths == ("src/auth/service.py", "src/auth/tests/test_service.py")
+    assert result.matches[0].path == "src/auth/service.py"
+    assert result.matches[0].line == 12
+
+
 def test_rp_cli_bridge_agent_run_surfaces_success(tmp_path: Path) -> None:
     script_path = _write_fake_rp_bridge_cli(tmp_path, mode="agent-complete")
     client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
@@ -385,6 +414,11 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    raise SystemExit(0)\n"
             "\n"
             "if tool == 'file_search':\n"
+            "    pattern = payload.get('pattern', '')\n"
+            "    if pattern == 'AuthService':\n"
+            "        sys.stdout.write(json.dumps({'count': 2, 'truncated': False, 'matches': [{'path': 'src/auth/service.py', 'line': 12, 'snippet': 'class AuthService:'}, {'path': 'src/auth/tests/test_service.py', 'line': 7, 'snippet': 'def test_auth_service():'}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
@@ -438,7 +472,9 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        raise SystemExit(0)\n"
             "    source = payload.get('source')\n"
             "    content = '# Implemented from RepoPrompt\\n' if source == 'implement-response.md' else '{\"summary\": \"Looks good\", \"issues\": []}'\n"
-            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'content': content}))\n"
+            "    if payload.get('start_line') is not None and payload.get('limit') is not None:\n"
+            "        content = content + f'[range {payload.get(\"start_line\")}:{payload.get(\"limit\")}]'\n"
+            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'source': source, 'content': content}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

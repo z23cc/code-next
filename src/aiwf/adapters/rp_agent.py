@@ -22,6 +22,9 @@ from aiwf.models import (
     RpBridgeContextBuilderArtifact,
     RpBridgeManagedAgentRecord,
     RpBridgeOracleArtifact,
+    RpBridgeSearchArtifact,
+    RpBridgeSearchMatch,
+    RpBridgeSearchQuery,
     RpBridgeResolvedIdentity,
     RpBridgeRunConfig,
     RpBridgeSeedingArtifact,
@@ -230,7 +233,7 @@ class RpAgentAdapter:
         if self._is_managed_agent_bridge():
             return self._execute_managed_agent(task, plan, run_dir)
 
-        bridge_seeding = self._seed_bridge_context(run_dir)
+        bridge_seeding = self._seed_bridge_context(run_dir, task=task)
         prompt = self._build_execute_prompt(task, plan, run_dir, bridge_seeding=bridge_seeding)
         prompt_path = run_dir / "rp-agent-implement-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -804,7 +807,7 @@ class RpAgentAdapter:
 
     def _execute_managed_agent(self, task: TaskSpec, plan: str, run_dir: Path) -> StageResult:
         bridge_config = self._require_bridge_config_mode("managed-agent")
-        bridge_seeding = self._seed_bridge_context(run_dir)
+        bridge_seeding = self._seed_bridge_context(run_dir, task=task)
         prompt = self._build_execute_prompt(task, plan, run_dir, bridge_seeding=bridge_seeding)
         prompt_path = run_dir / "rp-agent-implement-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -1761,13 +1764,15 @@ class RpAgentAdapter:
 
         return self._resolved_bridge_targets(bridge_config)
 
-    def _seed_bridge_context(self, run_dir: Path) -> RpBridgeSeedingArtifact | None:
+    def _seed_bridge_context(self, run_dir: Path, *, task: TaskSpec | None = None) -> RpBridgeSeedingArtifact | None:
         bridge_config = self._active_bridge_config()
         if bridge_config is None:
             return None
 
         selected_artifacts = [name for name in ("context-pack.md", "exec-plan.md") if (run_dir / name).exists()]
         seed_paths = self._bridge_seed_paths(run_dir, selected_artifacts)
+        discovered_paths: list[str] = []
+        search_artifact_name: str | None = None
         calls: list[RpBridgeToolCall] = []
         client = self._build_bridge_client(bridge_config)
         if client is None:
@@ -1783,9 +1788,11 @@ class RpAgentAdapter:
                     "manually add the aiwf run artifacts before continuing the handoff."
                 ),
                 selected_artifacts=selected_artifacts,
-                selected_paths=seed_paths,
-                attempted_tools=[],
-                calls=[],
+                    selected_paths=seed_paths,
+                    discovered_paths=discovered_paths,
+                    search_artifact=search_artifact_name,
+                    attempted_tools=[],
+                    calls=[],
             )
             self._write_bridge_seeding_artifact(run_dir, artifact)
             return artifact
@@ -1822,6 +1829,8 @@ class RpAgentAdapter:
                     ),
                     selected_artifacts=selected_artifacts,
                     selected_paths=seed_paths,
+                    discovered_paths=discovered_paths,
+                    search_artifact=search_artifact_name,
                     attempted_tools=[],
                     calls=calls,
                 )
@@ -1835,6 +1844,53 @@ class RpAgentAdapter:
                 calls=calls,
                 attempted_tools=attempted_tools,
             )
+            search_query, search_scope_paths = self._bridge_task_search_hints(task)
+            if search_query:
+                attempted_tools.append("file_search")
+                search_result = client.file_search(search_query, scope_paths=search_scope_paths, max_results=20, include_snippets=False)
+                calls.append(
+                    self._bridge_call(
+                        step="file_search_discovery",
+                        tool="file_search",
+                        ok=search_result.ok,
+                        command=search_result.command,
+                        summary=(
+                            f"Bridge file_search discovered {len(search_result.matched_paths)} path(s) for task-driven exploration"
+                            if search_result.ok
+                            else self._bridge_error_summary(search_result.error, fallback="task-driven bridge file_search was unavailable")
+                        ),
+                        error=search_result.error,
+                        detail={
+                            "query": search_query,
+                            "scope_paths": search_scope_paths,
+                            "matched_paths": list(search_result.matched_paths),
+                            "truncated": search_result.truncated,
+                        },
+                    )
+                )
+                if search_result.ok:
+                    discovered_paths = [path for path in search_result.matched_paths if path not in seed_paths]
+                    if discovered_paths:
+                        seed_paths = [*seed_paths, *discovered_paths]
+                search_artifact_name = self._write_bridge_search_artifact(
+                    run_dir,
+                    RpBridgeSearchArtifact(
+                        queries=[
+                            RpBridgeSearchQuery(
+                                query=search_query,
+                                scope_paths=search_scope_paths,
+                                max_results=20,
+                                truncated=search_result.truncated,
+                                matched_paths=list(search_result.matched_paths),
+                                matches=[
+                                    RpBridgeSearchMatch(path=match.path, line=match.line, snippet=match.snippet)
+                                    for match in search_result.matches
+                                ],
+                            )
+                        ]
+                    ),
+                )
+
             attempted_tools.append("workspace_context")
             context_result = client.workspace_context(resolved_workspace)
             calls.append(
@@ -2044,6 +2100,8 @@ class RpAgentAdapter:
                     ),
                     selected_artifacts=selected_artifacts,
                     selected_paths=seed_paths,
+                    discovered_paths=discovered_paths,
+                    search_artifact=search_artifact_name,
                     attempted_tools=attempted_tool_names,
                     calls=calls,
                 )
@@ -2074,6 +2132,8 @@ class RpAgentAdapter:
                 ),
                 selected_artifacts=selected_artifacts,
                 selected_paths=final_selected_paths,
+                discovered_paths=discovered_paths,
+                search_artifact=search_artifact_name,
                 attempted_tools=attempted_tool_names,
                 calls=calls,
             )
@@ -2093,6 +2153,8 @@ class RpAgentAdapter:
                 ),
                 selected_artifacts=selected_artifacts,
                 selected_paths=seed_paths,
+                discovered_paths=discovered_paths,
+                search_artifact=search_artifact_name,
                 attempted_tools=[],
                 calls=[
                     *calls,
@@ -2140,6 +2202,35 @@ class RpAgentAdapter:
     def _write_bridge_oracle_artifact(self, run_dir: Path, artifact: RpBridgeOracleArtifact) -> None:
         artifact_path = run_dir / "rp-bridge-oracle.json"
         artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def _write_bridge_search_artifact(self, run_dir: Path, artifact: RpBridgeSearchArtifact) -> str:
+        artifact_path = run_dir / "rp-bridge-search.json"
+        artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return artifact_path.name
+
+    def _bridge_task_search_hints(self, task: TaskSpec | None) -> tuple[str | None, list[str]]:
+        if task is None:
+            return None, []
+        body = task.body or ""
+        if not body.strip():
+            return None, []
+
+        query: str | None = None
+        scope_paths: list[str] = []
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            lowered = line.casefold()
+            if lowered.startswith("focus_query:") or lowered.startswith("bridge_focus_query:"):
+                _, _, raw_value = line.partition(":")
+                candidate = raw_value.strip()
+                if candidate:
+                    query = candidate
+            if lowered.startswith("focus_paths:") or lowered.startswith("bridge_focus_paths:"):
+                _, _, raw_value = line.partition(":")
+                values = [item.strip() for item in raw_value.split(",") if item.strip()]
+                if values:
+                    scope_paths = values
+        return query, scope_paths
 
     def _bridge_context_builder_instructions(
         self,

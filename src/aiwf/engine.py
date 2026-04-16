@@ -20,6 +20,7 @@ from aiwf.models import (
     RpBridgeManagedAgentRecordContent,
     RpBridgeOracleArtifactContent,
     RpBridgeRunConfig,
+    RpBridgeSearchArtifactContent,
     RunArtifactRef,
     RunBridgeDiagnostics,
     RunDiagnostics,
@@ -756,6 +757,12 @@ class WorkflowEngine:
             related_artifacts=[name for name in ["rp-bridge-seeding.json", "context-pack.md", "exec-plan.md"] if name in artifact_refs],
         )
         add_artifact(
+            "rp-bridge-search.json",
+            stage="implement",
+            category="bridge_search",
+            related_artifacts=[name for name in ["rp-bridge-seeding.json", "context-pack.md", "exec-plan.md"] if name in artifact_refs],
+        )
+        add_artifact(
             "rp-bridge-oracle.json",
             stage="review",
             category="bridge_oracle",
@@ -969,6 +976,17 @@ class WorkflowEngine:
         except ArtifactError:
             return None
 
+    def _load_bridge_search_artifact(self, run_dir: Path) -> RpBridgeSearchArtifactContent | None:
+        artifact_path = run_dir / "rp-bridge-search.json"
+        if not artifact_path.exists():
+            return None
+        try:
+            return ArtifactStore(run_dir, state_manager=self.state_manager).read_validated_artifact(
+                "rp-bridge-search.json", RpBridgeSearchArtifactContent
+            )
+        except ArtifactError:
+            return None
+
     def _latest_bridge_agent_record(
         self,
         run_dir: Path,
@@ -1067,6 +1085,7 @@ class WorkflowEngine:
             handoff_artifacts = self._linked_review_artifact_names_from_run_dir(run_dir)
 
         bridge_seeding = self._load_bridge_seeding_artifact(run_dir)
+        bridge_search = self._load_bridge_search_artifact(run_dir)
         bridge_context_builder = self._load_bridge_context_builder_artifact(run_dir)
         bridge_oracle = self._load_bridge_oracle_artifact(run_dir)
         bridge_agent_log = self._load_bridge_agent_log_artifact(run_dir)
@@ -1086,6 +1105,12 @@ class WorkflowEngine:
             seeding_artifact="rp-bridge-seeding.json" if bridge_seeding is not None else None,
             seeding_status=bridge_seeding.status if bridge_seeding is not None else None,
             seeding_summary=bridge_seeding.summary if bridge_seeding is not None else None,
+            search_artifact=(
+                bridge_seeding.search_artifact
+                if bridge_seeding is not None and bridge_seeding.search_artifact is not None
+                else "rp-bridge-search.json" if bridge_search is not None else None
+            ),
+            discovered_paths=list(bridge_seeding.discovered_paths if bridge_seeding is not None else []),
             context_builder_artifact="rp-bridge-context-builder.json" if bridge_context_builder is not None else None,
             oracle_artifact="rp-bridge-oracle.json" if bridge_oracle is not None else None,
             oracle_status=bridge_oracle.status if bridge_oracle is not None else None,

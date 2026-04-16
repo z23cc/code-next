@@ -40,7 +40,11 @@ from aiwf.exceptions import AiwfError
 from aiwf.models import (
     RpBridgeCaptureArtifact,
     RpBridgeCaptureRecord,
+    RpBridgeCaptureResolution,
     RpBridgeRunConfig,
+    RpBridgeSearchArtifact,
+    RpBridgeSearchMatch,
+    RpBridgeSearchQuery,
     RpBridgeToolCall,
     RunMeta,
     RunStatus,
@@ -275,6 +279,17 @@ def _resolve_bridge_capture_run(ai_root: Path, run_id: str) -> tuple[RunMeta, Ho
     return meta, host_contract, bridge_config
 
 
+def _resolve_bridge_search_run(ai_root: Path, run_id: str) -> tuple[RunMeta, HostContract, RpBridgeRunConfig]:
+    state_manager = RunStateManager(ai_root)
+    meta = state_manager.load_run(run_id)
+    host_contract, bridge_config = _resolve_run_execution_payload(ai_root, run_id)
+    if host_contract.adapter != "rp" or host_contract.mode != "manual":
+        raise AiwfError(f"Run {run_id} does not use the rp/manual bridge handoff path")
+    if bridge_config is None or bridge_config.mode == "disabled":
+        raise AiwfError(f"Run {run_id} does not include bridge metadata")
+    return meta, host_contract, bridge_config
+
+
 def _build_bridge_capture_client(host_contract: HostContract, bridge_config: RpBridgeRunConfig) -> RpCliBridgeClient:
     timeout_seconds = bridge_config.timeout_seconds or 5
     client = RpCliBridgeClient.from_command_candidates(
@@ -302,6 +317,46 @@ def _bridge_tool_call_from_read_result(result: object, *, step: str, tool: str =
         error_code=getattr(error, "code", None),
         error_message=getattr(error, "message", None),
         detail=dict(getattr(error, "detail", {}) or {}),
+    )
+
+
+def _parse_source_range(raw_source_range: str | None) -> tuple[int | None, int | None, str | None]:
+    if raw_source_range is None:
+        return None, None, None
+    normalized = raw_source_range.strip()
+    if not normalized:
+        raise AiwfError("--source-range must be non-empty when provided")
+    if ":" not in normalized:
+        raise AiwfError("--source-range must be formatted as START:END")
+    start_text, _, end_text = normalized.partition(":")
+    try:
+        start_value = int(start_text.strip())
+        end_value = int(end_text.strip())
+    except ValueError as exc:
+        raise AiwfError("--source-range must use integer START and END values") from exc
+    if start_value <= 0 or end_value < start_value:
+        raise AiwfError("--source-range must satisfy START>0 and END>=START")
+    return start_value, (end_value - start_value + 1), f"{start_value}:{end_value}"
+
+
+def _load_bridge_search_artifact(store: ArtifactStore) -> RpBridgeSearchArtifact:
+    search_path = store.run_dir / "rp-bridge-search.json"
+    if not search_path.exists():
+        return RpBridgeSearchArtifact()
+    artifact = store.read_artifact("rp-bridge-search.json")
+    if not isinstance(artifact, dict):
+        raise AiwfError(f"Stored bridge search artifact for run {store.run_id} is invalid")
+    try:
+        return RpBridgeSearchArtifact.model_validate(artifact)
+    except Exception as exc:
+        raise AiwfError(f"Stored bridge search artifact for run {store.run_id} is invalid: {exc}") from exc
+
+
+def _append_bridge_search_query(store: ArtifactStore, query: RpBridgeSearchQuery) -> None:
+    search_artifact = _load_bridge_search_artifact(store)
+    store.write_json_artifact(
+        "rp-bridge-search.json",
+        RpBridgeSearchArtifact(version=search_artifact.version, queries=[*search_artifact.queries, query]),
     )
 
 
@@ -344,6 +399,8 @@ def _capture_bridge_stage(
     run_id: str,
     stage: Literal["implement", "review"],
     source: str,
+    resolve_source: bool = False,
+    source_range: str | None = None,
 ) -> dict[str, str]:
     meta, host_contract, bridge_config = _resolve_bridge_capture_run(ai_root, run_id)
     if meta.status is not RunStatus.blocked or meta.last_completed_stage != stage:
@@ -354,13 +411,71 @@ def _capture_bridge_stage(
 
     client = _build_bridge_capture_client(host_contract, bridge_config)
     store = ArtifactStore(Path(meta.run_dir), state_manager=RunStateManager(ai_root))
+    read_start_line, read_limit, normalized_source_range = _parse_source_range(source_range)
+
+    resolved_source = source.strip()
+    if not resolved_source:
+        raise AiwfError("Bridge capture source must be non-empty")
+    resolution = RpBridgeCaptureResolution(method="exact", matched_paths=[resolved_source], source_range=normalized_source_range)
+    calls: list[RpBridgeToolCall] = []
+
+    if resolve_source:
+        search_result = client.file_search(resolved_source, max_results=10, include_snippets=False)
+        calls.append(_bridge_tool_call_from_read_result(search_result, step=f"capture_{stage}_resolve_source", tool="file_search"))
+        if not search_result.ok:
+            message = search_result.error.message if search_result.error is not None else "RP bridge file_search failed"
+            _upsert_bridge_capture_record(
+                store,
+                RpBridgeCaptureRecord(
+                    stage=stage,
+                    source=source,
+                    status="refused",
+                    workspace=bridge_config.workspace,
+                    context_id=bridge_config.context_id,
+                    resolution=RpBridgeCaptureResolution(method="file_search", matched_paths=[], source_range=normalized_source_range),
+                    summary=message,
+                    calls=calls,
+                ),
+            )
+            _refresh_run_surfaces(ai_root, repo_root, run_id)
+            raise AiwfError(f"Bridge capture failed for run {run_id} at {stage}: {message}")
+        if len(search_result.matched_paths) != 1:
+            candidate_summary = ", ".join(search_result.matched_paths[:5]) or "none"
+            message = (
+                f"Bridge capture source resolution requires exactly one match; found {len(search_result.matched_paths)} "
+                f"candidate(s): {candidate_summary}"
+            )
+            _upsert_bridge_capture_record(
+                store,
+                RpBridgeCaptureRecord(
+                    stage=stage,
+                    source=source,
+                    status="refused",
+                    workspace=bridge_config.workspace,
+                    context_id=bridge_config.context_id,
+                    resolution=RpBridgeCaptureResolution(
+                        method="file_search",
+                        matched_paths=list(search_result.matched_paths),
+                        source_range=normalized_source_range,
+                    ),
+                    summary=message,
+                    calls=calls,
+                ),
+            )
+            _refresh_run_surfaces(ai_root, repo_root, run_id)
+            raise AiwfError(f"Bridge capture refused for run {run_id} at {stage}: {message}")
+        resolved_source = search_result.matched_paths[0]
+        resolution = RpBridgeCaptureResolution(method="file_search", matched_paths=[resolved_source], source_range=normalized_source_range)
+
     read_result = client.read_file(
-        source,
+        resolved_source,
         workspace=bridge_config.workspace,
         tab=bridge_config.tab,
         context_id=bridge_config.context_id,
+        start_line=read_start_line,
+        limit=read_limit,
     )
-    calls = [_bridge_tool_call_from_read_result(read_result, step=f"capture_{stage}")]
+    calls.append(_bridge_tool_call_from_read_result(read_result, step=f"capture_{stage}", tool="read_file"))
     record_workspace = getattr(read_result, "workspace", None) or bridge_config.workspace
     record_context_id = getattr(read_result, "context_id", None) or bridge_config.context_id
 
@@ -373,6 +488,7 @@ def _capture_bridge_stage(
                 status="refused",
                 workspace=record_workspace,
                 context_id=record_context_id,
+                resolution=resolution,
                 summary=summary,
                 calls=calls,
             ),
@@ -424,6 +540,7 @@ def _capture_bridge_stage(
             status="captured",
             workspace=record_workspace,
             context_id=record_context_id,
+            resolution=resolution,
             response_artifact=response_artifact_name,
             review_report_artifact=review_report_artifact,
             summary=summary,
@@ -810,6 +927,7 @@ def _build_inspection_payload(
     provenance = _load_optional_run_surface(ai_root, run_id, "run-provenance.json")
     review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
     bridge_seeding = _load_optional_run_surface(ai_root, run_id, "rp-bridge-seeding.json")
+    bridge_search = _load_optional_run_surface(ai_root, run_id, "rp-bridge-search.json")
     bridge_context_builder = _load_optional_run_surface(ai_root, run_id, "rp-bridge-context-builder.json")
     bridge_oracle = _load_optional_run_surface(ai_root, run_id, "rp-bridge-oracle.json")
     bridge_capture = _load_optional_run_surface(ai_root, run_id, "rp-bridge-capture.json")
@@ -839,6 +957,7 @@ def _build_inspection_payload(
         "provenance": provenance,
         "review_report": review_report,
         "bridge_seeding": bridge_seeding,
+        "bridge_search": bridge_search,
         "bridge_context_builder": bridge_context_builder,
         "bridge_oracle": bridge_oracle,
         "bridge_capture": bridge_capture,
@@ -850,6 +969,7 @@ def _build_inspection_payload(
             "provenance": str(_artifact_path(ai_root, run_id, "run-provenance.json")),
             "review_report": str(_artifact_path(ai_root, run_id, "review-report.json")) if review_report is not None else None,
             "bridge_seeding": str(_artifact_path(ai_root, run_id, "rp-bridge-seeding.json")) if bridge_seeding is not None else None,
+            "bridge_search": str(_artifact_path(ai_root, run_id, "rp-bridge-search.json")) if bridge_search is not None else None,
             "bridge_context_builder": str(_artifact_path(ai_root, run_id, "rp-bridge-context-builder.json")) if bridge_context_builder is not None else None,
             "bridge_oracle": str(_artifact_path(ai_root, run_id, "rp-bridge-oracle.json")) if bridge_oracle is not None else None,
             "bridge_capture": str(_artifact_path(ai_root, run_id, "rp-bridge-capture.json")) if bridge_capture is not None else None,
@@ -1179,6 +1299,8 @@ def _print_inspection(
         seeding_artifact = diagnostics_bridge.get("seeding_artifact")
         seeding_status = diagnostics_bridge.get("seeding_status")
         seeding_summary = diagnostics_bridge.get("seeding_summary")
+        search_artifact = diagnostics_bridge.get("search_artifact")
+        discovered_paths = diagnostics_bridge.get("discovered_paths")
         context_builder_artifact = diagnostics_bridge.get("context_builder_artifact")
         oracle_artifact = diagnostics_bridge.get("oracle_artifact")
         oracle_status = diagnostics_bridge.get("oracle_status")
@@ -1188,6 +1310,10 @@ def _print_inspection(
             console.print(f"bridge_seeding_status={seeding_status}")
         if isinstance(seeding_summary, str) and seeding_summary.strip():
             console.print(f"bridge_seeding_summary={seeding_summary}")
+        if isinstance(search_artifact, str) and search_artifact.strip():
+            console.print(f"bridge_search_artifact={search_artifact}")
+        if isinstance(discovered_paths, list) and discovered_paths:
+            console.print(f"bridge_discovered_paths={_format_csv([str(path) for path in discovered_paths])}")
         if isinstance(context_builder_artifact, str) and context_builder_artifact.strip():
             console.print(f"bridge_context_builder_artifact={context_builder_artifact}")
         if isinstance(oracle_artifact, str) and oracle_artifact.strip():
@@ -1302,6 +1428,8 @@ def _print_inspection(
     console.print(f"provenance={artifacts['provenance']}")
     if artifacts.get("bridge_seeding"):
         console.print(f"bridge_seeding={artifacts['bridge_seeding']}")
+    if artifacts.get("bridge_search"):
+        console.print(f"bridge_search={artifacts['bridge_search']}")
     if artifacts.get("bridge_context_builder"):
         console.print(f"bridge_context_builder={artifacts['bridge_context_builder']}")
     if artifacts.get("bridge_oracle"):
@@ -1434,6 +1562,70 @@ def resume(
     _execute_command("resume", ai_root, lambda: engine.resume(run_id))
 
 
+@bridge_app.command("search")
+def rp_bridge_search(
+    run_id: str,
+    query: Annotated[
+        str,
+        typer.Option("--query", help="Search query passed to RP bridge file_search."),
+    ],
+    scope: Annotated[
+        list[str] | None,
+        typer.Option("--scope", help="Optional path scopes passed to RP bridge file_search filter.paths."),
+    ] = None,
+    max_results: Annotated[int, typer.Option("--max-results", min=1, help="Maximum RP bridge file_search results.")] = 20,
+    ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
+    repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
+    json_output: Annotated[bool, typer.Option("--json", help="Render rp bridge search output as JSON.")] = False,
+) -> None:
+    """Run read-only RepoPrompt bridge file_search for a run and persist provenance."""
+    try:
+        meta, host_contract, bridge_config = _resolve_bridge_search_run(ai_root, run_id)
+        client = _build_bridge_capture_client(host_contract, bridge_config)
+        store = ArtifactStore(Path(meta.run_dir), state_manager=RunStateManager(ai_root))
+        result = client.file_search(query, scope_paths=scope or None, max_results=max_results)
+        if not result.ok:
+            message = result.error.message if result.error is not None else "RP bridge file_search failed"
+            raise AiwfError(f"rp bridge search failed for run {run_id}: {message}")
+
+        query_record = RpBridgeSearchQuery(
+            query=query.strip(),
+            scope_paths=[item.strip() for item in (scope or []) if item.strip()],
+            max_results=max_results,
+            truncated=result.truncated,
+            matched_paths=list(result.matched_paths),
+            matches=[
+                RpBridgeSearchMatch(path=match.path, line=match.line, snippet=match.snippet)
+                for match in result.matches
+            ],
+        )
+        _append_bridge_search_query(store, query_record)
+        _refresh_run_surfaces(ai_root, repo_root, run_id)
+
+        payload = {
+            "ok": True,
+            "run_id": run_id,
+            "query": query_record.model_dump(mode="json"),
+            "artifact": str(_artifact_path(ai_root, run_id, "rp-bridge-search.json")),
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+        console.print(
+            "[green]rp bridge search completed[/green] "
+            f"run_id={run_id} matches={len(result.matched_paths)} truncated={result.truncated}"
+        )
+        if result.matched_paths:
+            console.print(f"matched_paths={_format_csv(result.matched_paths)}")
+        console.print(f"bridge_search={payload['artifact']}")
+    except AiwfError as exc:
+        if json_output:
+            typer.echo(json.dumps({"ok": False, "run_id": run_id, "error": str(exc)}, indent=2, ensure_ascii=False))
+        else:
+            console.print(f"[red]rp bridge search failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
 @bridge_app.command("capture")
 def rp_bridge_capture(
     run_id: str,
@@ -1445,12 +1637,28 @@ def rp_bridge_capture(
         str,
         typer.Option("--source", help="RepoPrompt-side source identifier/path consumed through bridge read_file."),
     ],
+    resolve_source: Annotated[
+        bool,
+        typer.Option("--resolve-source", help="Resolve --source via RP bridge file_search; requires exactly one match."),
+    ] = False,
+    source_range: Annotated[
+        str | None,
+        typer.Option("--source-range", help="Optional read_file line range START:END for capture."),
+    ] = None,
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
 ) -> None:
     """Capture RepoPrompt-side manual-assist output back into aiwf artifacts."""
     try:
-        result = _capture_bridge_stage(ai_root, repo_root, run_id=run_id, stage=stage, source=source)
+        result = _capture_bridge_stage(
+            ai_root,
+            repo_root,
+            run_id=run_id,
+            stage=stage,
+            source=source,
+            resolve_source=resolve_source,
+            source_range=source_range,
+        )
     except AiwfError as exc:
         console.print(f"[red]rp bridge capture failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc

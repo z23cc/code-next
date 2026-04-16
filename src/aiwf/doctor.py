@@ -448,6 +448,8 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                     readiness_hints.append("context-composition=ready")
                 if any(tool.name == "ask_oracle" for tool in probe_result.tools):
                     readiness_hints.append("advisory-oracle=ready")
+                if any(tool.name == "file_search" for tool in probe_result.tools):
+                    readiness_hints.append("repo-search=ready")
 
                 readiness_suffix = f" Readiness hints: {', '.join(readiness_hints)}." if readiness_hints else ""
                 return DoctorCheck(

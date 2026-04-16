@@ -703,6 +703,123 @@ def test_cli_rp_bridge_p8_options_persist_and_oracle_artifact_is_separate(tmp_pa
 
 
 
+def test_cli_rp_bridge_search_command_persists_read_only_artifact(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="seed-ok")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-workspace",
+            "workspace-alpha",
+        ],
+        env={"PATH": fake_path},
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    search_result = runner.invoke(
+        app,
+        [
+            "rp",
+            "bridge",
+            "search",
+            run_id,
+            "--query",
+            "AuthService",
+            "--scope",
+            "src/auth",
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+        env={"PATH": fake_path},
+    )
+    assert search_result.exit_code == 0
+    assert "rp bridge search completed" in search_result.stdout
+
+    run_dir = ai_root / "runs" / run_id
+    search_artifact = json.loads((run_dir / "rp-bridge-search.json").read_text(encoding="utf-8"))
+    assert search_artifact["queries"][0]["query"] == "AuthService"
+    assert search_artifact["queries"][0]["scope_paths"] == ["src/auth"]
+    assert search_artifact["queries"][0]["matched_paths"] == ["src/auth/service.py"]
+
+    inspect_payload = json.loads(runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"]).stdout)
+    assert inspect_payload["bridge_search"]["queries"][0]["query"] == "AuthService"
+    assert inspect_payload["diagnostics"]["bridge"]["search_artifact"] == "rp-bridge-search.json"
+
+
+def test_cli_rp_bridge_capture_can_resolve_source_and_read_range(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="seed-capture-ok")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-workspace",
+            "workspace-alpha",
+        ],
+        env={"PATH": fake_path},
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    capture_result = runner.invoke(
+        app,
+        [
+            "rp",
+            "bridge",
+            "capture",
+            run_id,
+            "--stage",
+            "implement",
+            "--source",
+            "implement-response.md",
+            "--resolve-source",
+            "--source-range",
+            "2:3",
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+        env={"PATH": fake_path},
+    )
+    assert capture_result.exit_code == 0
+
+    run_dir = ai_root / "runs" / run_id
+    assert "[range 2:2]" in (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8")
+    capture_artifact = json.loads((run_dir / "rp-bridge-capture.json").read_text(encoding="utf-8"))
+    assert capture_artifact["captures"][0]["resolution"]["method"] == "file_search"
+    assert capture_artifact["captures"][0]["resolution"]["matched_paths"] == ["implement-response.md"]
+    assert capture_artifact["captures"][0]["resolution"]["source_range"] == "2:3"
+
+
 def test_cli_inspect_surfaces_bridge_seeding_artifact_and_status(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
     fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="seed-ok")
@@ -2920,6 +3037,19 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    if MODE == 'fail':\n"
             "        sys.stderr.write('tool listing failed\\n')\n"
             "        raise SystemExit(9)\n"
+            "    pattern = payload.get('pattern', '')\n"
+            "    if pattern == 'AuthService':\n"
+            "        sys.stdout.write(json.dumps({'count': 1, 'truncated': False, 'matches': [{'path': 'src/auth/service.py', 'line': 12, 'snippet': 'class AuthService:'}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if pattern == 'implement-response.md':\n"
+            "        if MODE == 'capture-resolve-ambiguous':\n"
+            "            sys.stdout.write(json.dumps({'count': 2, 'matches': [{'path': 'logs/implement-response.md'}, {'path': 'handoff/implement-response.md'}]}))\n"
+            "            sys.stdout.write('\\n')\n"
+            "            raise SystemExit(0)\n"
+            "        sys.stdout.write(json.dumps({'count': 1, 'matches': [{'path': 'implement-response.md'}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
@@ -2988,7 +3118,9 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "            content = json.dumps({'summary': 'Looks good overall', 'issues': [{'severity': 'low', 'message': 'Add one regression test'}]})\n"
             "    else:\n"
             "        content = f'Captured {source}\\n'\n"
-            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'content': content}))\n"
+            "    if payload.get('start_line') is not None and payload.get('limit') is not None:\n"
+            "        content = content + f'[range {payload.get(\"start_line\")}:{payload.get(\"limit\")}]'\n"
+            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'source': source, 'content': content}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

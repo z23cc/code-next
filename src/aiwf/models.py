@@ -270,8 +270,44 @@ class RpBridgeSeedingArtifact(ModelBase):
     summary: str
     selected_artifacts: list[str] = Field(default_factory=list)
     selected_paths: list[str] = Field(default_factory=list)
+    discovered_paths: list[str] = Field(default_factory=list)
+    search_artifact: str | None = None
     attempted_tools: list[str] = Field(default_factory=list)
     calls: list[RpBridgeToolCall] = Field(default_factory=list)
+
+
+class RpBridgeSearchMatch(ModelBase):
+    """A single file_search match persisted for bridge exploration provenance."""
+
+    path: str
+    line: int | None = None
+    snippet: str | None = None
+
+
+class RpBridgeSearchQuery(ModelBase):
+    """A single bridge search query record."""
+
+    query: str
+    scope_paths: list[str] = Field(default_factory=list)
+    max_results: int | None = None
+    truncated: bool = False
+    matched_paths: list[str] = Field(default_factory=list)
+    matches: list[RpBridgeSearchMatch] = Field(default_factory=list)
+
+
+class RpBridgeSearchArtifact(ModelBase):
+    """Typed record of read-only bridge file_search exploration."""
+
+    version: int = 1
+    queries: list[RpBridgeSearchQuery] = Field(default_factory=list)
+
+
+class RpBridgeCaptureResolution(ModelBase):
+    """How a bridge capture source was resolved before read_file."""
+
+    method: Literal["exact", "file_search"]
+    matched_paths: list[str] = Field(default_factory=list)
+    source_range: str | None = None
 
 
 class RpBridgeCaptureRecord(ModelBase):
@@ -284,6 +320,7 @@ class RpBridgeCaptureRecord(ModelBase):
     context_id: str | None = None
     response_artifact: str | None = None
     review_report_artifact: str | None = None
+    resolution: RpBridgeCaptureResolution | None = None
     summary: str
     calls: list[RpBridgeToolCall] = Field(default_factory=list)
 
@@ -416,6 +453,8 @@ class RunBridgeDiagnostics(ModelBase):
     seeding_artifact: str | None = None
     seeding_status: Literal["seeded", "skipped", "failed"] | None = None
     seeding_summary: str | None = None
+    search_artifact: str | None = None
+    discovered_paths: list[str] = Field(default_factory=list)
     context_builder_artifact: str | None = None
     oracle_artifact: str | None = None
     oracle_status: Literal["ok", "failed"] | None = None
@@ -673,10 +712,79 @@ class RpBridgeSeedingArtifactContent(ArtifactSchemaBase):
     summary: StrictStr
     selected_artifacts: list[StrictStr] = Field(default_factory=list)
     selected_paths: list[StrictStr] = Field(default_factory=list)
+    discovered_paths: list[StrictStr] = Field(default_factory=list)
+    search_artifact: StrictStr | None = None
     attempted_tools: list[StrictStr] = Field(default_factory=list)
     calls: list[RpBridgeToolCallContent] = Field(default_factory=list)
 
-    @field_validator("mode", "workspace", "tab", "context_id", "agent_role", "summary")
+    @field_validator("mode", "workspace", "tab", "context_id", "agent_role", "summary", "search_artifact")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeSearchMatchContent(ArtifactSchemaBase):
+    """Strict artifact schema for a single bridge file_search match."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    path: StrictStr
+    line: StrictInt | None = None
+    snippet: StrictStr | None = None
+
+    @field_validator("path", "snippet")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeSearchQueryContent(ArtifactSchemaBase):
+    """Strict artifact schema for a single bridge search query record."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    query: StrictStr
+    scope_paths: list[StrictStr] = Field(default_factory=list)
+    max_results: StrictInt | None = None
+    truncated: StrictBool = False
+    matched_paths: list[StrictStr] = Field(default_factory=list)
+    matches: list[RpBridgeSearchMatchContent] = Field(default_factory=list)
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeSearchArtifactContent(ArtifactSchemaBase):
+    """Strict artifact schema for `rp-bridge-search.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    version: StrictInt = 1
+    queries: list[RpBridgeSearchQueryContent] = Field(default_factory=list)
+
+
+class RpBridgeCaptureResolutionContent(ArtifactSchemaBase):
+    """Strict artifact schema for bridge capture source resolution metadata."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    method: Literal["exact", "file_search"]
+    matched_paths: list[StrictStr] = Field(default_factory=list)
+    source_range: StrictStr | None = None
+
+    @field_validator("source_range")
     @classmethod
     def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
         if value is None:
@@ -698,6 +806,7 @@ class RpBridgeCaptureRecordContent(ArtifactSchemaBase):
     context_id: StrictStr | None = None
     response_artifact: StrictStr | None = None
     review_report_artifact: StrictStr | None = None
+    resolution: RpBridgeCaptureResolutionContent | None = None
     summary: StrictStr
     calls: list[RpBridgeToolCallContent] = Field(default_factory=list)
 
