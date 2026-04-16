@@ -32,7 +32,7 @@ def _probe_payload() -> dict[str, Any]:
     }
 
 
-def _error_payload(code: str) -> dict[str, Any]:
+def _error_payload(code: str, message: str | None = None) -> dict[str, Any]:
     detail: dict[str, Any] = {}
     if code == "UNSUPPORTED_VERSION":
         detail["supported_version"] = VERSION
@@ -43,7 +43,7 @@ def _error_payload(code: str) -> dict[str, Any]:
         "content": None,
         "error": {
             "code": code,
-            "message": f"Forced error: {code}",
+            "message": message or f"Forced error: {code}",
             "retriable": False,
             "detail": detail,
         },
@@ -69,8 +69,35 @@ def _ok_payload(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_json(payload: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload))
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
     sys.stdout.write("\n")
+
+
+def _load_request(raw: str) -> dict[str, Any] | None:
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _validate_request(payload: dict[str, Any]) -> dict[str, Any] | None:
+    if payload.get("protocol") != PROTOCOL:
+        return _error_payload("INVALID_REQUEST", "Request protocol is missing or unsupported.")
+    if payload.get("version") != VERSION:
+        return _error_payload("UNSUPPORTED_VERSION", "Runtime requires a different protocol version.")
+    if not isinstance(payload.get("prompt"), str):
+        return _error_payload("INVALID_REQUEST", "Prompt is required.")
+    if not isinstance(payload.get("request_type"), str):
+        return _error_payload("INVALID_REQUEST", "request_type is required.")
+    if not isinstance(payload.get("stage"), str):
+        return _error_payload("INVALID_REQUEST", "stage is required.")
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,19 +108,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     raw = sys.stdin.read()
-    stripped = raw.strip()
+    payload = _load_request(raw)
 
-    if stripped:
-        try:
-            payload = json.loads(stripped)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, dict):
-            if args.force_error:
-                _write_json(_error_payload(args.force_error))
-                return 0
-            _write_json(_ok_payload(payload))
+    if payload is not None:
+        if args.force_error:
+            _write_json(_error_payload(args.force_error))
             return 0
+        validation_error = _validate_request(payload)
+        if validation_error is not None:
+            _write_json(validation_error)
+            return 0
+        _write_json(_ok_payload(payload))
+        return 0
 
     # Legacy fallback: raw text in, raw text out.
     sys.stdout.write(raw)
