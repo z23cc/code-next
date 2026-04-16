@@ -315,6 +315,18 @@ def _lint_bridge_contract(bridge: BridgeContract) -> list[ContractLintIssue]:
             )
         )
 
+    destructive_duplicates = _find_duplicates(bridge.destructive_capabilities)
+    if destructive_duplicates:
+        issues.append(
+            ContractLintIssue(
+                code="duplicate-bridge-destructive-capabilities",
+                message=(
+                    "bridge destructive_capabilities contains duplicates: "
+                    f"{', '.join(destructive_duplicates)}"
+                ),
+            )
+        )
+
     if bridge.enabled and not bridge.command_candidates:
         issues.append(
             ContractLintIssue(
@@ -334,11 +346,20 @@ def _lint_bridge_contract(bridge: BridgeContract) -> list[ContractLintIssue]:
         or bridge.supported_modes != ("disabled",)
         or bridge.command_candidates
         or bridge.install_hint is not None
+        or bridge.allows_mutations
+        or bridge.destructive_capabilities
     ):
         issues.append(
             ContractLintIssue(
                 code="disabled-bridge-has-config",
                 message="disabled bridge contracts must use the default disabled configuration",
+            )
+        )
+    if not bridge.allows_mutations and bridge.destructive_capabilities:
+        issues.append(
+            ContractLintIssue(
+                code="bridge-destructive-capabilities-without-mutations",
+                message="bridge destructive_capabilities requires allows_mutations=true",
             )
         )
     return issues

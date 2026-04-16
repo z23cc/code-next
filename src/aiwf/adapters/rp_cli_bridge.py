@@ -209,6 +209,39 @@ class RpFileSearchResult:
 
 
 @dataclass(frozen=True)
+class RpApplyEditsResult:
+    """Typed result of a bridge-side destructive `apply_edits` call."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    target_path: str
+    changed_paths: tuple[str, ...] = ()
+    summary: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpFileActionResult:
+    """Typed result of a bridge-side destructive `file_actions` call."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    action: str
+    target_path: str
+    changed_paths: tuple[str, ...] = ()
+    summary: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
 class RpBindContextResult:
     """Typed result of binding or inspecting RepoPrompt routing context."""
 
@@ -418,6 +451,8 @@ _REPOPROMPT_MCP_TOOL_MANIFEST: tuple[RpToolInfo, ...] = (
     RpToolInfo(name="agent_manage"),
     RpToolInfo(name="read_file"),
     RpToolInfo(name="file_search", description="Search files"),
+    RpToolInfo(name="apply_edits", description="Apply direct file edits"),
+    RpToolInfo(name="file_actions", description="Create, move, or delete files"),
 )
 
 
@@ -1046,6 +1081,174 @@ class RpCliBridgeClient:
             matched_paths=tuple(sorted({match.path for match in parsed})),
             count=(len(parsed) if isinstance(response, list) else self._optional_int(response.get("count")) if isinstance(response, dict) else None),
             truncated=self._optional_bool(response.get("truncated")) if isinstance(response, dict) else False,
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def apply_edits_commit(
+        self,
+        *,
+        apply_token: str,
+        path: str,
+        rewrite: str | None = None,
+        search: str | None = None,
+        replace: str | None = None,
+        edits: Sequence[Mapping[str, Any]] | None = None,
+        all: bool | None = None,
+        on_missing: Literal["error", "create"] | None = None,
+        verbose: bool | None = None,
+    ) -> RpApplyEditsResult:
+        capability_error = self._capability_error("apply_edits")
+        normalized_path = path.strip()
+        if capability_error is not None:
+            return RpApplyEditsResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                target_path=normalized_path,
+                error=capability_error,
+            )
+        if not apply_token.strip():
+            raise ValueError("apply_edits_commit requires a non-empty apply_token")
+        if not normalized_path:
+            raise ValueError("apply_edits_commit requires a non-empty path")
+
+        payload: dict[str, Any] = {"path": normalized_path}
+        mode_count = 0
+        if rewrite is not None:
+            payload["rewrite"] = rewrite
+            mode_count += 1
+        if search is not None or replace is not None:
+            if search is None or replace is None:
+                raise ValueError("apply_edits_commit requires both search and replace for single replacement mode")
+            payload["search"] = search
+            payload["replace"] = replace
+            mode_count += 1
+        if edits is not None:
+            payload["edits"] = [dict(item) for item in edits]
+            mode_count += 1
+        if mode_count != 1:
+            raise ValueError("apply_edits_commit requires exactly one edit mode: rewrite, search/replace, or edits")
+        if all is not None:
+            payload["all"] = all
+        if on_missing is not None:
+            payload["on_missing"] = on_missing
+        if verbose is not None:
+            payload["verbose"] = verbose
+
+        invocation = self._invoke_tool("apply_edits", payload, context="apply_edits_commit")
+        if not invocation.ok:
+            return RpApplyEditsResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                target_path=normalized_path,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="apply_edits_commit")
+        if response is not None and not isinstance(response, (dict, list)):
+            return RpApplyEditsResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                target_path=normalized_path,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="apply_edits_commit",
+                    message="apply_edits_commit did not return a JSON object or list",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpApplyEditsResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            target_path=normalized_path,
+            changed_paths=self._extract_changed_paths(response, fallback=normalized_path),
+            summary=self._extract_response_summary(response),
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def file_actions_commit(
+        self,
+        *,
+        apply_token: str,
+        action: Literal["create", "delete", "move"],
+        path: str,
+        content: str | None = None,
+        new_path: str | None = None,
+        if_exists: Literal["error", "overwrite"] | None = None,
+    ) -> RpFileActionResult:
+        capability_error = self._capability_error("file_actions")
+        normalized_path = path.strip()
+        if capability_error is not None:
+            return RpFileActionResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                action=action,
+                target_path=normalized_path,
+                error=capability_error,
+            )
+        if not apply_token.strip():
+            raise ValueError("file_actions_commit requires a non-empty apply_token")
+        if not normalized_path:
+            raise ValueError("file_actions_commit requires a non-empty path")
+
+        payload: dict[str, Any] = {"action": action, "path": normalized_path}
+        if action == "create":
+            if content is None:
+                raise ValueError("file_actions_commit create action requires content")
+            payload["content"] = content
+            if if_exists is not None:
+                payload["if_exists"] = if_exists
+        if action == "move":
+            if new_path is None or not new_path.strip():
+                raise ValueError("file_actions_commit move action requires new_path")
+            payload["new_path"] = new_path.strip()
+
+        invocation = self._invoke_tool("file_actions", payload, context="file_actions_commit")
+        if not invocation.ok:
+            return RpFileActionResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                action=action,
+                target_path=normalized_path,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="file_actions_commit")
+        if response is not None and not isinstance(response, (dict, list)):
+            return RpFileActionResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                action=action,
+                target_path=normalized_path,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="file_actions_commit",
+                    message="file_actions_commit did not return a JSON object or list",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpFileActionResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            action=action,
+            target_path=normalized_path,
+            changed_paths=self._extract_changed_paths(response, fallback=normalized_path),
+            summary=self._extract_response_summary(response),
             raw_payload=response,
             raw_stdout=invocation.stdout,
             raw_stderr=invocation.stderr,
@@ -2400,6 +2603,40 @@ class RpCliBridgeClient:
             matches.append(RpFileSearchMatch(path=path, line=line, snippet=snippet, raw_payload=dict(raw_match)))
         return tuple(matches)
 
+    def _extract_changed_paths(
+        self,
+        payload: dict[str, Any] | list[Any] | None,
+        *,
+        fallback: str,
+    ) -> tuple[str, ...]:
+        if isinstance(payload, dict):
+            for key in ("changed_paths", "paths", "files", "applied_paths"):
+                raw = payload.get(key)
+                if isinstance(raw, list):
+                    values = tuple(item.strip() for item in raw if isinstance(item, str) and item.strip())
+                    if values:
+                        return values
+            for key in ("path", "new_path"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return (value.strip(),)
+        if isinstance(payload, list):
+            values = tuple(item.strip() for item in payload if isinstance(item, str) and item.strip())
+            if values:
+                return values
+        return (fallback,)
+
+    def _extract_response_summary(self, payload: dict[str, Any] | list[Any] | None) -> str | None:
+        if isinstance(payload, dict):
+            for key in ("summary", "message", "status", "result"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+            output_text = self._extract_output_text(payload)
+            if output_text is not None:
+                return output_text
+        return None
+
     def _extract_string_list(self, payload: dict[str, Any], *, keys: Sequence[str]) -> tuple[str, ...]:
         for key in keys:
             raw = payload.get(key)
@@ -2469,6 +2706,7 @@ __all__ = [
     "RpAgentRunWaitResult",
     "RpAgentTranscriptResult",
     "RpAskOracleResult",
+    "RpApplyEditsResult",
     "RpBindContextResult",
     "RpBridgeError",
     "RpBridgeProbeResult",
@@ -2476,6 +2714,7 @@ __all__ = [
     "RpContextBuilderResult",
     "RpFileSearchMatch",
     "RpFileSearchResult",
+    "RpFileActionResult",
     "RpManageSelectionResult",
     "RpReadFileResult",
     "RpToolInfo",

@@ -160,6 +160,8 @@ def test_bridge_contract_round_trip_via_metadata() -> None:
         "supported_modes": ["disabled", "manual-assist", "managed-agent"],
         "command_candidates": ["rp", "rp-cli"],
         "install_hint": "Install rp bridge tooling.",
+        "allows_mutations": False,
+        "destructive_capabilities": [],
     }
 
     contract = BridgeContract.from_metadata(metadata)
@@ -295,6 +297,8 @@ def test_lint_host_contract_flags_disabled_bridge_config_and_duplicates() -> Non
                 supported_modes=("disabled", "disabled"),
                 command_candidates=("rp", "rp"),
                 install_hint="Install rp bridge tooling.",
+                allows_mutations=True,
+                destructive_capabilities=("apply_edits", "apply_edits"),
             ),
         ),
         subject="broken/manual",
@@ -305,8 +309,23 @@ def test_lint_host_contract_flags_disabled_bridge_config_and_duplicates() -> Non
     assert {issue.code for issue in result.issues} >= {
         "disabled-bridge-has-config",
         "duplicate-bridge-command-candidates",
+        "duplicate-bridge-destructive-capabilities",
         "duplicate-bridge-supported-modes",
     }
+
+
+def test_bridge_contract_rejects_destructive_capabilities_without_mutation_opt_in() -> None:
+    with pytest.raises(ValueError, match="destructive_capabilities requires allows_mutations=true"):
+        BridgeContract.from_metadata(
+            {
+                "enabled": True,
+                "default_mode": "manual-assist",
+                "supported_modes": ["disabled", "manual-assist"],
+                "command_candidates": ["rp"],
+                "allows_mutations": False,
+                "destructive_capabilities": ["apply_edits"],
+            }
+        )
 
 
 def test_lint_contract_registry_flags_variant_metadata_mismatch() -> None:

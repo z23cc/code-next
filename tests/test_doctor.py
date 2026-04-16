@@ -26,6 +26,8 @@ EXPECTED_BRIDGE_TOOLS = [
     "agent_manage",
     "read_file",
     "file_search",
+    "apply_edits",
+    "file_actions",
 ]
 
 
@@ -589,7 +591,7 @@ def _write_fake_rp_bridge_cli(tmp_path: Path) -> Path:
             "    raise SystemExit(0)\n"
             "\n"
             "if '--tools-schema' in sys.argv:\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces'}, {'name': 'bind_context'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run'}, {'name': 'agent_manage'}, {'name': 'read_file'}, {'name': 'file_search'}]}))\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces'}, {'name': 'bind_context'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run'}, {'name': 'agent_manage'}, {'name': 'read_file'}, {'name': 'file_search'}, {'name': 'apply_edits'}, {'name': 'file_actions'}]}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

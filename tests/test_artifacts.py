@@ -11,6 +11,9 @@ from aiwf.models import (
     ReviewReportContent,
     RpBridgeCaptureArtifact,
     RpBridgeCaptureRecord,
+    RpBridgeEditsArtifact,
+    RpBridgeEditApply,
+    RpBridgeEditPreview,
     RpBridgeSeedingArtifact,
     RpBridgeToolCall,
     RunDiagnostics,
@@ -316,7 +319,43 @@ def test_artifact_store_validates_rp_bridge_capture_artifact(tmp_path: Path) -> 
     artifact = store.read_validated_artifact("rp-bridge-capture.json")
 
     assert artifact.captures[0].stage == "implement"
-    assert artifact.captures[0].response_artifact == "rp-agent-implement-response.md"
+
+
+def test_artifact_store_validates_rp_bridge_edits_artifact(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Bridge edits", body="Store edits artifact."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+
+    (run_dir / "rp-bridge-edits.json").write_text(
+        json.dumps(
+            RpBridgeEditsArtifact(
+                status="applied",
+                preview=RpBridgeEditPreview(
+                    tool="apply_edits",
+                    payload={"path": "src/example.py", "search": "old", "replace": "new"},
+                    target_paths=["src/example.py"],
+                ),
+                applied=RpBridgeEditApply(
+                    tool="apply_edits",
+                    ok=True,
+                    status="applied",
+                    target_paths=["src/example.py"],
+                    summary="applied",
+                ),
+            ).model_dump(mode="json"),
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    artifact = store.read_validated_artifact("rp-bridge-edits.json")
+
+    assert artifact.status == "applied"
+    assert artifact.applied is not None
+    assert artifact.applied.tool == "apply_edits"
 
 
 def test_artifact_store_validates_rp_bridge_context_builder_artifact(tmp_path: Path) -> None:

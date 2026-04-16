@@ -7,6 +7,7 @@ from aiwf.models import (
     GateSet,
     RpBridgeAgentTranscriptArtifactContent,
     RpBridgeContextBuilderArtifactContent,
+    RpBridgeEditsArtifactContent,
     RpBridgeOracleArtifactContent,
     RpBridgeResolvedIdentity,
     RpBridgeRunConfig,
@@ -100,6 +101,8 @@ def test_rp_bridge_run_config_round_trips() -> None:
         "export_transcript": True,
         "composition": "manage-selection",
         "use_oracle_for_review": False,
+        "apply_edits": False,
+        "apply_edits_clean_repo_required": True,
         "resolved": None,
     }
 
@@ -181,6 +184,32 @@ def test_rp_bridge_oracle_artifact_content_validates() -> None:
 
     assert payload.mode == "review"
     assert payload.chat_id == "rp-chat-1"
+
+
+def test_rp_bridge_edits_artifact_content_validates() -> None:
+    payload = RpBridgeEditsArtifactContent.model_validate(
+        {
+            "version": 1,
+            "status": "applied",
+            "preview": {
+                "tool": "apply_edits",
+                "payload": {"path": "src/example.py", "search": "old", "replace": "new"},
+                "target_paths": ["src/example.py"],
+            },
+            "applied": {
+                "tool": "apply_edits",
+                "ok": True,
+                "status": "applied",
+                "target_paths": ["src/example.py"],
+                "summary": "applied",
+                "detail": {"changed_paths": ["src/example.py"]},
+            },
+        }
+    )
+
+    assert payload.status == "applied"
+    assert payload.applied is not None
+    assert payload.applied.tool == "apply_edits"
 
 
 def test_rp_bridge_seeding_artifact_content_validates() -> None:

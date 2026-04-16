@@ -165,6 +165,8 @@ class BridgeContract:
     supported_modes: tuple[BridgeMode, ...] = ("disabled",)
     command_candidates: tuple[str, ...] = ()
     install_hint: str | None = None
+    allows_mutations: bool = False
+    destructive_capabilities: tuple[str, ...] = ()
 
     def to_metadata(self) -> dict[str, object]:
         return {
@@ -173,6 +175,8 @@ class BridgeContract:
             "supported_modes": list(self.supported_modes),
             "command_candidates": list(self.command_candidates),
             "install_hint": self.install_hint,
+            "allows_mutations": self.allows_mutations,
+            "destructive_capabilities": list(self.destructive_capabilities),
         }
 
     @classmethod
@@ -182,6 +186,8 @@ class BridgeContract:
         supported_modes = cls._read_supported_modes(data, "supported_modes")
         command_candidates = cls._read_string_sequence(data, "command_candidates")
         install_hint = data.get("install_hint")
+        allows_mutations = data.get("allows_mutations", False)
+        destructive_capabilities = cls._read_string_sequence(data, "destructive_capabilities")
 
         if not isinstance(enabled, bool):
             raise ValueError("bridge contract enabled must be a boolean")
@@ -189,6 +195,8 @@ class BridgeContract:
             raise ValueError("bridge contract default_mode must be 'disabled', 'manual-assist', or 'managed-agent'")
         if install_hint is not None and (not isinstance(install_hint, str) or not install_hint.strip()):
             raise ValueError("bridge contract install_hint must be a non-empty string or null")
+        if not isinstance(allows_mutations, bool):
+            raise ValueError("bridge contract allows_mutations must be a boolean")
 
         normalized_default_mode = cast(BridgeMode, default_mode)
         if enabled and normalized_default_mode not in supported_modes:
@@ -198,8 +206,13 @@ class BridgeContract:
             or supported_modes != ("disabled",)
             or command_candidates
             or install_hint is not None
+            or allows_mutations
+            or destructive_capabilities
         ):
             raise ValueError("disabled bridge contracts must use the default disabled configuration")
+
+        if not allows_mutations and destructive_capabilities:
+            raise ValueError("bridge contract destructive_capabilities requires allows_mutations=true")
 
         return cls(
             enabled=enabled,
@@ -207,6 +220,8 @@ class BridgeContract:
             supported_modes=supported_modes,
             command_candidates=command_candidates,
             install_hint=install_hint.strip() if isinstance(install_hint, str) else None,
+            allows_mutations=allows_mutations,
+            destructive_capabilities=destructive_capabilities,
         )
 
     @staticmethod

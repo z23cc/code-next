@@ -5,6 +5,8 @@ import stat
 import sys
 from pathlib import Path
 
+import pytest
+
 from aiwf.adapters.rp_cli_bridge import RpCliBridgeClient
 
 
@@ -19,6 +21,8 @@ EXPECTED_MANIFEST_TOOLS = [
     "agent_manage",
     "read_file",
     "file_search",
+    "apply_edits",
+    "file_actions",
 ]
 
 
@@ -160,6 +164,66 @@ def test_rp_cli_bridge_file_search_success(tmp_path: Path) -> None:
     assert result.matched_paths == ("src/auth/service.py", "src/auth/tests/test_service.py")
     assert result.matches[0].path == "src/auth/service.py"
     assert result.matches[0].line == 12
+
+
+def test_rp_cli_bridge_apply_edits_and_file_actions_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="read-ok")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    apply_result = client.apply_edits_commit(
+        apply_token="gate-ok",
+        path="src/example.py",
+        search="old_value",
+        replace="new_value",
+        all=True,
+    )
+    file_result = client.file_actions_commit(
+        apply_token="gate-ok",
+        action="move",
+        path="src/example.py",
+        new_path="src/example_new.py",
+    )
+
+    assert apply_result.ok is True
+    assert apply_result.changed_paths == ("src/example.py",)
+    assert "applied" in (apply_result.summary or "")
+    apply_payload = json.loads(apply_result.command[apply_result.command.index("-j") + 1])
+    assert apply_payload["path"] == "src/example.py"
+    assert apply_payload["search"] == "old_value"
+    assert apply_payload["replace"] == "new_value"
+    assert apply_payload["all"] is True
+
+    assert file_result.ok is True
+    assert file_result.action == "move"
+    assert file_result.changed_paths == ("src/example_new.py",)
+    file_payload = json.loads(file_result.command[file_result.command.index("-j") + 1])
+    assert file_payload["action"] == "move"
+    assert file_payload["path"] == "src/example.py"
+    assert file_payload["new_path"] == "src/example_new.py"
+
+
+def test_rp_cli_bridge_apply_edits_requires_non_empty_token(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="read-ok")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    with pytest.raises(ValueError, match="apply_token"):
+        client.apply_edits_commit(apply_token=" ", path="src/example.py", rewrite="updated")
+
+
+def test_rp_cli_bridge_file_actions_reports_tool_unavailable(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="manage-tool-missing")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    result = client.file_actions_commit(
+        apply_token="gate-ok",
+        action="delete",
+        path="src/example.py",
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "TOOL_UNAVAILABLE"
+    assert result.error.detail["tool"] == "file_actions"
 
 
 def test_rp_cli_bridge_agent_run_surfaces_success(tmp_path: Path) -> None:
@@ -386,7 +450,7 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    if MODE == 'malformed':\n"
             "        sys.stdout.write('not-json\\n')\n"
             "        raise SystemExit(0)\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces', 'inputSchema': {'properties': {'action': {'enum': ['list', 'list_tabs', 'select_tab']}}}}, {'name': 'bind_context', 'inputSchema': {'properties': {'op': {'enum': ['list', 'status', 'bind']}}}}, {'name': 'manage_selection'}, {'name': 'workspace_context', 'inputSchema': {'properties': {'op': {'enum': ['snapshot', 'export', 'list_presets', 'select_preset']}}}}, {'name': 'context_builder', 'inputSchema': {'properties': {'response_type': {'enum': ['clarify', 'plan', 'question', 'review']}}}}, {'name': 'ask_oracle', 'inputSchema': {'properties': {'mode': {'enum': ['chat', 'plan', 'review']}}}}, {'name': 'agent_run', 'inputSchema': {'properties': {'op': {'enum': ['start', 'poll', 'wait', 'cancel']}}}}, {'name': 'agent_manage', 'inputSchema': {'properties': {'op': {'enum': agent_manage_ops}}}}, {'name': 'read_file'}, {'name': 'file_search', 'description': 'Search files'}]}))\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces', 'inputSchema': {'properties': {'action': {'enum': ['list', 'list_tabs', 'select_tab']}}}}, {'name': 'bind_context', 'inputSchema': {'properties': {'op': {'enum': ['list', 'status', 'bind']}}}}, {'name': 'manage_selection'}, {'name': 'workspace_context', 'inputSchema': {'properties': {'op': {'enum': ['snapshot', 'export', 'list_presets', 'select_preset']}}}}, {'name': 'context_builder', 'inputSchema': {'properties': {'response_type': {'enum': ['clarify', 'plan', 'question', 'review']}}}}, {'name': 'ask_oracle', 'inputSchema': {'properties': {'mode': {'enum': ['chat', 'plan', 'review']}}}}, {'name': 'agent_run', 'inputSchema': {'properties': {'op': {'enum': ['start', 'poll', 'wait', 'cancel']}}}}, {'name': 'agent_manage', 'inputSchema': {'properties': {'op': {'enum': agent_manage_ops}}}}, {'name': 'read_file'}, {'name': 'file_search', 'description': 'Search files'}, {'name': 'apply_edits'}, {'name': 'file_actions'}]}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
@@ -462,6 +526,27 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        raise SystemExit(6)\n"
             "    paths = payload.get('paths', [])\n"
             "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'selected_paths': paths, 'added_paths': paths}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'apply_edits':\n"
+            "    if MODE == 'manage-tool-missing':\n"
+            "        sys.stderr.write('unknown tool apply_edits\\n')\n"
+            "        raise SystemExit(6)\n"
+            "    target_path = payload.get('path')\n"
+            "    sys.stdout.write(json.dumps({'status': 'applied', 'changed_paths': [target_path], 'path': target_path}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'file_actions':\n"
+            "    if MODE == 'manage-tool-missing':\n"
+            "        sys.stderr.write('unknown tool file_actions\\n')\n"
+            "        raise SystemExit(6)\n"
+            "    action = payload.get('action')\n"
+            "    path = payload.get('path')\n"
+            "    moved_to = payload.get('new_path')\n"
+            "    changed = moved_to if action == 'move' and moved_to else path\n"
+            "    sys.stdout.write(json.dumps({'status': 'applied', 'changed_paths': [changed], 'path': changed}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

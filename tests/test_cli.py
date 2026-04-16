@@ -30,6 +30,8 @@ EXPECTED_BRIDGE_TOOLS = [
     "agent_manage",
     "read_file",
     "file_search",
+    "apply_edits",
+    "file_actions",
 ]
 
 
@@ -444,6 +446,8 @@ def test_cli_rp_bridge_plan_command_persists_bridge_metadata(tmp_path: Path) -> 
         "export_transcript": False,
         "composition": "manage-selection",
         "use_oracle_for_review": False,
+        "apply_edits": False,
+        "apply_edits_clean_repo_required": True,
         "resolved": None,
     }
 
@@ -460,6 +464,8 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
         "export_transcript": True,
         "composition": "manage-selection",
         "use_oracle_for_review": False,
+        "apply_edits": False,
+        "apply_edits_clean_repo_required": True,
         "resolved": None,
     }
 
@@ -3019,7 +3025,7 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    if MODE == 'fail':\n"
             "        sys.stderr.write('tool schema failed\\n')\n"
             "        raise SystemExit(9)\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces'}, {'name': 'bind_context'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run'}, {'name': 'agent_manage'}, {'name': 'read_file'}, {'name': 'file_search'}]}))\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces'}, {'name': 'bind_context'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run'}, {'name': 'agent_manage'}, {'name': 'read_file'}, {'name': 'file_search'}, {'name': 'apply_edits'}, {'name': 'file_actions'}]}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

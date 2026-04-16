@@ -186,6 +186,8 @@ class RpBridgeRunConfig(ModelBase):
     export_transcript: StrictBool = False
     composition: Literal["manage-selection", "context-builder"] = "manage-selection"
     use_oracle_for_review: StrictBool = False
+    apply_edits: StrictBool = False
+    apply_edits_clean_repo_required: StrictBool = True
     resolved: RpBridgeResolvedIdentity | None = None
 
     @field_validator("workspace", "tab", "context_id", "agent_role")
@@ -397,6 +399,34 @@ class RpBridgeOracleArtifact(ModelBase):
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
+class RpBridgeEditPreview(ModelBase):
+    """Typed bridge edit preview request/summary metadata."""
+
+    tool: Literal["apply_edits", "file_actions"]
+    payload: dict[str, Any] = Field(default_factory=dict)
+    target_paths: list[str] = Field(default_factory=list)
+
+
+class RpBridgeEditApply(ModelBase):
+    """Typed bridge edit apply response metadata."""
+
+    tool: Literal["apply_edits", "file_actions"]
+    ok: bool
+    status: Literal["applied", "failed", "partially_applied"]
+    target_paths: list[str] = Field(default_factory=list)
+    summary: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class RpBridgeEditsArtifact(ModelBase):
+    """Typed record of destructive bridge edit/file-action interactions."""
+
+    version: int = 1
+    status: Literal["previewed", "applied", "partially_applied", "failed"]
+    preview: RpBridgeEditPreview | None = None
+    applied: RpBridgeEditApply | None = None
+
+
 class WorkReceipt(ModelBase):
     """Final run summary written at the end of workflow execution."""
 
@@ -447,6 +477,8 @@ class RunBridgeDiagnostics(ModelBase):
     export_transcript: bool = False
     composition: Literal["manage-selection", "context-builder"] = "manage-selection"
     use_oracle_for_review: bool = False
+    apply_edits: bool = False
+    apply_edits_clean_repo_required: bool = True
     resolved: RpBridgeResolvedIdentity | None = None
     summary: str
     handoff_artifacts: list[str] = Field(default_factory=list)
@@ -458,6 +490,8 @@ class RunBridgeDiagnostics(ModelBase):
     context_builder_artifact: str | None = None
     oracle_artifact: str | None = None
     oracle_status: Literal["ok", "failed"] | None = None
+    edits_artifact: str | None = None
+    edits_status: Literal["previewed", "applied", "partially_applied", "failed"] | None = None
     agent_log_artifact: str | None = None
     agent_status: Literal["completed", "failed", "waiting_for_input", "timeout", "cancelled"] | None = None
     agent_session_id: str | None = None
@@ -956,6 +990,49 @@ class RpBridgeOracleArtifactContent(ArtifactSchemaBase):
         if not value.strip():
             raise ValueError("must be a non-empty string")
         return value
+
+
+class RpBridgeEditPreviewContent(ArtifactSchemaBase):
+    """Strict artifact schema for a destructive bridge edit preview payload."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    tool: Literal["apply_edits", "file_actions"]
+    payload: dict[str, Any] = Field(default_factory=dict)
+    target_paths: list[StrictStr] = Field(default_factory=list)
+
+
+class RpBridgeEditApplyContent(ArtifactSchemaBase):
+    """Strict artifact schema for a destructive bridge edit apply payload."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    tool: Literal["apply_edits", "file_actions"]
+    ok: StrictBool
+    status: Literal["applied", "failed", "partially_applied"]
+    target_paths: list[StrictStr] = Field(default_factory=list)
+    summary: StrictStr | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("summary")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeEditsArtifactContent(ArtifactSchemaBase):
+    """Strict artifact schema for `rp-bridge-edits.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    version: StrictInt = 1
+    status: Literal["previewed", "applied", "partially_applied", "failed"]
+    preview: RpBridgeEditPreviewContent | None = None
+    applied: RpBridgeEditApplyContent | None = None
 
 
 class WorkReceiptContent(ArtifactSchemaBase):
