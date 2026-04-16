@@ -446,7 +446,7 @@ class RpCliBridgeClient:
     ) -> RpAgentRunStartResult:
         if not prompt.strip():
             raise ValueError("agent_run_start requires a non-empty prompt")
-        payload: dict[str, Any] = {"op": "start", "message": prompt}
+        payload: dict[str, Any] = {"op": "start", "message": prompt, "detach": True}
         if workspace is not None:
             payload["workspace"] = workspace
         if tab is not None:
