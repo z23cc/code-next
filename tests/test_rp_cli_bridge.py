@@ -65,6 +65,44 @@ def test_rp_cli_bridge_read_file_success(tmp_path: Path) -> None:
     assert result.context_id == "ctx-123"
 
 
+def test_rp_cli_bridge_agent_run_surfaces_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="agent-complete")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    start = client.agent_run_start(
+        "Implement the change",
+        workspace="workspace-alpha",
+        tab="tab-7",
+        context_id="ctx-123",
+        agent_role="engineer",
+        stage="implement",
+    )
+    wait = client.agent_run_wait(start.session_id or "", workspace="workspace-alpha", tab="tab-7", context_id="ctx-123")
+    log = client.agent_log(start.session_id or "", workspace="workspace-alpha", tab="tab-7", context_id="ctx-123")
+
+    assert start.ok is True
+    assert start.session_id == "agent-session-123"
+    assert wait.ok is True
+    assert wait.status == "completed"
+    assert wait.output == "# Managed agent output\n"
+    assert log.ok is True
+    assert log.session_id == "agent-session-123"
+    assert log.status == "completed"
+    assert log.output == "# Managed agent output\n"
+    assert log.log["events"][0]["kind"] == "agent_wait"
+
+
+def test_rp_cli_bridge_agent_run_wait_reports_malformed_payload(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="agent-malformed")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    result = client.agent_run_wait("agent-session-123")
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "MALFORMED_RESPONSE"
+
+
 def test_rp_cli_bridge_reports_missing_binary() -> None:
     client = RpCliBridgeClient(("/path/does/not/exist/rp-cli",), timeout_seconds=1)
 
@@ -186,6 +224,28 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    source = payload.get('source')\n"
             "    content = '# Implemented from RepoPrompt\\n' if source == 'implement-response.md' else '{\"summary\": \"Looks good\", \"issues\": []}'\n"
             "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'content': content}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-run-start' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    sys.stdout.write(json.dumps({'session_id': 'agent-session-123', 'status': 'started', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-run-wait' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    if MODE == 'agent-malformed':\n"
+            "        sys.stdout.write(json.dumps({'session_id': payload.get('session_id')}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'status': 'completed', 'output': '# Managed agent output\\n', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-log' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'status': 'completed', 'output': '# Managed agent output\\n', 'events': [{'kind': 'agent_wait'}], 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

@@ -878,6 +878,251 @@ def test_cli_rp_bridge_capture_review_refuses_missing_required_fields(tmp_path: 
 
 
 
+def test_cli_rp_managed_agent_flow_completes_end_to_end_with_fake_cli(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="managed-complete")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-mode",
+            "managed-agent",
+            "--bridge-workspace",
+            "workspace-alpha",
+            "--bridge-context-id",
+            "ctx-123",
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert implement_result.exit_code == 0
+    assert "status=needs_review" in implement_result.stdout
+    run_id = next((ai_root / "runs").iterdir()).name
+    run_dir = ai_root / "runs" / run_id
+    assert (run_dir / "rp-agent-implement-response.md").exists()
+    assert (run_dir / "rp-bridge-agent-log.json").exists()
+
+    review_result = runner.invoke(
+        app,
+        ["run", "review", "--run-id", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+
+    assert review_result.exit_code == 0
+    assert "review completed" in review_result.stdout
+    assert (run_dir / "rp-agent-review-response.md").exists()
+    assert (run_dir / "review-report.json").exists()
+    inspect_json = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+    assert inspect_json.exit_code == 0
+    payload = json.loads(inspect_json.stdout)
+    assert payload["diagnostics"]["bridge"]["mode"] == "managed-agent"
+    assert payload["diagnostics"]["bridge"]["agent_log_artifact"] == "rp-bridge-agent-log.json"
+    assert payload["diagnostics"]["bridge"]["agent_status"] == "completed"
+    assert payload["bridge_agent_log"]["sessions"][-1]["stage"] == "review"
+    assert payload["review_report"]["bridge_agent"]["status"] == "completed"
+    assert RunStateManager(ai_root).load_run(run_id).status.value == "passed"
+
+
+
+def test_cli_rp_managed_agent_implement_waiting_for_input_blocks_and_resume_continues_session(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="managed-implement-wait-then-complete")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-mode",
+            "managed-agent",
+            "--bridge-workspace",
+            "workspace-alpha",
+            "--bridge-context-id",
+            "ctx-123",
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert implement_result.exit_code == 0
+    assert "status=blocked" in implement_result.stdout
+    run_id = next((ai_root / "runs").iterdir()).name
+    meta = RunStateManager(ai_root).load_run(run_id)
+    assert meta.status.value == "blocked"
+    assert meta.last_completed_stage == "plan"
+
+    inspect_json = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+    assert inspect_json.exit_code == 0
+    inspect_payload = json.loads(inspect_json.stdout)
+    assert inspect_payload["diagnostics"]["bridge"]["agent_status"] == "waiting_for_input"
+    assert "session_id=implement-session-123" in inspect_payload["diagnostics"]["next_actions"][0]
+
+    resume_result = runner.invoke(
+        app,
+        ["resume", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+
+    assert resume_result.exit_code == 0
+    assert "status=needs_review" in resume_result.stdout
+    agent_log = json.loads((ai_root / "runs" / run_id / "rp-bridge-agent-log.json").read_text(encoding="utf-8"))
+    implement_sessions = [session for session in agent_log["sessions"] if session["stage"] == "implement"]
+    assert [session["status"] for session in implement_sessions] == ["waiting_for_input", "completed"]
+
+
+
+def test_cli_rp_managed_agent_implement_failure_marks_run_failed(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="managed-implement-failed")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-mode",
+            "managed-agent",
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert implement_result.exit_code == 1
+    run_id = next((ai_root / "runs").iterdir()).name
+    inspect_json = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+    assert inspect_json.exit_code == 0
+    payload = json.loads(inspect_json.stdout)
+    assert payload["diagnostics"]["status"] == "failed"
+    assert payload["diagnostics"]["error_code"] == "BRIDGE_AGENT_FAILURE"
+    assert payload["bridge_agent_log"]["sessions"][-1]["status"] == "failed"
+
+
+
+def test_cli_rp_managed_agent_implement_timeout_marks_run_failed(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="managed-implement-timeout")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-mode",
+            "managed-agent",
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert implement_result.exit_code == 1
+    run_id = next((ai_root / "runs").iterdir()).name
+    inspect_json = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+    assert inspect_json.exit_code == 0
+    payload = json.loads(inspect_json.stdout)
+    assert payload["diagnostics"]["status"] == "failed"
+    assert payload["diagnostics"]["error_code"] == "ADAPTER_TIMEOUT"
+    assert payload["bridge_agent_log"]["sessions"][-1]["status"] == "timeout"
+
+
+
+def test_cli_rp_managed_agent_review_waiting_for_input_blocks_and_resume_completes(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="managed-review-wait-then-complete")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-mode",
+            "managed-agent",
+        ],
+        env={"PATH": fake_path},
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    review_result = runner.invoke(
+        app,
+        ["run", "review", "--run-id", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+
+    assert review_result.exit_code == 0
+    assert "status=blocked" in review_result.stdout
+    meta = RunStateManager(ai_root).load_run(run_id)
+    assert meta.status.value == "blocked"
+    assert meta.last_completed_stage == "gates"
+    inspect_json = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+    assert inspect_json.exit_code == 0
+    inspect_payload = json.loads(inspect_json.stdout)
+    assert inspect_payload["diagnostics"]["bridge"]["agent_status"] == "waiting_for_input"
+    assert "review session is ready to continue" in inspect_payload["diagnostics"]["next_actions"][1]
+
+    resume_result = runner.invoke(
+        app,
+        ["resume", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+
+    assert resume_result.exit_code == 0
+    assert "resume completed" in resume_result.stdout
+    assert RunStateManager(ai_root).load_run(run_id).status.value == "passed"
+    agent_log = json.loads((ai_root / "runs" / run_id / "rp-bridge-agent-log.json").read_text(encoding="utf-8"))
+    review_sessions = [session for session in agent_log["sessions"] if session["stage"] == "review"]
+    assert [session["status"] for session in review_sessions] == ["waiting_for_input", "completed"]
+
+
+
 def test_cli_codex_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
 
@@ -1225,7 +1470,7 @@ def test_cli_rejects_unsupported_bridge_mode(tmp_path: Path) -> None:
             "rp",
             "--bridge",
             "--bridge-mode",
-            "managed-agent",
+            "totally-unsupported",
         ],
     )
 
@@ -2486,8 +2731,10 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "import json\n"
             "import sys\n"
             "import time\n"
+            "from pathlib import Path\n"
             "\n"
             f"MODE = {mode!r}\n"
+            f"STATE_DIR = Path({str(tmp_path)!r})\n"
             "\n"
             "if '--list-tools' in sys.argv:\n"
             "    if MODE == 'timeout':\n"
@@ -2538,6 +2785,77 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    else:\n"
             "        content = f'Captured {source}\\n'\n"
             "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'content': content}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-run-start' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    stage = payload.get('stage') or 'implement'\n"
+            "    sys.stdout.write(json.dumps({'session_id': f'{stage}-session-123', 'status': 'started', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-run-wait' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    session_id = payload.get('session_id')\n"
+            "    stage = 'review' if str(session_id).startswith('review-') else 'implement'\n"
+            "    state_file = STATE_DIR / f'{MODE}-{session_id}.state'\n"
+            "    if MODE == 'managed-implement-failed' and stage == 'implement':\n"
+            "        status = 'failed'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-implement-timeout' and stage == 'implement':\n"
+            "        status = 'timeout'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-implement-wait-then-complete' and stage == 'implement' and not state_file.exists():\n"
+            "        state_file.write_text('waiting\\n', encoding='utf-8')\n"
+            "        status = 'waiting_for_input'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-implement-wait-then-complete' and stage == 'implement':\n"
+            "        state_file.write_text('completed\\n', encoding='utf-8')\n"
+            "        status = 'completed'\n"
+            "        output = '# Managed implement output\\n'\n"
+            "    elif MODE == 'managed-review-wait-then-complete' and stage == 'review' and not state_file.exists():\n"
+            "        state_file.write_text('waiting\\n', encoding='utf-8')\n"
+            "        status = 'waiting_for_input'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-review-wait-then-complete' and stage == 'review':\n"
+            "        state_file.write_text('completed\\n', encoding='utf-8')\n"
+            "        status = 'completed'\n"
+            "        output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "    elif stage == 'review':\n"
+            "        status = 'completed'\n"
+            "        output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "    else:\n"
+            "        status = 'completed'\n"
+            "        output = '# Managed implement output\\n'\n"
+            "    sys.stdout.write(json.dumps({'session_id': session_id, 'status': status, 'output': output, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-log' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    session_id = payload.get('session_id')\n"
+            "    stage = 'review' if str(session_id).startswith('review-') else 'implement'\n"
+            "    state_file = STATE_DIR / f'{MODE}-{session_id}.state'\n"
+            "    if MODE == 'managed-implement-failed' and stage == 'implement':\n"
+            "        status = 'failed'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-implement-timeout' and stage == 'implement':\n"
+            "        status = 'timeout'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-implement-wait-then-complete' and stage == 'implement' and state_file.exists() and state_file.read_text(encoding='utf-8').strip() == 'waiting':\n"
+            "        status = 'waiting_for_input'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-review-wait-then-complete' and stage == 'review' and state_file.exists() and state_file.read_text(encoding='utf-8').strip() == 'waiting':\n"
+            "        status = 'waiting_for_input'\n"
+            "        output = None\n"
+            "    elif stage == 'review':\n"
+            "        status = 'completed'\n"
+            "        output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "    else:\n"
+            "        status = 'completed'\n"
+            "        output = '# Managed implement output\\n'\n"
+            "    sys.stdout.write(json.dumps({'session_id': session_id, 'status': status, 'output': output, 'events': [{'kind': 'agent-log', 'stage': stage}], 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

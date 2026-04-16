@@ -11,9 +11,9 @@ from aiwf.models import StageResult, TaskSpec
 
 
 HostMode = Literal["manual", "auto"]
-BridgeMode = Literal["disabled", "manual-assist"]
+BridgeMode = Literal["disabled", "manual-assist", "managed-agent"]
 
-_ALLOWED_BRIDGE_MODES = {"disabled", "manual-assist"}
+_ALLOWED_BRIDGE_MODES = {"disabled", "manual-assist", "managed-agent"}
 
 
 @dataclass(frozen=True)
@@ -186,7 +186,7 @@ class BridgeContract:
         if not isinstance(enabled, bool):
             raise ValueError("bridge contract enabled must be a boolean")
         if default_mode not in _ALLOWED_BRIDGE_MODES:
-            raise ValueError("bridge contract default_mode must be 'disabled' or 'manual-assist'")
+            raise ValueError("bridge contract default_mode must be 'disabled', 'manual-assist', or 'managed-agent'")
         if install_hint is not None and (not isinstance(install_hint, str) or not install_hint.strip()):
             raise ValueError("bridge contract install_hint must be a non-empty string or null")
 
@@ -217,7 +217,9 @@ class BridgeContract:
         modes: list[BridgeMode] = []
         for item in raw_value:
             if item not in _ALLOWED_BRIDGE_MODES:
-                raise ValueError(f"bridge contract {key} entries must be 'disabled' or 'manual-assist'")
+                raise ValueError(
+                    f"bridge contract {key} entries must be 'disabled', 'manual-assist', or 'managed-agent'"
+                )
             modes.append(cast(BridgeMode, item))
         return tuple(modes)
 

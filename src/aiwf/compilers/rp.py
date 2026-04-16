@@ -55,7 +55,7 @@ def _build_compiled_markdown(context: CompileContext) -> str:
         ),
         (
             f"- bridge_capability: `{bridge_contract.default_mode} "
-            "(groundwork only — does not invoke RepoPrompt MCP/tools yet)`"
+            "(default), managed-agent supported for bridge-driven implement/review`"
         ),
         (
             f"- native_protocol: `aiwf-rp-native/v{native_runtime.protocol_version}` "
@@ -184,6 +184,7 @@ def _build_projection(
                 "entrypoint": RP_COMMANDS["implement"],
                 "manual_handoff_artifact": "rp-agent-implement-prompt.md",
                 "bridge_seeding_artifact": "rp-bridge-seeding.json",
+                "bridge_modes_supported": list(manual_contract.bridge.supported_modes),
                 "auto_stage_output_artifact": "rp-agent-implement-response.md",
                 "resume_boundary": (
                     "Use `uv run aiwf resume <run_id>` after manual RepoPrompt implement handoff. "
@@ -235,7 +236,7 @@ RP_COMPILER_SPEC = CompilerSpec(
     projection_name="rp-host-projection",
     variant_namespace="rp",
     compiler_name="aiwf.compile.rp",
-    projection_contract="rp-host-projection-v4",
+    projection_contract="rp-host-projection-v5",
     host_name="repoprompt",
     host_display_name="RepoPrompt",
     stored_runtime_key="host_contract",

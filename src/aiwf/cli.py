@@ -75,8 +75,8 @@ _AUTO_OPTION_HELP = (
     "and intended for a verified real RepoPrompt app / MCP CLI runtime; manual handoff remains the stable path."
 )
 _BRIDGE_OPTION_HELP = (
-    "Enable the experimental RepoPrompt bridge groundwork for RP manual mode. This enriches manual handoff "
-    "prompts and metadata only; it does not invoke RepoPrompt MCP/tools yet, and the stable manual path remains supported."
+    "Enable the experimental RepoPrompt bridge for RP manual mode. This supports manual-assist handoff metadata "
+    "and the managed-agent bridge path; the stable manual path remains supported."
 )
 _INTERNAL_RUN_FILES = {"run.json", "events.ndjson", "run-diagnostics.json", "run-provenance.json"}
 _DIFF_FIELDS = ("workflow", "status", "last_completed_stage", "error_code", "error", "adapter", "mode")
@@ -189,7 +189,7 @@ def _resolve_bridge_config(
 
     bridge_contract = ADAPTER_SPECS["rp"].variants["manual"].bridge
     resolved_mode = bridge_mode or bridge_contract.default_mode
-    if resolved_mode not in bridge_contract.supported_modes or resolved_mode != "manual-assist":
+    if resolved_mode not in bridge_contract.supported_modes:
         raise AiwfError(f"Bridge mode '{resolved_mode}' is not supported in this slice")
 
     try:
@@ -805,6 +805,7 @@ def _build_inspection_payload(
     review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
     bridge_seeding = _load_optional_run_surface(ai_root, run_id, "rp-bridge-seeding.json")
     bridge_capture = _load_optional_run_surface(ai_root, run_id, "rp-bridge-capture.json")
+    bridge_agent_log = _load_optional_run_surface(ai_root, run_id, "rp-bridge-agent-log.json")
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -814,6 +815,7 @@ def _build_inspection_payload(
         "review_report": review_report,
         "bridge_seeding": bridge_seeding,
         "bridge_capture": bridge_capture,
+        "bridge_agent_log": bridge_agent_log,
         "rp_bridge": meta.data.get("rp_bridge") if "rp_bridge" in meta.data else None,
         "artifacts": {
             "diagnostics": str(_artifact_path(ai_root, run_id, "run-diagnostics.json")),
@@ -821,6 +823,7 @@ def _build_inspection_payload(
             "review_report": str(_artifact_path(ai_root, run_id, "review-report.json")) if review_report is not None else None,
             "bridge_seeding": str(_artifact_path(ai_root, run_id, "rp-bridge-seeding.json")) if bridge_seeding is not None else None,
             "bridge_capture": str(_artifact_path(ai_root, run_id, "rp-bridge-capture.json")) if bridge_capture is not None else None,
+            "bridge_agent_log": str(_artifact_path(ai_root, run_id, "rp-bridge-agent-log.json")) if bridge_agent_log is not None else None,
         },
     }
 
@@ -1131,6 +1134,15 @@ def _print_inspection(
             console.print(f"bridge_seeding_status={seeding_status}")
         if isinstance(seeding_summary, str) and seeding_summary.strip():
             console.print(f"bridge_seeding_summary={seeding_summary}")
+        agent_log_artifact = diagnostics_bridge.get("agent_log_artifact")
+        agent_status = diagnostics_bridge.get("agent_status")
+        agent_session_id = diagnostics_bridge.get("agent_session_id")
+        if isinstance(agent_log_artifact, str) and agent_log_artifact.strip():
+            console.print(f"bridge_agent_log_artifact={agent_log_artifact}")
+        if isinstance(agent_status, str) and agent_status.strip():
+            console.print(f"bridge_agent_status={agent_status}")
+        if isinstance(agent_session_id, str) and agent_session_id.strip():
+            console.print(f"bridge_agent_session_id={agent_session_id}")
     bridge_probe_payload = payload.get("bridge_probe")
     if isinstance(bridge_probe_payload, Mapping):
         if bridge_probe_payload.get("available"):
@@ -1223,6 +1235,8 @@ def _print_inspection(
         console.print(f"bridge_seeding={artifacts['bridge_seeding']}")
     if artifacts.get("bridge_capture"):
         console.print(f"bridge_capture={artifacts['bridge_capture']}")
+    if artifacts.get("bridge_agent_log"):
+        console.print(f"bridge_agent_log={artifacts['bridge_agent_log']}")
 
 
 @run_app.command("plan")
@@ -1233,7 +1247,7 @@ def run_plan(
     adapter: Annotated[AdapterName, typer.Option("--adapter", help=_ADAPTER_OPTION_HELP)] = "claude",
     auto: Annotated[bool, typer.Option("--auto", help=_AUTO_OPTION_HELP)] = False,
     bridge: Annotated[bool, typer.Option("--bridge", help=_BRIDGE_OPTION_HELP)] = False,
-    bridge_mode: Annotated[str | None, typer.Option("--bridge-mode", help="Experimental RP bridge mode override. Only manual-assist is supported in this slice.")] = None,
+    bridge_mode: Annotated[str | None, typer.Option("--bridge-mode", help="Experimental RP bridge mode override (for example manual-assist or managed-agent).")] = None,
     bridge_workspace: Annotated[str | None, typer.Option("--bridge-workspace", help="RepoPrompt workspace identifier for bridge groundwork.")] = None,
     bridge_tab: Annotated[str | None, typer.Option("--bridge-tab", help="RepoPrompt tab/window identifier for bridge groundwork.")] = None,
     bridge_context_id: Annotated[str | None, typer.Option("--bridge-context-id", help="Pre-bound RepoPrompt context id for bridge groundwork.")] = None,
@@ -1274,7 +1288,7 @@ def run_implement(
     adapter: Annotated[AdapterName, typer.Option("--adapter", help=_ADAPTER_OPTION_HELP)] = "claude",
     auto: Annotated[bool, typer.Option("--auto", help=_AUTO_OPTION_HELP)] = False,
     bridge: Annotated[bool, typer.Option("--bridge", help=_BRIDGE_OPTION_HELP)] = False,
-    bridge_mode: Annotated[str | None, typer.Option("--bridge-mode", help="Experimental RP bridge mode override. Only manual-assist is supported in this slice.")] = None,
+    bridge_mode: Annotated[str | None, typer.Option("--bridge-mode", help="Experimental RP bridge mode override (for example manual-assist or managed-agent).")] = None,
     bridge_workspace: Annotated[str | None, typer.Option("--bridge-workspace", help="RepoPrompt workspace identifier for bridge groundwork.")] = None,
     bridge_tab: Annotated[str | None, typer.Option("--bridge-tab", help="RepoPrompt tab/window identifier for bridge groundwork.")] = None,
     bridge_context_id: Annotated[str | None, typer.Option("--bridge-context-id", help="Pre-bound RepoPrompt context id for bridge groundwork.")] = None,

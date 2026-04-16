@@ -15,6 +15,8 @@ from aiwf.loader import load_gate_set, load_policy, load_runbook, load_task
 from aiwf.models import (
     EventRecord,
     GateSet,
+    RpBridgeAgentLogArtifactContent,
+    RpBridgeManagedAgentRecordContent,
     RpBridgeRunConfig,
     RunArtifactRef,
     RunBridgeDiagnostics,
@@ -268,18 +270,33 @@ class WorkflowEngine:
         else:
             plan_content = str(store.read_artifact("exec-plan.md"))
 
+        resume_waiting_review = (
+            start_after_stage == "gates"
+            and self.bridge_config is not None
+            and self.bridge_config.mode == "managed-agent"
+            and self._latest_bridge_agent_record(run_dir, stage="review", status="waiting_for_input") is not None
+        )
+
         if start_after_stage == "plan":
             result = self.adapter.execute(task, plan_content, run_dir)
             self._record_stage_result(run_id, result)
-            self.state_manager.update_run(run_id, last_completed_stage="implement", data=self._workflow_data("implement"))
             if result.status is RunStatus.blocked:
+                blocked_resume_stage = result.metadata.get("blocked_resume_stage")
+                persisted_stage = (
+                    blocked_resume_stage
+                    if isinstance(blocked_resume_stage, str) and blocked_resume_stage in {"discover", "plan", "implement"}
+                    else "implement"
+                )
+                self.state_manager.update_run(run_id, last_completed_stage=persisted_stage, data=self._workflow_data("implement"))
                 self._assert_pause_allowed("implement", RunStatus.blocked, run_dir=run_dir)
                 self.state_manager.transition(run_id, RunStatus.blocked, stage="implement")
+                self.state_manager.update_run(run_id, last_completed_stage=persisted_stage, data=self._workflow_data("implement"))
                 return
             self._ensure_stage_passed(result)
+            self.state_manager.update_run(run_id, last_completed_stage="implement", data=self._workflow_data("implement"))
             start_after_stage = "implement"
 
-        if start_after_stage in {"implement", "gates"}:
+        if start_after_stage in {"implement", "gates"} and not resume_waiting_review:
             gate_set = load_gate_set(self.ai_root / "gates" / f"{task.gates}.yaml")
             report = self._run_gates_with_retry(gate_set)
             store.write_verify_report(report)
@@ -322,13 +339,13 @@ class WorkflowEngine:
                 return
             start_after_stage = "gates"
 
-        if start_after_stage in {"gates", "review"}:
+        if start_after_stage in {"gates", "review"} or resume_waiting_review:
             self._resume_review(
                 task,
                 run_id,
                 run_dir,
                 store,
-                start_after_stage,
+                "gates" if resume_waiting_review else start_after_stage,
                 workflow_name="implement",
                 success_summary="Implementation workflow completed successfully.",
                 success_artifacts=[
@@ -358,11 +375,14 @@ class WorkflowEngine:
             review_report = self.adapter.review(task, run_dir)
             self._validate_review_report(review_report, run_dir)
             store.write_review_report(review_report)
-            self.state_manager.update_run(run_id, last_completed_stage="review", data=self._workflow_data(workflow_name))
             if self._requires_explicit_review_handoff(review_report):
+                persisted_stage = self._blocked_review_resume_stage(review_report)
+                self.state_manager.update_run(run_id, last_completed_stage=persisted_stage, data=self._workflow_data(workflow_name))
                 self._assert_pause_allowed("review", RunStatus.blocked, run_dir=run_dir)
                 self.state_manager.transition(run_id, RunStatus.blocked, stage="review")
+                self.state_manager.update_run(run_id, last_completed_stage=persisted_stage, data=self._workflow_data(workflow_name))
                 return
+            self.state_manager.update_run(run_id, last_completed_stage="review", data=self._workflow_data(workflow_name))
         else:
             try:
                 stored_review_report: ReviewReportContent = store.read_validated_artifact(
@@ -535,6 +555,12 @@ class WorkflowEngine:
                 f"(requires_explicit_review_handoff={expected})",
                 stage="review",
             )
+        if self.bridge_config is not None and self.bridge_config.mode == "managed-agent":
+            bridge_agent = review_report.get("bridge_agent")
+            if isinstance(bridge_agent, Mapping):
+                managed_status = str(bridge_agent.get("status", "")).strip()
+                if managed_status == "completed":
+                    return False
         return expected
 
     def _validate_review_report(self, review_report: dict[str, object], run_dir: Path) -> None:
@@ -704,6 +730,19 @@ class WorkflowEngine:
                 if artifact_name in artifact_refs and artifact_name != "rp-bridge-capture.json"
             ],
         )
+        add_artifact(
+            "rp-bridge-agent-log.json",
+            stage=None,
+            category="bridge_agent_log",
+            related_artifacts=[
+                artifact_name
+                for artifact_name in [
+                    *implement_output_names,
+                    *self._linked_review_artifact_names(self._read_json_artifact_if_present(store, "review-report.json")),
+                ]
+                if artifact_name in artifact_refs and artifact_name != "rp-bridge-agent-log.json"
+            ],
+        )
         for artifact_name in implement_output_names:
             if artifact_name == "rp-bridge-seeding.json":
                 add_artifact(
@@ -864,6 +903,35 @@ class WorkflowEngine:
         except ArtifactError:
             return None
 
+    def _load_bridge_agent_log_artifact(self, run_dir: Path) -> RpBridgeAgentLogArtifactContent | None:
+        artifact_path = run_dir / "rp-bridge-agent-log.json"
+        if not artifact_path.exists():
+            return None
+        try:
+            return ArtifactStore(run_dir, state_manager=self.state_manager).read_validated_artifact(
+                "rp-bridge-agent-log.json", RpBridgeAgentLogArtifactContent
+            )
+        except ArtifactError:
+            return None
+
+    def _latest_bridge_agent_record(
+        self,
+        run_dir: Path,
+        *,
+        stage: str | None = None,
+        status: str | None = None,
+    ) -> RpBridgeManagedAgentRecordContent | None:
+        artifact = self._load_bridge_agent_log_artifact(run_dir)
+        if artifact is None:
+            return None
+        for record in reversed(artifact.sessions):
+            if stage is not None and record.stage != stage:
+                continue
+            if status is not None and record.status != status:
+                continue
+            return record
+        return None
+
     def _json_string_value(self, payload: dict[str, object] | None, key: str) -> str | None:
         if payload is None:
             return None
@@ -929,12 +997,18 @@ class WorkflowEngine:
             return None
 
         handoff_artifacts: list[str] = []
-        if meta.last_completed_stage == "implement":
+        latest_agent_record = self._bridge_relevant_agent_record(meta, run_dir)
+        if latest_agent_record is not None and latest_agent_record.stage == "implement":
+            handoff_artifacts = self._matching_artifact_names(artifact_names, stage="implement")
+        elif latest_agent_record is not None and latest_agent_record.stage == "review":
+            handoff_artifacts = self._linked_review_artifact_names_from_run_dir(run_dir)
+        elif meta.last_completed_stage == "implement":
             handoff_artifacts = self._matching_artifact_names(artifact_names, stage="implement")
         elif meta.last_completed_stage == "review":
             handoff_artifacts = self._linked_review_artifact_names_from_run_dir(run_dir)
 
         bridge_seeding = self._load_bridge_seeding_artifact(run_dir)
+        bridge_agent_log = self._load_bridge_agent_log_artifact(run_dir)
         return RunBridgeDiagnostics(
             mode=self.bridge_config.mode,
             workspace=self.bridge_config.workspace,
@@ -943,15 +1017,41 @@ class WorkflowEngine:
             agent_role=self.bridge_config.agent_role,
             timeout_seconds=self.bridge_config.timeout_seconds,
             export_transcript=self.bridge_config.export_transcript,
-            summary=self._bridge_summary(meta, handoff_artifacts),
+            summary=self._bridge_summary(meta, handoff_artifacts, latest_agent_record),
             handoff_artifacts=handoff_artifacts,
             seeding_artifact="rp-bridge-seeding.json" if bridge_seeding is not None else None,
             seeding_status=bridge_seeding.status if bridge_seeding is not None else None,
             seeding_summary=bridge_seeding.summary if bridge_seeding is not None else None,
+            agent_log_artifact="rp-bridge-agent-log.json" if bridge_agent_log is not None else None,
+            agent_status=latest_agent_record.status if latest_agent_record is not None else None,
+            agent_session_id=latest_agent_record.session_id if latest_agent_record is not None else None,
         )
 
-    def _bridge_summary(self, meta: RunMeta, handoff_artifacts: list[str]) -> str:
+    def _bridge_summary(
+        self,
+        meta: RunMeta,
+        handoff_artifacts: list[str],
+        agent_record: RpBridgeManagedAgentRecordContent | None = None,
+    ) -> str:
         artifact_phrase = f" using {', '.join(handoff_artifacts)}" if handoff_artifacts else ""
+        if self.bridge_config is not None and self.bridge_config.mode == "managed-agent" and agent_record is not None:
+            stage_label = "implement" if agent_record.stage == "implement" else "review"
+            if agent_record.status == "waiting_for_input":
+                return (
+                    f"RepoPrompt managed-agent is active for {stage_label} and is waiting for operator input"
+                    f"{artifact_phrase}; keep the session open, satisfy the pending prompt, then resume."
+                )
+            if agent_record.status == "completed":
+                if agent_record.stage == "review" and meta.status is RunStatus.passed:
+                    return "RepoPrompt managed-agent metadata persisted cleanly across implement, review, and resume."
+                return (
+                    f"RepoPrompt managed-agent completed the {stage_label} stage"
+                    f"{artifact_phrase}; aiwf recorded the session log and normalized artifacts."
+                )
+            if agent_record.status == "timeout":
+                return f"RepoPrompt managed-agent timed out during {stage_label}; inspect rp-bridge-agent-log.json for details."
+            if agent_record.status in {"failed", "cancelled"}:
+                return f"RepoPrompt managed-agent ended in status {agent_record.status} during {stage_label}; inspect rp-bridge-agent-log.json for details."
         if meta.status is RunStatus.blocked and meta.last_completed_stage == "implement":
             return (
                 "RepoPrompt manual-assist is active for implement; complete the RepoPrompt-side handoff"
@@ -971,16 +1071,46 @@ class WorkflowEngine:
             return "RepoPrompt manual-assist metadata persisted cleanly across implement, review, and resume."
         return "RepoPrompt manual-assist metadata is stored for this run and will be restored on later manual stages."
 
+    def _bridge_relevant_agent_record(
+        self,
+        meta: RunMeta,
+        run_dir: Path,
+    ) -> RpBridgeManagedAgentRecordContent | None:
+        implement_waiting = self._latest_bridge_agent_record(run_dir, stage="implement", status="waiting_for_input")
+        review_waiting = self._latest_bridge_agent_record(run_dir, stage="review", status="waiting_for_input")
+        if meta.status is RunStatus.blocked and review_waiting is not None:
+            return review_waiting
+        if meta.status is RunStatus.blocked and implement_waiting is not None:
+            return implement_waiting
+        if meta.status is RunStatus.needs_review:
+            return self._latest_bridge_agent_record(run_dir, stage="implement")
+        if meta.last_completed_stage == "review":
+            return self._latest_bridge_agent_record(run_dir, stage="review")
+        if meta.last_completed_stage in {"implement", "gates", "plan"}:
+            return self._latest_bridge_agent_record(run_dir, stage="implement")
+        return self._latest_bridge_agent_record(run_dir)
+
     def _diagnostics_status_reason(self, meta: RunMeta, artifact_names: set[str], run_dir: Path) -> str:
+        bridge_agent_record = self._bridge_relevant_agent_record(meta, run_dir)
         if meta.status is RunStatus.passed:
             return "Run completed successfully."
         if meta.status is RunStatus.failed:
+            if bridge_agent_record is not None and bridge_agent_record.status in {"failed", "timeout", "cancelled"}:
+                return (
+                    f"Run failed because the RepoPrompt managed-agent session for {bridge_agent_record.stage} "
+                    f"ended in status {bridge_agent_record.status}."
+                )
             if meta.last_completed_stage == "gates" and "verify-report.json" in artifact_names:
                 return "Run failed during gates and requires fixes before resume."
             return meta.error or "Run failed and requires operator action before resume."
         if meta.status is RunStatus.needs_review:
             return "Implementation completed verification and is waiting for an explicit review step."
         if meta.status is RunStatus.blocked:
+            if bridge_agent_record is not None and bridge_agent_record.status == "waiting_for_input":
+                return (
+                    f"Run is blocked because the RepoPrompt managed-agent session for {bridge_agent_record.stage} "
+                    "is waiting for operator input."
+                )
             if meta.last_completed_stage == "implement":
                 implement_handoff = self._matching_artifact_names(artifact_names, stage="implement")
                 if implement_handoff:
@@ -1007,6 +1137,7 @@ class WorkflowEngine:
     ) -> list[str]:
         bridge_target = self._bridge_target_label()
         bridge_target_hint = f" with {bridge_target}" if bridge_target else ""
+        bridge_agent_record = self._bridge_relevant_agent_record(meta, run_dir)
         if meta.status is RunStatus.needs_review:
             actions = ["Inspect verify-report.json and implementation artifacts before review."]
             if self.bridge_config is not None:
@@ -1017,6 +1148,16 @@ class WorkflowEngine:
             actions.append(f"Run `uv run aiwf run review --run-id {run_id}` to start review.")
             return actions
         if meta.status is RunStatus.blocked:
+            if bridge_agent_record is not None and bridge_agent_record.status == "waiting_for_input":
+                stage_label = bridge_agent_record.stage
+                session_id = bridge_agent_record.session_id or "-"
+                return [
+                    (
+                        f"Open or reuse the RepoPrompt managed-agent session{bridge_target_hint} (session_id={session_id}), "
+                        f"satisfy the pending {stage_label} input request, and inspect rp-bridge-agent-log.json for the latest log."
+                    ),
+                    f"Run `uv run aiwf resume {run_id}` after the managed-agent {stage_label} session is ready to continue.",
+                ]
             if meta.last_completed_stage == "implement":
                 handoff_artifacts = self._matching_artifact_names(artifact_names, stage="implement")
                 if handoff_artifacts:
@@ -1083,6 +1224,15 @@ class WorkflowEngine:
                 f"Run `uv run aiwf resume {run_id}` after addressing the failure.",
             ]
         return []
+
+    def _blocked_review_resume_stage(self, review_report: Mapping[str, object]) -> str:
+        if self.bridge_config is not None and self.bridge_config.mode == "managed-agent":
+            bridge_agent = review_report.get("bridge_agent")
+            if isinstance(bridge_agent, Mapping):
+                status = str(bridge_agent.get("status", "")).strip()
+                if status == "waiting_for_input":
+                    return "gates"
+        return "review"
 
     def _matching_artifact_names(self, artifact_names: set[str], *, stage: str) -> list[str]:
         return sorted(

@@ -60,11 +60,11 @@ def test_restore_host_contract_prefers_explicit_metadata() -> None:
         bridge=BridgeContract(
             enabled=True,
             default_mode="manual-assist",
-            supported_modes=("disabled", "manual-assist"),
+            supported_modes=("disabled", "manual-assist", "managed-agent"),
             command_candidates=("rp", "rp-cli"),
             install_hint=(
                 "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) "
-                "to use the experimental RP bridge (manual-assist groundwork only); manual handoff remains the "
+                "to use the experimental RP bridge (manual-assist or managed-agent); manual handoff remains the "
                 "stable supported path."
             ),
         ),
@@ -157,7 +157,7 @@ def test_bridge_contract_round_trip_via_metadata() -> None:
     metadata = {
         "enabled": True,
         "default_mode": "manual-assist",
-        "supported_modes": ["disabled", "manual-assist"],
+        "supported_modes": ["disabled", "manual-assist", "managed-agent"],
         "command_candidates": ["rp", "rp-cli"],
         "install_hint": "Install rp bridge tooling.",
     }
@@ -167,7 +167,7 @@ def test_bridge_contract_round_trip_via_metadata() -> None:
     assert contract == BridgeContract(
         enabled=True,
         default_mode="manual-assist",
-        supported_modes=("disabled", "manual-assist"),
+        supported_modes=("disabled", "manual-assist", "managed-agent"),
         command_candidates=("rp", "rp-cli"),
         install_hint="Install rp bridge tooling.",
     )
@@ -198,7 +198,7 @@ def test_host_contract_round_trip_with_bridge_metadata() -> None:
         bridge=BridgeContract(
             enabled=True,
             default_mode="manual-assist",
-            supported_modes=("disabled", "manual-assist"),
+            supported_modes=("disabled", "manual-assist", "managed-agent"),
             command_candidates=("rp", "rp-cli"),
             install_hint="Install rp bridge tooling.",
         ),
@@ -527,11 +527,11 @@ def test_restore_rp_bridge_contract_and_run_config_from_fixture() -> None:
                 bridge=BridgeContract(
                     enabled=True,
                     default_mode="manual-assist",
-                    supported_modes=("disabled", "manual-assist"),
+                    supported_modes=("disabled", "manual-assist", "managed-agent"),
                     command_candidates=("rp", "rp-cli"),
                     install_hint=(
                         "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) "
-                        "to use the experimental RP bridge (manual-assist groundwork only); manual handoff remains "
+                        "to use the experimental RP bridge (manual-assist or managed-agent); manual handoff remains "
                         "the stable supported path."
                     ),
                 ),

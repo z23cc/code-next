@@ -192,6 +192,61 @@ def test_rp_agent_adapter_manual_bridge_seeding_falls_back_cleanly_on_bridge_fai
     assert (run_dir / "rp-agent-implement-prompt.md").exists()
 
 
+def test_rp_agent_adapter_managed_agent_execute_completes_with_response_and_log(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(mode="managed-agent", workspace="workspace-alpha", context_id="ctx-123")
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-complete")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+
+    agent_log = json.loads((run_dir / "rp-bridge-agent-log.json").read_text(encoding="utf-8"))
+    assert result.status is RunStatus.passed
+    assert result.metadata["bridge_agent"]["status"] == "completed"
+    assert result.metadata["response_file"] == "rp-agent-implement-response.md"
+    assert (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8") == "# Managed implement output\n"
+    assert agent_log["sessions"][-1]["stage"] == "implement"
+    assert agent_log["sessions"][-1]["status"] == "completed"
+    assert agent_log["sessions"][-1]["response_artifact"] == "rp-agent-implement-response.md"
+
+
+def test_rp_agent_adapter_managed_agent_execute_waiting_for_input_blocks_with_resume_cursor(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(mode="managed-agent", workspace="workspace-alpha", context_id="ctx-123")
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-waiting")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+
+    agent_log = json.loads((run_dir / "rp-bridge-agent-log.json").read_text(encoding="utf-8"))
+    assert result.status is RunStatus.blocked
+    assert result.metadata["blocked_resume_stage"] == "plan"
+    assert result.metadata["bridge_agent"]["status"] == "waiting_for_input"
+    assert agent_log["sessions"][-1]["status"] == "waiting_for_input"
+    assert (run_dir / "rp-agent-implement-response.md").exists() is False
+
+
+def test_rp_agent_adapter_managed_agent_review_completes_with_normalized_report(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(mode="managed-agent", workspace="workspace-alpha", context_id="ctx-123")
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-complete")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    review = adapter.review(task, run_dir)
+
+    assert review["summary"] == "Managed review passed"
+    assert review["issues"] == []
+    assert review["mode"] == "manual"
+    assert review["prompt_file"] == "rp-agent-review-prompt.md"
+    assert review["response_file"] == "rp-agent-review-response.md"
+    assert review["bridge_agent"]["status"] == "completed"
+    assert (run_dir / "rp-agent-review-response.md").read_text(encoding="utf-8").strip().startswith("{")
+
+
 def test_rp_agent_adapter_auto_mode_uses_subprocess_output(tmp_path: Path) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
     adapter = RpAgentAdapter(
@@ -568,6 +623,57 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        raise SystemExit(7)\n"
             "    paths = payload.get('paths', [])\n"
             "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'selected_paths': paths, 'added_paths': paths}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-run-start' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    status = 'started'\n"
+            "    sys.stdout.write(json.dumps({'session_id': f\"{payload.get('stage')}-session-123\", 'status': status, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-run-wait' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    session_id = payload.get('session_id')\n"
+            "    if MODE == 'managed-waiting':\n"
+            "        status = 'waiting_for_input'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-failed':\n"
+            "        status = 'failed'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-timeout':\n"
+            "        status = 'timeout'\n"
+            "        output = None\n"
+            "    elif session_id and session_id.startswith('review-'):\n"
+            "        status = 'completed'\n"
+            "        output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "    else:\n"
+            "        status = 'completed'\n"
+            "        output = '# Managed implement output\\n'\n"
+            "    sys.stdout.write(json.dumps({'session_id': session_id, 'status': status, 'output': output, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--agent-log' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    session_id = payload.get('session_id')\n"
+            "    if MODE == 'managed-waiting':\n"
+            "        status = 'waiting_for_input'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-failed':\n"
+            "        status = 'failed'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-timeout':\n"
+            "        status = 'timeout'\n"
+            "        output = None\n"
+            "    elif session_id and session_id.startswith('review-'):\n"
+            "        status = 'completed'\n"
+            "        output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "    else:\n"
+            "        status = 'completed'\n"
+            "        output = '# Managed implement output\\n'\n"
+            "    sys.stdout.write(json.dumps({'session_id': session_id, 'status': status, 'output': output, 'events': [{'kind': 'agent-log'}], 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

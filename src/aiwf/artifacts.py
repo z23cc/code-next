@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 
 from aiwf.exceptions import ArtifactError, ErrorCode
 from aiwf.models import (
+    RpBridgeAgentLogArtifactContent,
     EventRecord,
     ReviewReportContent,
     RpBridgeCaptureArtifactContent,
@@ -25,6 +26,7 @@ ArtifactModelT = TypeVar("ArtifactModelT", bound=BaseModel)
 _VALIDATED_ARTIFACT_SCHEMAS: dict[str, type[BaseModel]] = {
     "verify-report.json": VerifyReportContent,
     "review-report.json": ReviewReportContent,
+    "rp-bridge-agent-log.json": RpBridgeAgentLogArtifactContent,
     "rp-bridge-capture.json": RpBridgeCaptureArtifactContent,
     "rp-bridge-seeding.json": RpBridgeSeedingArtifactContent,
     "work-receipt.json": WorkReceiptContent,

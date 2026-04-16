@@ -152,7 +152,7 @@ def test_compile_rp_writes_bundle_projection_install_surface_and_manifest(tmp_pa
     assert "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp" in bundle
     assert "rp, rp-cli" in bundle
     assert "rp-cli-stub" in bundle
-    assert "bridge_capability: `manual-assist (groundwork only — does not invoke RepoPrompt MCP/tools yet)`" in bundle
+    assert "bridge_capability: `manual-assist (default), managed-agent supported for bridge-driven implement/review`" in bundle
     assert "aiwf-rp-native/v1" in bundle
 
     assert projection["host"]["name"] == "repoprompt"
@@ -163,7 +163,7 @@ def test_compile_rp_writes_bundle_projection_install_surface_and_manifest(tmp_pa
     assert projection["host"]["variants"]["auto"]["native_runtime"]["protocol_version"] == 1
     assert projection["host"]["variants"]["manual"]["bridge"]["enabled"] is True
     assert projection["host"]["variants"]["manual"]["bridge"]["default_mode"] == "manual-assist"
-    assert projection["host"]["variants"]["manual"]["bridge"]["supported_modes"] == ["disabled", "manual-assist"]
+    assert projection["host"]["variants"]["manual"]["bridge"]["supported_modes"] == ["disabled", "manual-assist", "managed-agent"]
     assert projection["host"]["variants"]["auto"]["bridge"]["enabled"] is False
     assert projection["host"]["variants"]["manual"]["native_runtime"]["install_hint"].startswith(
         "Install the real RepoPrompt app / MCP CLI runtime on PATH"
@@ -173,6 +173,11 @@ def test_compile_rp_writes_bundle_projection_install_surface_and_manifest(tmp_pa
     )
     assert projection["workflow_contract"]["implement"]["manual_handoff_artifact"] == "rp-agent-implement-prompt.md"
     assert projection["workflow_contract"]["implement"]["bridge_seeding_artifact"] == "rp-bridge-seeding.json"
+    assert projection["workflow_contract"]["implement"]["bridge_modes_supported"] == [
+        "disabled",
+        "manual-assist",
+        "managed-agent",
+    ]
     assert projection["workflow_contract"]["implement"]["auto_stage_output_artifact"] == "rp-agent-implement-response.md"
     assert projection["workflow_contract"]["implement"]["auto_entrypoint"] == (
         "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp --auto"
@@ -190,7 +195,7 @@ def test_compile_rp_writes_bundle_projection_install_surface_and_manifest(tmp_pa
     assert install_surface["default_output_dir"] == ".rp/compiled"
     assert install_surface["external_assets"] == []
 
-    assert manifest["compiler"]["projection_contract"] == "rp-host-projection-v4"
+    assert manifest["compiler"]["projection_contract"] == "rp-host-projection-v5"
     assert manifest["files"]["rp_bundle"] == "rp-bundle.md"
     assert manifest["files"]["install_surface"] == "install-surface.json"
     assert manifest["files"]["projection"] == "rp-projection.json"
@@ -421,6 +426,7 @@ def test_compile_rp_projection_exposes_required_contract_paths(tmp_path: Path) -
         "workflow_contract.plan.primary_artifacts",
         "workflow_contract.implement.entrypoint",
         "workflow_contract.implement.manual_handoff_artifact",
+        "workflow_contract.implement.bridge_modes_supported",
         "workflow_contract.implement.auto_stage_output_artifact",
         "workflow_contract.implement.auto_entrypoint",
         "workflow_contract.implement.resume_boundary",

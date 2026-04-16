@@ -42,7 +42,7 @@ class RunStatus(str, Enum):
 
 
 StagePauseStatus = Literal["blocked", "needs_review"]
-RpBridgeMode = Literal["disabled", "manual-assist"]
+RpBridgeMode = Literal["disabled", "manual-assist", "managed-agent"]
 
 
 class StageSpec(ModelBase):
@@ -256,6 +256,30 @@ class RpBridgeCaptureArtifact(ModelBase):
     captures: list[RpBridgeCaptureRecord] = Field(default_factory=list)
 
 
+class RpBridgeManagedAgentRecord(ModelBase):
+    """A single managed-agent bridge session record."""
+
+    stage: Literal["implement", "review"]
+    session_id: str | None = None
+    status: Literal["completed", "failed", "waiting_for_input", "timeout", "cancelled"]
+    workspace: str | None = None
+    tab: str | None = None
+    context_id: str | None = None
+    agent_role: str | None = None
+    prompt_artifact: str | None = None
+    response_artifact: str | None = None
+    summary: str
+    log: dict[str, Any] = Field(default_factory=dict)
+    calls: list[RpBridgeToolCall] = Field(default_factory=list)
+
+
+class RpBridgeAgentLogArtifact(ModelBase):
+    """Typed record of managed-agent bridge sessions."""
+
+    version: int = 1
+    sessions: list[RpBridgeManagedAgentRecord] = Field(default_factory=list)
+
+
 class WorkReceipt(ModelBase):
     """Final run summary written at the end of workflow execution."""
 
@@ -309,6 +333,9 @@ class RunBridgeDiagnostics(ModelBase):
     seeding_artifact: str | None = None
     seeding_status: Literal["seeded", "skipped", "failed"] | None = None
     seeding_summary: str | None = None
+    agent_log_artifact: str | None = None
+    agent_status: Literal["completed", "failed", "waiting_for_input", "timeout", "cancelled"] | None = None
+    agent_session_id: str | None = None
 
 
 class RunDiagnostics(ModelBase):
@@ -609,6 +636,52 @@ class RpBridgeCaptureArtifactContent(ArtifactSchemaBase):
 
     version: StrictInt = 1
     captures: list[RpBridgeCaptureRecordContent] = Field(default_factory=list)
+
+
+class RpBridgeManagedAgentRecordContent(ArtifactSchemaBase):
+    """Strict artifact schema for a single managed-agent bridge session record."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    stage: Literal["implement", "review"]
+    session_id: StrictStr | None = None
+    status: Literal["completed", "failed", "waiting_for_input", "timeout", "cancelled"]
+    workspace: StrictStr | None = None
+    tab: StrictStr | None = None
+    context_id: StrictStr | None = None
+    agent_role: StrictStr | None = None
+    prompt_artifact: StrictStr | None = None
+    response_artifact: StrictStr | None = None
+    summary: StrictStr
+    log: dict[str, Any] = Field(default_factory=dict)
+    calls: list[RpBridgeToolCallContent] = Field(default_factory=list)
+
+    @field_validator(
+        "session_id",
+        "workspace",
+        "tab",
+        "context_id",
+        "agent_role",
+        "prompt_artifact",
+        "response_artifact",
+        "summary",
+    )
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeAgentLogArtifactContent(ArtifactSchemaBase):
+    """Strict artifact schema for `rp-bridge-agent-log.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    version: StrictInt = 1
+    sessions: list[RpBridgeManagedAgentRecordContent] = Field(default_factory=list)
 
 
 class WorkReceiptContent(ArtifactSchemaBase):

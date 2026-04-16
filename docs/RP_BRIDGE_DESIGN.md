@@ -358,13 +358,34 @@ bridge 更现实，原因有三点：
 > 7. `uv run aiwf rp bridge capture <run_id> --stage review --source <rp-side-source>`
 > 8. `uv run aiwf resume <run_id>`
 
-### Phase 5+
+### Phase 5 — managed-agent bridge mode（已落地）
 
-再之后才考虑：
+> **Status (2026-04-16): P5 completed.** 当前 bridge 已支持 `--bridge-mode managed-agent`。在该模式下，`aiwf` 会通过 RepoPrompt agent/session control surface 驱动 implement / review，并把 terminal state、session id、prompt/response artifact、以及 agent log 落到 `rp-bridge-agent-log.json`。当 session 进入 `waiting_for_input` 时，run 会 deterministic 地转成 `blocked`；operator 处理完 RepoPrompt 侧输入后执行 `resume`，`aiwf` 会继续等待同一 session，而不是静默降级为 manual-assist。
 
-- managed-agent bridge
-- 更深的 `inspect` / provenance / review contract 自动化
-- 对 capture source / transcript surfaces 的进一步自动化
+当前 P5 的实际行为是：
+
+- `BridgeMode` 扩展到 `managed-agent`，并可通过 run metadata 恢复
+- CLI 支持 `--bridge-mode managed-agent`
+- implement：
+  - 写出 `rp-agent-implement-prompt.md`
+  - 启动/恢复 RepoPrompt managed-agent session
+  - 在 `completed` 时直接写出 `rp-agent-implement-response.md`
+  - 在 `waiting_for_input` 时写出 `rp-bridge-agent-log.json` 并把 run 停在 `blocked`
+  - 在 `failed` / `timeout` / `cancelled` 时把 run 标成 `failed` 并保留 bridge log
+- review：
+  - 写出 `rp-agent-review-prompt.md`
+  - 在 `completed` 时写出 `rp-agent-review-response.md` 并规范化 `review-report.json`
+  - 在 `waiting_for_input` 时把 run 停在 `blocked`，并在 `resume` 时继续同一 session
+- `inspect` / `run-diagnostics.json` / `run-provenance.json` 会暴露：
+  - `rp-bridge-agent-log.json`
+  - latest `agent_status`
+  - latest `agent_session_id`
+
+当前 P5 的明确边界仍然是：
+
+- 不做 P6 的 real-runtime certification / scope labeling
+- 不新增外部 runtime guarantees
+- 仍然不改变 `rp/manual` host contract 本身；managed-agent 只是 bridge mode
 
 ## 12. 一句话结论
 

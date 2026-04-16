@@ -43,13 +43,14 @@
           "default_mode": "manual-assist",
           "supported_modes": [
             "disabled",
-            "manual-assist"
+            "manual-assist",
+            "managed-agent"
           ],
           "command_candidates": [
             "rp",
             "rp-cli"
           ],
-          "install_hint": "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) to use the experimental RP bridge (manual-assist groundwork only); manual handoff remains the stable supported path."
+          "install_hint": "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) to use the experimental RP bridge (manual-assist or managed-agent); manual handoff remains the stable supported path."
         }
       },
       "auto": {
@@ -130,6 +131,11 @@
       "entrypoint": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp",
       "manual_handoff_artifact": "rp-agent-implement-prompt.md",
       "bridge_seeding_artifact": "rp-bridge-seeding.json",
+      "bridge_modes_supported": [
+        "disabled",
+        "manual-assist",
+        "managed-agent"
+      ],
       "auto_stage_output_artifact": "rp-agent-implement-response.md",
       "resume_boundary": "Use `uv run aiwf resume <run_id>` after manual RepoPrompt implement handoff. This manual handoff flow is the stable/default RP path.",
       "auto_entrypoint": "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp --auto"

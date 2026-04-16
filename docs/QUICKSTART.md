@@ -43,9 +43,17 @@ uv run aiwf resume <run_id>
 
 `--auto` 仅在宿主契约声明支持自动执行时生效；当前 `claude` 可稳定使用 auto。`rp` 保留实验性 `--auto` 路径，但只应在已验证实现 `aiwf-rp-native/v1` 的真实 RepoPrompt app / MCP CLI runtime 上尝试；默认请使用 manual handoff + `resume`。
 
-`rp` 的 manual 模式还支持实验性的 `--bridge` groundwork 选项。当前它会增强 manual handoff prompt、写入 `rp_bridge` run metadata、在 implement 阶段尝试做安全的 context seeding，并支持后续把 RepoPrompt 侧输出通过 `read_file` bridge capture 回填到 aiwf artifacts；**仍然不会启动 managed-agent，也不会直接执行 mutating rp-cli 流程**。
+`rp` 的 manual 模式还支持实验性的 `--bridge` 选项，当前有两种 bridge mode：
 
-如果 implement 阶段是 `rp/manual + --bridge`，完成 RepoPrompt 侧实现后，可先 capture 再继续：
+- `--bridge-mode manual-assist`：保留 operator 主导流程。`aiwf` 负责写 prompt / bridge metadata、尝试 context seeding，并可通过 `aiwf rp bridge capture ...` 把 RepoPrompt 侧输出拉回 aiwf artifacts。
+- `--bridge-mode managed-agent`：`aiwf` 会通过 RepoPrompt agent/session surface 驱动 implement / review，并把 session log 写入 `rp-bridge-agent-log.json`。如果 agent 进入 `waiting_for_input`，run 会 deterministic 地停在 `blocked`，operator 处理完 RepoPrompt 侧输入后再执行 `resume`。
+
+选择建议：
+
+- 需要最稳的 fallback、愿意手工控制 RepoPrompt 节奏：选 `manual-assist`
+- 希望由 `aiwf` 自动驱动 RepoPrompt agent lifecycle，并接受实验性 bridge 自动化：选 `managed-agent`
+
+如果 implement 阶段是 `rp/manual + --bridge-mode manual-assist`，完成 RepoPrompt 侧实现后，可先 capture 再继续：
 
 ```bash
 uv run aiwf rp bridge capture <run_id> --stage implement --source <rp-side-source>
@@ -56,6 +64,12 @@ uv run aiwf resume <run_id>
 
 - `.ai/runs/<run_id>/rp-agent-implement-response.md`
 - `.ai/runs/<run_id>/rp-bridge-capture.json`
+
+如果 implement 阶段使用的是 `rp/manual + --bridge-mode managed-agent`，则不需要手工 capture；`aiwf` 会直接写出 `rp-agent-implement-response.md` 与 `rp-bridge-agent-log.json`。若 session 进入 `waiting_for_input`，先在 RepoPrompt 侧处理输入，再执行：
+
+```bash
+uv run aiwf resume <run_id>
+```
 
 ## 5. 复核阶段
 

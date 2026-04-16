@@ -90,6 +90,63 @@ class RpReadFileResult:
 
 
 @dataclass(frozen=True)
+class RpAgentRunStartResult:
+    """Typed result of starting a managed-agent bridge session."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    session_id: str | None = None
+    status: str | None = None
+    workspace: str | None = None
+    tab: str | None = None
+    context_id: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpAgentRunWaitResult:
+    """Typed result of waiting on a managed-agent bridge session."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    session_id: str
+    status: str | None = None
+    output: str | None = None
+    workspace: str | None = None
+    tab: str | None = None
+    context_id: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpAgentLogResult:
+    """Typed result of reading a managed-agent bridge log."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    session_id: str
+    status: str | None = None
+    output: str | None = None
+    log: dict[str, Any] = field(default_factory=dict)
+    workspace: str | None = None
+    tab: str | None = None
+    context_id: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
 class RpBridgeProbeResult:
     """Top-level availability result for a bridge candidate."""
 
@@ -369,6 +426,219 @@ class RpCliBridgeClient:
             raw_stderr=invocation.stderr,
         )
 
+    def agent_run_start(
+        self,
+        prompt: str,
+        *,
+        workspace: str | None = None,
+        tab: str | None = None,
+        context_id: str | None = None,
+        agent_role: str | None = None,
+        stage: str | None = None,
+    ) -> RpAgentRunStartResult:
+        if not prompt.strip():
+            raise ValueError("agent_run_start requires a non-empty prompt")
+        payload: dict[str, Any] = {"prompt": prompt}
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if tab is not None:
+            payload["tab"] = tab
+        if context_id is not None:
+            payload["context_id"] = context_id
+        if agent_role is not None:
+            payload["agent_role"] = agent_role
+        if stage is not None:
+            payload["stage"] = stage
+
+        invocation = self._run_command("--agent-run-start", json.dumps(payload, ensure_ascii=False))
+        if not invocation.ok:
+            return RpAgentRunStartResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="agent_run_start")
+        if not isinstance(response, dict):
+            return RpAgentRunStartResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_run_start",
+                    message="agent_run_start did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        session_id = self._optional_string(response.get("session_id"))
+        if session_id is None:
+            return RpAgentRunStartResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_run_start",
+                    message="agent_run_start did not include a non-empty session_id",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpAgentRunStartResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            session_id=session_id,
+            status=self._optional_string(response.get("status")),
+            workspace=self._optional_string(response.get("workspace")) or workspace,
+            tab=self._optional_string(response.get("tab")) or tab,
+            context_id=self._optional_string(response.get("context_id")) or context_id,
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def agent_run_wait(
+        self,
+        session_id: str,
+        *,
+        workspace: str | None = None,
+        tab: str | None = None,
+        context_id: str | None = None,
+    ) -> RpAgentRunWaitResult:
+        normalized_session_id = session_id.strip()
+        if not normalized_session_id:
+            raise ValueError("agent_run_wait requires a non-empty session_id")
+        payload: dict[str, Any] = {"session_id": normalized_session_id}
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if tab is not None:
+            payload["tab"] = tab
+        if context_id is not None:
+            payload["context_id"] = context_id
+
+        invocation = self._run_command("--agent-run-wait", json.dumps(payload, ensure_ascii=False))
+        if not invocation.ok:
+            return RpAgentRunWaitResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="agent_run_wait")
+        if not isinstance(response, dict):
+            return RpAgentRunWaitResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_run_wait",
+                    message="agent_run_wait did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        status = self._optional_string(response.get("status"))
+        if status is None:
+            return RpAgentRunWaitResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_run_wait",
+                    message="agent_run_wait did not include a non-empty status",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpAgentRunWaitResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            session_id=normalized_session_id,
+            status=status,
+            output=self._extract_output_text(response),
+            workspace=self._optional_string(response.get("workspace")) or workspace,
+            tab=self._optional_string(response.get("tab")) or tab,
+            context_id=self._optional_string(response.get("context_id")) or context_id,
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def agent_log(
+        self,
+        session_id: str,
+        *,
+        workspace: str | None = None,
+        tab: str | None = None,
+        context_id: str | None = None,
+    ) -> RpAgentLogResult:
+        normalized_session_id = session_id.strip()
+        if not normalized_session_id:
+            raise ValueError("agent_log requires a non-empty session_id")
+        payload: dict[str, Any] = {"session_id": normalized_session_id}
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if tab is not None:
+            payload["tab"] = tab
+        if context_id is not None:
+            payload["context_id"] = context_id
+
+        invocation = self._run_command("--agent-log", json.dumps(payload, ensure_ascii=False))
+        if not invocation.ok:
+            return RpAgentLogResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="agent_log")
+        if not isinstance(response, dict):
+            return RpAgentLogResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_log",
+                    message="agent_log did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        status = self._optional_string(response.get("status"))
+        return RpAgentLogResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            session_id=normalized_session_id,
+            status=status,
+            output=self._extract_output_text(response),
+            log=response,
+            workspace=self._optional_string(response.get("workspace")) or workspace,
+            tab=self._optional_string(response.get("tab")) or tab,
+            context_id=self._optional_string(response.get("context_id")) or context_id,
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
     def _run_command(self, *arguments: str) -> _RpInvocation:
         command = (*self.command, *arguments)
         try:
@@ -505,6 +775,13 @@ class RpCliBridgeClient:
                 return tuple(values)
         return ()
 
+    def _extract_output_text(self, payload: dict[str, Any]) -> str | None:
+        for key in ("output", "content", "response"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
     def _malformed_response_error(
         self,
         invocation: _RpInvocation,
@@ -524,6 +801,9 @@ class RpCliBridgeClient:
 
 
 __all__ = [
+    "RpAgentLogResult",
+    "RpAgentRunStartResult",
+    "RpAgentRunWaitResult",
     "RpBridgeError",
     "RpBridgeProbeResult",
     "RpCliBridgeClient",

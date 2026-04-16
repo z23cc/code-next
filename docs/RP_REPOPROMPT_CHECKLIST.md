@@ -151,17 +151,26 @@ Validation notes:
 
 目标：通过 RepoPrompt `agent_run` 实现半自动/自动 bridge 流程。
 
-- [ ] `BridgeMode` 扩展到 `managed-agent`
-- [ ] CLI 支持 `--bridge-mode managed-agent`
-- [ ] 对接 `agent_run start/wait/poll`
-- [ ] `waiting_for_input` -> `blocked` 的状态映射稳定
-- [ ] transcript / agent log / response artifacts 落盘
-- [ ] projection contract 更新并补 compat fixture
+- [x] `BridgeMode` 扩展到 `managed-agent`
+- [x] CLI 支持 `--bridge-mode managed-agent`
+- [x] 对接 `agent_run start/wait/poll`
+- [x] `waiting_for_input` -> `blocked` 的状态映射稳定
+- [x] transcript / agent log / response artifacts 落盘
+- [x] projection contract 更新并补 compat fixture
 
 Exit criteria:
 
-- [ ] managed-agent 能稳定执行 implement/review 的可控子集
-- [ ] timeout / failed / waiting_for_input 都有明确状态落盘
+- [x] managed-agent 能稳定执行 implement/review 的可控子集
+- [x] timeout / failed / waiting_for_input 都有明确状态落盘
+
+Validation notes:
+
+- 日期：2026-04-16
+- P5 结论：`rp/manual + --bridge-mode managed-agent` 现在可以由 `aiwf` 驱动 RepoPrompt managed-agent implement/review，并把 session state、session id、prompt/response artifact 与 `rp-bridge-agent-log.json` 一起持久化。`waiting_for_input` 会 deterministic 地停在 `blocked`，`resume` 会继续同一 session；`failed` / `timeout` 会明确落成 `failed` 并保留 bridge log；review 完成态会在不伪造字段的前提下规范化 `review-report.json` 并通过现有 review contract。
+- 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_adapter_rp.py tests/test_engine.py tests/test_cli.py tests/test_adapter_contracts.py tests/test_compile.py -q`
+- 已执行命令：`uv run aiwf contracts lint`
+- 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_adapter_rp.py tests/test_engine.py tests/test_cli.py tests/test_adapter_contracts.py tests/test_compile.py tests/test_artifacts.py tests/test_models.py -q`
+- 结果：focused pytest `157 passed`；final focused validation 中 `contracts lint` 通过，pytest `177 passed`
 
 ---
 
@@ -200,5 +209,5 @@ Exit criteria:
 - [x] P2 completed
 - [x] P3 completed
 - [x] P4 completed
-- [ ] P5 pending
+- [x] P5 completed
 - [ ] P6 pending

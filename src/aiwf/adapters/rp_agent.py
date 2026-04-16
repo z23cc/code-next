@@ -9,9 +9,16 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from aiwf.adapters.base import BridgeContract, HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
+from aiwf.adapters.rp_bridge_normalize import (
+    RpBridgeNormalizationError,
+    normalize_implement_capture,
+    normalize_review_capture,
+)
 from aiwf.adapters.rp_cli_bridge import RpCliBridgeClient
 from aiwf.exceptions import AdapterError, ErrorCode
 from aiwf.models import (
+    RpBridgeAgentLogArtifact,
+    RpBridgeManagedAgentRecord,
     RpBridgeRunConfig,
     RpBridgeSeedingArtifact,
     RpBridgeToolCall,
@@ -66,11 +73,11 @@ RP_NATIVE_RUNTIME = NativeRuntimeContract(
 RP_BRIDGE_CONTRACT = BridgeContract(
     enabled=True,
     default_mode="manual-assist",
-    supported_modes=("disabled", "manual-assist"),
+    supported_modes=("disabled", "manual-assist", "managed-agent"),
     command_candidates=("rp", "rp-cli"),
     install_hint=(
         "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) "
-        "to use the experimental RP bridge (manual-assist groundwork only); manual handoff remains the stable supported path."
+        "to use the experimental RP bridge (manual-assist or managed-agent); manual handoff remains the stable supported path."
     ),
 )
 
@@ -216,6 +223,9 @@ class RpAgentAdapter:
                 metadata={"mode": "auto", "response_file": response_path.name},
             )
 
+        if self._is_managed_agent_bridge():
+            return self._execute_managed_agent(task, plan, run_dir)
+
         bridge_seeding = self._seed_bridge_context(run_dir)
         prompt = self._build_execute_prompt(task, plan, run_dir, bridge_seeding=bridge_seeding)
         prompt_path = run_dir / "rp-agent-implement-prompt.md"
@@ -258,6 +268,15 @@ class RpAgentAdapter:
                 "evidence_files": evidence_files,
                 "evidence_summary": evidence_summary,
             }
+
+        if self._is_managed_agent_bridge():
+            return self._review_managed_agent(
+                task,
+                run_dir,
+                prompt=prompt,
+                evidence_files=evidence_files,
+                evidence_summary=evidence_summary,
+            )
 
         prompt_path = run_dir / "rp-agent-review-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -666,6 +685,15 @@ class RpAgentAdapter:
                 "- Bind your RepoPrompt session to the workspace/tab above or your active session.",
             ]
         )
+        if bridge_config.mode == "managed-agent":
+            lines.extend(
+                [
+                    f"- aiwf will drive the RepoPrompt managed-agent lifecycle for this {stage_label} stage.",
+                    "- Use the prompt artifact only for inspect/debugging or if the managed-agent session asks for operator input.",
+                    "",
+                ]
+            )
+            return lines
         if stage == "implement" and bridge_seeding is not None and bridge_seeding.status == "seeded":
             lines.append("- Confirm the seeded aiwf artifacts are present in RepoPrompt context before implementing.")
         else:
@@ -683,11 +711,482 @@ class RpAgentAdapter:
             return None
         return self.bridge_config
 
+    def _is_managed_agent_bridge(self) -> bool:
+        bridge_config = self._active_bridge_config()
+        return bridge_config is not None and bridge_config.mode == "managed-agent"
+
     def _bridge_metadata(self) -> dict[str, object] | None:
         bridge_config = self._active_bridge_config()
         if bridge_config is None:
             return None
         return bridge_config.model_dump(mode="json", exclude_none=True)
+
+    def _execute_managed_agent(self, task: TaskSpec, plan: str, run_dir: Path) -> StageResult:
+        bridge_config = self._require_bridge_config_mode("managed-agent")
+        bridge_seeding = self._seed_bridge_context(run_dir)
+        prompt = self._build_execute_prompt(task, plan, run_dir, bridge_seeding=bridge_seeding)
+        prompt_path = run_dir / "rp-agent-implement-prompt.md"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        outputs = [prompt_path.name]
+        if bridge_seeding is not None:
+            outputs.append("rp-bridge-seeding.json")
+
+        record, response_text = self._run_managed_agent_session(
+            run_dir,
+            stage="implement",
+            prompt=prompt,
+            prompt_artifact=prompt_path.name,
+            response_artifact="rp-agent-implement-response.md",
+            workspace=bridge_config.workspace,
+            tab=bridge_config.tab,
+            context_id=bridge_config.context_id,
+            agent_role=bridge_config.agent_role,
+        )
+        outputs.append("rp-bridge-agent-log.json")
+        if record.status == "waiting_for_input":
+            metadata: dict[str, object] = {
+                "mode": "manual",
+                "prompt_file": prompt_path.name,
+                "bridge": self._bridge_metadata() or {},
+                "bridge_agent": {
+                    "status": record.status,
+                    "session_id": record.session_id,
+                    "log_artifact": "rp-bridge-agent-log.json",
+                },
+                "blocked_resume_stage": "plan",
+                "agent_log_artifact": "rp-bridge-agent-log.json",
+            }
+            if bridge_seeding is not None:
+                metadata["bridge_seeding_artifact"] = "rp-bridge-seeding.json"
+                metadata["bridge_seeding_status"] = bridge_seeding.status
+            return StageResult(
+                stage="implement",
+                status=RunStatus.blocked,
+                summary=f"RepoPrompt managed-agent implement is waiting for operator input for {task.title}",
+                outputs=outputs,
+                metadata=metadata,
+            )
+
+        if response_text is None:
+            raise AdapterError(
+                "RepoPrompt managed-agent implement completed without a usable response payload",
+                path=run_dir,
+                stage="implement",
+                error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
+            )
+        response_path = run_dir / "rp-agent-implement-response.md"
+        response_path.write_text(normalize_implement_capture(response_text), encoding="utf-8")
+        outputs.append(response_path.name)
+        metadata = {
+            "mode": "manual",
+            "prompt_file": prompt_path.name,
+            "response_file": response_path.name,
+            "bridge": self._bridge_metadata() or {},
+            "bridge_agent": {
+                "status": record.status,
+                "session_id": record.session_id,
+                "log_artifact": "rp-bridge-agent-log.json",
+            },
+            "agent_log_artifact": "rp-bridge-agent-log.json",
+        }
+        if bridge_seeding is not None:
+            metadata["bridge_seeding_artifact"] = "rp-bridge-seeding.json"
+            metadata["bridge_seeding_status"] = bridge_seeding.status
+        return StageResult(
+            stage="implement",
+            status=RunStatus.passed,
+            summary=f"RepoPrompt managed-agent execution completed for {task.title}",
+            outputs=outputs,
+            metadata=metadata,
+        )
+
+    def _review_managed_agent(
+        self,
+        task: TaskSpec,
+        run_dir: Path,
+        *,
+        prompt: str,
+        evidence_files: list[str],
+        evidence_summary: dict[str, object],
+    ) -> dict[str, object]:
+        bridge_config = self._require_bridge_config_mode("managed-agent")
+        prompt_path = run_dir / "rp-agent-review-prompt.md"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        record, response_text = self._run_managed_agent_session(
+            run_dir,
+            stage="review",
+            prompt=prompt,
+            prompt_artifact=prompt_path.name,
+            response_artifact="rp-agent-review-response.md",
+            workspace=bridge_config.workspace,
+            tab=bridge_config.tab,
+            context_id=bridge_config.context_id,
+            agent_role=bridge_config.agent_role,
+        )
+        review_report: dict[str, object] = {
+            "summary": (
+                f"RepoPrompt managed-agent review is waiting for operator input for {task.title}"
+                if record.status == "waiting_for_input"
+                else f"RepoPrompt managed-agent review completed for {task.title}"
+            ),
+            "issues": [],
+            "mode": "manual",
+            "prompt_file": prompt_path.name,
+            "verify_report_file": "verify-report.json",
+            "diagnostics_file": "run-diagnostics.json",
+            "provenance_file": "run-provenance.json",
+            "evidence_files": evidence_files,
+            "evidence_summary": evidence_summary,
+            "bridge": self._bridge_metadata() or {},
+            "bridge_agent": {
+                "status": record.status,
+                "session_id": record.session_id,
+                "log_artifact": "rp-bridge-agent-log.json",
+            },
+        }
+        if record.status == "waiting_for_input":
+            return review_report
+
+        if response_text is None:
+            raise AdapterError(
+                "RepoPrompt managed-agent review completed without a usable response payload",
+                path=run_dir,
+                stage="review",
+                error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
+            )
+        response_path = run_dir / "rp-agent-review-response.md"
+        response_path.write_text(normalize_implement_capture(response_text), encoding="utf-8")
+        review_report["response_file"] = response_path.name
+        try:
+            normalized_review = normalize_review_capture(
+                response_text,
+                contract=self.host_contract.review,
+                linked_artifact_name=prompt_path.name,
+                response_artifact_name=response_path.name,
+                existing_report=review_report,
+            )
+        except RpBridgeNormalizationError as exc:
+            raise AdapterError(
+                f"RepoPrompt managed-agent review output could not be normalized: {exc}",
+                path=run_dir / response_path.name,
+                stage="review",
+                error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
+            ) from exc
+        normalized_review["bridge"] = self._bridge_metadata() or {}
+        normalized_review["bridge_agent"] = review_report["bridge_agent"]
+        return normalized_review
+
+    def _run_managed_agent_session(
+        self,
+        run_dir: Path,
+        *,
+        stage: str,
+        prompt: str,
+        prompt_artifact: str,
+        response_artifact: str,
+        workspace: str | None,
+        tab: str | None,
+        context_id: str | None,
+        agent_role: str | None,
+    ) -> tuple[RpBridgeManagedAgentRecord, str | None]:
+        bridge_config = self._require_bridge_config_mode("managed-agent")
+        client = self._build_bridge_client(bridge_config)
+        if client is None:
+            raise AdapterError(
+                "RepoPrompt managed-agent bridge command is not available",
+                path=run_dir,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_UNAVAILABLE,
+            )
+
+        calls: list[RpBridgeToolCall] = []
+        waiting_record = self._latest_managed_agent_record(run_dir, stage=stage, status="waiting_for_input")
+        session_id = waiting_record.session_id if waiting_record is not None else None
+        resolved_workspace = workspace
+        resolved_tab = tab
+        resolved_context_id = context_id
+        if session_id is None:
+            start_result = client.agent_run_start(
+                prompt,
+                workspace=workspace,
+                tab=tab,
+                context_id=context_id,
+                agent_role=agent_role,
+                stage=stage,
+            )
+            calls.append(
+                self._bridge_call(
+                    step="agent_run_start",
+                    tool="agent_run.start",
+                    ok=start_result.ok,
+                    command=start_result.command,
+                    summary=(
+                        f"Started RepoPrompt managed-agent session {start_result.session_id}"
+                        if start_result.ok and start_result.session_id
+                        else self._bridge_error_summary(start_result.error, fallback="Failed to start RepoPrompt managed-agent session")
+                    ),
+                    error=start_result.error,
+                    detail={
+                        "session_id": start_result.session_id,
+                        "status": start_result.status,
+                    },
+                )
+            )
+            if not start_result.ok or start_result.session_id is None:
+                record = RpBridgeManagedAgentRecord(
+                    stage=stage,
+                    session_id=start_result.session_id,
+                    status="failed",
+                    workspace=workspace,
+                    tab=tab,
+                    context_id=context_id,
+                    agent_role=agent_role,
+                    prompt_artifact=prompt_artifact,
+                    summary="RepoPrompt managed-agent session failed before execution could start.",
+                    log=start_result.raw_payload or {},
+                    calls=calls,
+                )
+                self._append_bridge_agent_log_artifact(run_dir, record)
+                raise AdapterError(
+                    self._bridge_error_summary(start_result.error, fallback="RepoPrompt managed-agent start failed"),
+                    path=run_dir,
+                    stage=stage,
+                    error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
+                )
+            session_id = start_result.session_id
+            resolved_workspace = start_result.workspace or workspace
+            resolved_tab = start_result.tab or tab
+            resolved_context_id = start_result.context_id or context_id
+
+        wait_result = client.agent_run_wait(
+            session_id,
+            workspace=resolved_workspace,
+            tab=resolved_tab,
+            context_id=resolved_context_id,
+        )
+        calls.append(
+            self._bridge_call(
+                step="agent_run_wait",
+                tool="agent_run.wait",
+                ok=wait_result.ok,
+                command=wait_result.command,
+                summary=(
+                    f"RepoPrompt managed-agent session {session_id} reached status {wait_result.status}"
+                    if wait_result.ok and wait_result.status
+                    else self._bridge_error_summary(wait_result.error, fallback="RepoPrompt managed-agent wait failed")
+                ),
+                error=wait_result.error,
+                detail={"session_id": session_id, "status": wait_result.status},
+            )
+        )
+        log_payload: dict[str, Any] = {}
+        log_output: str | None = None
+        if session_id is not None:
+            log_result = client.agent_log(
+                session_id,
+                workspace=resolved_workspace,
+                tab=resolved_tab,
+                context_id=resolved_context_id,
+            )
+            calls.append(
+                self._bridge_call(
+                    step="agent_log",
+                    tool="agent_manage.log",
+                    ok=log_result.ok,
+                    command=log_result.command,
+                    summary=(
+                        f"Captured RepoPrompt managed-agent log for session {session_id}"
+                        if log_result.ok
+                        else self._bridge_error_summary(log_result.error, fallback="Failed to capture RepoPrompt managed-agent log")
+                    ),
+                    error=log_result.error,
+                    detail={"session_id": session_id, "status": log_result.status},
+                )
+            )
+            if log_result.ok:
+                log_payload = log_result.log
+                log_output = log_result.output
+
+        if not wait_result.ok:
+            timeout = wait_result.error is not None and wait_result.error.code == "TIMEOUT"
+            status = "timeout" if timeout else "failed"
+            record = RpBridgeManagedAgentRecord(
+                stage=stage,
+                session_id=session_id,
+                status=status,
+                workspace=resolved_workspace,
+                tab=resolved_tab,
+                context_id=resolved_context_id,
+                agent_role=agent_role,
+                prompt_artifact=prompt_artifact,
+                summary=(
+                    "RepoPrompt managed-agent session timed out while waiting for a terminal state."
+                    if timeout
+                    else "RepoPrompt managed-agent session failed while waiting for a terminal state."
+                ),
+                log=log_payload,
+                calls=calls,
+            )
+            self._append_bridge_agent_log_artifact(run_dir, record)
+            raise AdapterError(
+                self._bridge_error_summary(wait_result.error, fallback=record.summary),
+                path=run_dir,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_TIMEOUT if timeout else ErrorCode.BRIDGE_AGENT_FAILURE,
+            )
+
+        terminal_status = wait_result.status or "failed"
+        response_text = wait_result.output or log_output
+        if terminal_status == "completed":
+            record = RpBridgeManagedAgentRecord(
+                stage=stage,
+                session_id=session_id,
+                status="completed",
+                workspace=wait_result.workspace or resolved_workspace,
+                tab=wait_result.tab or resolved_tab,
+                context_id=wait_result.context_id or resolved_context_id,
+                agent_role=agent_role,
+                prompt_artifact=prompt_artifact,
+                response_artifact=response_artifact,
+                summary="RepoPrompt managed-agent session completed successfully.",
+                log=log_payload or (wait_result.raw_payload or {}),
+                calls=calls,
+            )
+            self._append_bridge_agent_log_artifact(run_dir, record)
+            return record, response_text
+
+        if terminal_status == "waiting_for_input":
+            record = RpBridgeManagedAgentRecord(
+                stage=stage,
+                session_id=session_id,
+                status="waiting_for_input",
+                workspace=wait_result.workspace or resolved_workspace,
+                tab=wait_result.tab or resolved_tab,
+                context_id=wait_result.context_id or resolved_context_id,
+                agent_role=agent_role,
+                prompt_artifact=prompt_artifact,
+                summary="RepoPrompt managed-agent session is waiting for operator input.",
+                log=log_payload or (wait_result.raw_payload or {}),
+                calls=calls,
+            )
+            self._append_bridge_agent_log_artifact(run_dir, record)
+            return record, response_text
+
+        if terminal_status == "timeout":
+            record = RpBridgeManagedAgentRecord(
+                stage=stage,
+                session_id=session_id,
+                status="timeout",
+                workspace=wait_result.workspace or resolved_workspace,
+                tab=wait_result.tab or resolved_tab,
+                context_id=wait_result.context_id or resolved_context_id,
+                agent_role=agent_role,
+                prompt_artifact=prompt_artifact,
+                summary="RepoPrompt managed-agent session reported timeout.",
+                log=log_payload or (wait_result.raw_payload or {}),
+                calls=calls,
+            )
+            self._append_bridge_agent_log_artifact(run_dir, record)
+            raise AdapterError(
+                record.summary,
+                path=run_dir,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_TIMEOUT,
+            )
+
+        if terminal_status == "cancelled":
+            record = RpBridgeManagedAgentRecord(
+                stage=stage,
+                session_id=session_id,
+                status="cancelled",
+                workspace=wait_result.workspace or resolved_workspace,
+                tab=wait_result.tab or resolved_tab,
+                context_id=wait_result.context_id or resolved_context_id,
+                agent_role=agent_role,
+                prompt_artifact=prompt_artifact,
+                summary="RepoPrompt managed-agent session was cancelled.",
+                log=log_payload or (wait_result.raw_payload or {}),
+                calls=calls,
+            )
+            self._append_bridge_agent_log_artifact(run_dir, record)
+            raise AdapterError(
+                record.summary,
+                path=run_dir,
+                stage=stage,
+                error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
+            )
+
+        record = RpBridgeManagedAgentRecord(
+            stage=stage,
+            session_id=session_id,
+            status="failed",
+            workspace=wait_result.workspace or resolved_workspace,
+            tab=wait_result.tab or resolved_tab,
+            context_id=wait_result.context_id or resolved_context_id,
+            agent_role=agent_role,
+            prompt_artifact=prompt_artifact,
+            summary=f"RepoPrompt managed-agent session ended with status {terminal_status}.",
+            log=log_payload or (wait_result.raw_payload or {}),
+            calls=calls,
+        )
+        self._append_bridge_agent_log_artifact(run_dir, record)
+        raise AdapterError(
+            record.summary,
+            path=run_dir,
+            stage=stage,
+            error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
+        )
+
+    def _require_bridge_config_mode(self, mode: str) -> RpBridgeRunConfig:
+        bridge_config = self._active_bridge_config()
+        if bridge_config is None or bridge_config.mode != mode:
+            raise AdapterError(
+                f"RepoPrompt bridge mode {mode!r} is not active for this run",
+                path=self.repo_root,
+                stage="bridge",
+                error_code=ErrorCode.STATE_VIOLATION,
+            )
+        return bridge_config
+
+    def _latest_managed_agent_record(
+        self,
+        run_dir: Path,
+        *,
+        stage: str,
+        status: str | None = None,
+    ) -> RpBridgeManagedAgentRecord | None:
+        artifact_path = run_dir / "rp-bridge-agent-log.json"
+        if not artifact_path.exists():
+            return None
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            artifact = RpBridgeAgentLogArtifact.model_validate(payload)
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+        for record in reversed(artifact.sessions):
+            if record.stage != stage:
+                continue
+            if status is not None and record.status != status:
+                continue
+            return record
+        return None
+
+    def _append_bridge_agent_log_artifact(self, run_dir: Path, record: RpBridgeManagedAgentRecord) -> None:
+        artifact_path = run_dir / "rp-bridge-agent-log.json"
+        sessions: list[RpBridgeManagedAgentRecord] = []
+        if artifact_path.exists():
+            try:
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                existing = RpBridgeAgentLogArtifact.model_validate(payload)
+                sessions = list(existing.sessions)
+            except (OSError, json.JSONDecodeError, ValueError):
+                sessions = []
+        sessions.append(record)
+        artifact = RpBridgeAgentLogArtifact(sessions=sessions)
+        artifact_path.write_text(
+            json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
 
     def _seed_bridge_context(self, run_dir: Path) -> RpBridgeSeedingArtifact | None:
         bridge_config = self._active_bridge_config()
