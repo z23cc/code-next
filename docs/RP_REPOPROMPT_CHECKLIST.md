@@ -73,16 +73,25 @@ Validation notes:
 
 目标：新增 `RpCliBridgeClient`，只做**只读**探测，不改外部 workspace 状态。
 
-- [ ] 新建 `RpCliBridgeClient`
-- [ ] 支持只读探测：binary / tool surface / workspace context probe
-- [ ] `doctor` 能显示 bridge tool surface 探测结果
-- [ ] `inspect --bridge-probe` 能展示 rp-cli 探测信息
-- [ ] 加入 fake `rp-cli` 测试覆盖 timeout / missing / malformed / success
+- [x] 新建 `RpCliBridgeClient`
+- [x] 支持只读探测：binary / tool surface / workspace context probe
+- [x] `doctor` 能显示 bridge tool surface 探测结果
+- [x] `inspect --bridge-probe` 能展示 rp-cli 探测信息
+- [x] 加入 fake `rp-cli` 测试覆盖 timeout / missing / malformed / success
 
 Exit criteria:
 
-- [ ] 对真实/伪造 `rp-cli` 都能稳定做只读探测
-- [ ] 不引入任何 destructive 行为
+- [x] 对真实/伪造 `rp-cli` 都能稳定做只读探测
+- [x] 不引入任何 destructive 行为
+
+Validation notes:
+
+- 日期：2026-04-16
+- P2 结论：`RpCliBridgeClient` 已提供 typed read-only probe result；`doctor` 与 `inspect --bridge-probe` 可以安全暴露 bridge tool surface，但不会把这类信号误表述为 real provider/runtime support。
+- 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_doctor.py tests/test_cli.py -q`
+- 已执行命令：`uv run aiwf contracts lint`
+- 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_doctor.py tests/test_cli.py tests/test_adapter_contracts.py tests/test_adapter_rp.py tests/test_compile.py -q`
+- 结果：focused pytest `60 passed`；final focused validation 中 `contracts lint` 通过，pytest `125 passed`
 
 ---
 
@@ -170,7 +179,7 @@ Exit criteria:
 
 - [x] P0 completed
 - [x] P1 completed
-- [ ] P2 pending
+- [x] P2 completed
 - [ ] P3 pending
 - [ ] P4 pending
 - [ ] P5 pending

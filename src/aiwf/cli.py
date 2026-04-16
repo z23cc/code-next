@@ -21,6 +21,7 @@ from aiwf.adapters import (
     restore_host_contract,
     restore_rp_bridge_config,
 )
+from aiwf.adapters.rp_cli_bridge import RpBridgeProbeResult, RpCliBridgeClient
 from aiwf.adapters.base import HostContract
 from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
@@ -596,7 +597,14 @@ def _build_run_to_run_diff(ai_root: Path, run_id: str, other_run_id: str, proven
     }
 
 
-def _build_inspection_payload(ai_root: Path, run_id: str, *, diff: bool = False, diff_run: str | None = None) -> dict[str, Any]:
+def _build_inspection_payload(
+    ai_root: Path,
+    run_id: str,
+    *,
+    diff: bool = False,
+    diff_run: str | None = None,
+    bridge_probe: bool = False,
+) -> dict[str, Any]:
     meta = RunStateManager(ai_root).load_run(run_id)
     diagnostics = _load_run_surface(ai_root, run_id, "run-diagnostics.json")
     provenance = _load_optional_run_surface(ai_root, run_id, "run-provenance.json")
@@ -653,11 +661,88 @@ def _build_inspection_payload(ai_root: Path, run_id: str, *, diff: bool = False,
             "linked_artifacts": list(review_evidence.linked_artifacts),
             "mode_mismatch": review_evidence.mode_mismatch,
         }
+        if bridge_probe:
+            payload["bridge_probe"] = _build_bridge_probe_payload(resolved_contract, meta.data)
     if diff_run is not None:
         payload["diff"] = _build_run_to_run_diff(ai_root, run_id, diff_run, provenance)
     elif diff:
         payload["diff"] = _build_current_diff(ai_root, run_id, diagnostics, provenance)
+    elif bridge_probe and "bridge_probe" not in payload:
+        payload["bridge_probe"] = {
+            "available": False,
+            "path": None,
+            "command": [],
+            "tools": [],
+            "error": {
+                "code": "BRIDGE_PROBE_UNAVAILABLE",
+                "message": "Bridge probe could not be run because the stored host contract was unavailable.",
+                "retriable": False,
+                "detail": {},
+            },
+        }
     return payload
+
+
+def _bridge_probe_payload_from_result(result: RpBridgeProbeResult) -> dict[str, Any]:
+    return {
+        "available": result.available,
+        "path": result.path,
+        "command": list(result.command),
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "metadata": tool.metadata,
+            }
+            for tool in result.tools
+        ],
+        "error": (
+            {
+                "code": result.error.code,
+                "message": result.error.message,
+                "retriable": result.error.retriable,
+                "detail": result.error.detail,
+            }
+            if result.error is not None
+            else None
+        ),
+    }
+
+
+def _build_bridge_probe_payload(contract: HostContract, run_data: Mapping[str, Any]) -> dict[str, Any]:
+    if contract.adapter != "rp" or not contract.bridge.enabled:
+        return {
+            "available": False,
+            "path": None,
+            "command": [],
+            "tools": [],
+            "error": {
+                "code": "BRIDGE_UNAVAILABLE",
+                "message": "Run host contract does not expose an RP bridge probe target.",
+                "retriable": False,
+                "detail": {},
+            },
+        }
+    client = RpCliBridgeClient.from_command_candidates(contract.bridge.command_candidates, timeout_seconds=5)
+    if client is None:
+        candidates = [candidate for candidate in contract.bridge.command_candidates if candidate]
+        return {
+            "available": False,
+            "path": None,
+            "command": candidates,
+            "tools": [],
+            "error": {
+                "code": "NOT_INSTALLED",
+                "message": (
+                    "No RP bridge command candidate was found on PATH for this run "
+                    f"({', '.join(candidates) if candidates else '-'})"
+                ),
+                "retriable": False,
+                "detail": {},
+            },
+        }
+    del run_data
+    return _bridge_probe_payload_from_result(client.probe_available())
 
 
 def _format_diff_value(value: Any) -> str:
@@ -736,8 +821,9 @@ def _print_inspection(
     verbose: bool = False,
     diff: bool = False,
     diff_run: str | None = None,
+    bridge_probe: bool = False,
 ) -> None:
-    payload = _build_inspection_payload(ai_root, run_id, diff=diff, diff_run=diff_run)
+    payload = _build_inspection_payload(ai_root, run_id, diff=diff, diff_run=diff_run, bridge_probe=bridge_probe)
     diagnostics = payload["diagnostics"]
     provenance = payload["provenance"]
 
@@ -836,6 +922,25 @@ def _print_inspection(
         handoff_artifacts = diagnostics_bridge.get("handoff_artifacts")
         if isinstance(handoff_artifacts, list) and handoff_artifacts:
             console.print(f"bridge_handoff_artifacts={_format_csv(handoff_artifacts)}")
+    bridge_probe_payload = payload.get("bridge_probe")
+    if isinstance(bridge_probe_payload, Mapping):
+        if bridge_probe_payload.get("available"):
+            console.print(f"bridge_probe=available path={bridge_probe_payload.get('path') or '-'}")
+            tools = bridge_probe_payload.get("tools")
+            if isinstance(tools, list):
+                tool_names = [
+                    str(tool.get("name", "")).strip()
+                    for tool in tools
+                    if isinstance(tool, Mapping) and str(tool.get("name", "")).strip()
+                ]
+                console.print(f"bridge_probe_tools={_format_csv(tool_names)}")
+        else:
+            error = bridge_probe_payload.get("error")
+            if isinstance(error, Mapping):
+                console.print(
+                    "bridge_probe="
+                    f"{error.get('code') or 'UNKNOWN'}:{error.get('message') or 'bridge probe failed'}"
+                )
 
     _print_inspection_diff(payload)
 
@@ -1010,6 +1115,10 @@ def inspect_run(
     verbose: Annotated[bool, typer.Option("--verbose", help="Show artifact index and detailed provenance links.")] = False,
     diff: Annotated[bool, typer.Option("--diff", help="Show delta versus the current live run metadata/artifact state.")] = False,
     diff_run: Annotated[str | None, typer.Option("--diff-run", help="Compare this run to another run's status/artifact metadata.")] = None,
+    bridge_probe: Annotated[
+        bool,
+        typer.Option("--bridge-probe", help="Run a read-only RP bridge tool probe for this run's stored bridge command candidates."),
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Render inspect output as JSON.")] = False,
 ) -> None:
     """Inspect diagnostics and provenance for an existing run."""
@@ -1017,9 +1126,15 @@ def inspect_run(
         if diff and diff_run is not None:
             raise AiwfError("Cannot use --diff and --diff-run together")
         if json_output:
-            typer.echo(json.dumps(_build_inspection_payload(ai_root, run_id, diff=diff, diff_run=diff_run), indent=2, ensure_ascii=False))
+            typer.echo(
+                json.dumps(
+                    _build_inspection_payload(ai_root, run_id, diff=diff, diff_run=diff_run, bridge_probe=bridge_probe),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
-            _print_inspection(ai_root, run_id, verbose=verbose, diff=diff, diff_run=diff_run)
+            _print_inspection(ai_root, run_id, verbose=verbose, diff=diff, diff_run=diff_run, bridge_probe=bridge_probe)
     except AiwfError as exc:
         if json_output:
             typer.echo(json.dumps({"ok": False, "run_id": run_id, "error": str(exc)}, indent=2, ensure_ascii=False))

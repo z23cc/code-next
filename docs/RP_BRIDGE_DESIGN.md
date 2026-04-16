@@ -279,13 +279,28 @@ bridge 更现实，原因有三点：
 5. 在同一 RepoPrompt 会话中按 `rp-agent-review-prompt.md` 完成 review
 6. `uv run aiwf resume <run_id>`
 
-### Phase 2 — 只读 rp-cli reconnaissance
+### Phase 2 — 只读 rp-cli reconnaissance（已落地）
 
-下一步才是：
+> **Status (2026-04-16): P2 completed.** 当前已落地的是一个只读 `RpCliBridgeClient`，它只做 bridge reconnaissance：探测 command candidate、读取 tool surface、读取 workspace context，并把成功/缺失/超时/非零退出/ malformed JSON 统一映射成 typed result。`doctor` 会把 bridge tool probe 结果作为 **bridge readiness hint** 暴露出来，`inspect --bridge-probe` 也可以按需运行同样的只读 probe。**这些结果不代表 `aiwf-rp-native/v1` provider 支持，也不会修改任何外部 workspace state。**
 
-- 探测真实 `rp-cli` 是否存在
-- 只读列出 tool surface / workspace context
-- 把这些信息安全地暴露给 `doctor` / `inspect`
+当前 P2 的实际能力是：
+
+- `RpCliBridgeClient.from_command_candidates(...)`
+- `RpCliBridgeClient.probe_available()`
+- `RpCliBridgeClient.list_tools()`
+- `RpCliBridgeClient.workspace_context(...)`
+- `doctor` 中的 bridge tool probe surface
+- `inspect --bridge-probe` 的 opt-in probe surface
+
+当前 P2 的明确边界仍然是：
+
+- 不会调用 mutating MCP/tool API
+- 不会自动 bind workspace / context
+- 不会准备 selection / seeding context
+- 不会 capture transcript / handoff
+- 不会启动 managed-agent
+
+也就是说，P2 只是把“机器上有没有一个可读的 RepoPrompt bridge candidate，以及它大概暴露了什么只读 surface”这件事安全地说清楚。
 
 ### Phase 3+
 

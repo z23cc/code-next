@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import sys
 from pathlib import Path
 
@@ -1397,6 +1398,120 @@ def test_cli_inspect_json_surfaces_machine_readable_runtime_state(tmp_path: Path
     assert payload["artifacts"]["review_report"] is None
 
 
+def test_cli_inspect_bridge_probe_surfaces_read_only_tool_probe(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="ok")
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-workspace",
+            "workspace-alpha",
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    state_manager = RunStateManager(ai_root)
+    meta = state_manager.load_run(run_id)
+    host_contract = json.loads(json.dumps(meta.data["host_contract"]))
+    host_contract["bridge"]["command_candidates"] = [str(fake_cli)]
+    state_manager.update_run(run_id, data={**meta.data, "host_contract": host_contract})
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--bridge-probe",
+        ],
+    )
+
+    assert inspect_result.exit_code == 0
+    assert "bridge_probe=available" in inspect_result.stdout
+    assert fake_cli.name in inspect_result.stdout
+    assert "bridge_probe_tools=file_search,manage_selection" in inspect_result.stdout
+
+    inspect_json_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--bridge-probe",
+            "--json",
+        ],
+    )
+
+    assert inspect_json_result.exit_code == 0
+    payload = json.loads(inspect_json_result.stdout)
+    assert payload["bridge_probe"]["available"] is True
+    assert payload["bridge_probe"]["path"] == str(fake_cli)
+    assert [tool["name"] for tool in payload["bridge_probe"]["tools"]] == ["file_search", "manage_selection"]
+    assert payload["bridge_probe"]["error"] is None
+
+
+def test_cli_inspect_bridge_probe_reports_missing_candidate_non_destructively(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+
+    state_manager = RunStateManager(ai_root)
+    meta = state_manager.load_run(run_id)
+    host_contract = json.loads(json.dumps(meta.data["host_contract"]))
+    host_contract["bridge"]["command_candidates"] = ["/path/does/not/exist/rp-cli"]
+    state_manager.update_run(run_id, data={**meta.data, "host_contract": host_contract})
+
+    inspect_json_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--bridge-probe",
+            "--json",
+        ],
+    )
+
+    assert inspect_json_result.exit_code == 0
+    payload = json.loads(inspect_json_result.stdout)
+    assert payload["bridge_probe"]["available"] is False
+    assert payload["bridge_probe"]["error"]["code"] == "NOT_INSTALLED"
+    assert payload["diagnostics"]["status"] == "blocked"
+
+
 def test_cli_inspect_surfaces_structured_error_codes_for_failed_runs(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path, gate_command=_python_exit_command(1))
 
@@ -2104,3 +2219,36 @@ def _python_exit_command(code: int) -> str:
     import sys
 
     return f"{sys.executable} -c \"import sys; sys.exit({code})\""
+
+
+def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
+    script_path = tmp_path / f"fake-rp-bridge-cli-{mode}.py"
+    script_path.write_text(
+        (
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import sys\n"
+            "import time\n"
+            "\n"
+            f"MODE = {mode!r}\n"
+            "\n"
+            "if '--list-tools' in sys.argv:\n"
+            "    if MODE == 'timeout':\n"
+            "        time.sleep(10)\n"
+            "    if MODE == 'malformed':\n"
+            "        sys.stdout.write('not-json\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if MODE == 'fail':\n"
+            "        sys.stderr.write('tool listing failed\\n')\n"
+            "        raise SystemExit(9)\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'file_search'}, {'name': 'manage_selection'}]}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "sys.stderr.write('unsupported invocation\\n')\n"
+            "raise SystemExit(2)\n"
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
+    return script_path

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
+import sys
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from aiwf.cli import app
+from aiwf.adapters.rp_cli_bridge import RpBridgeError, RpBridgeProbeResult, RpToolInfo
 from aiwf.doctor import render_doctor_report, run_doctor
 
 
@@ -169,6 +172,7 @@ def test_run_doctor_reports_rp_bridge_candidate_when_runtime_found(tmp_path: Pat
         },
     )
     _mock_protocol_probe(monkeypatch, {"/usr/local/bin/rp-cli": 1})
+    _mock_bridge_probe(monkeypatch, {"/usr/local/bin/rp-cli": ["file_search", "manage_selection"]})
 
     report = run_doctor(ai_root=ai_root, repo_root=repo_root)
 
@@ -176,10 +180,68 @@ def test_run_doctor_reports_rp_bridge_candidate_when_runtime_found(tmp_path: Pat
     assert bridge_check.status == "ok"
     assert bridge_check.path == "/usr/local/bin/rp-cli"
     assert "experimental RP bridge candidate detected via rp-cli" in bridge_check.detail
-    assert "manual-assist groundwork only" in bridge_check.detail
+    assert "read-only bridge probe detected tools: file_search, manage_selection" in bridge_check.detail
     assert "stable supported path" in bridge_check.detail
     assert bridge_check.protocol_supported is None
     assert bridge_check.protocol_version is None
+    assert bridge_check.bridge_tools_detected == ["file_search", "manage_selection"]
+
+
+def test_run_doctor_warns_when_bridge_probe_fails(tmp_path: Path, monkeypatch) -> None:
+    repo_root, ai_root = _create_workspace(tmp_path, gate_command='python -c "print(\'ok\')"')
+    _mock_which(
+        monkeypatch,
+        {
+            "python": "/usr/bin/python",
+            "uv": "/usr/bin/uv",
+            "git": "/usr/bin/git",
+            "rp-cli": "/usr/local/bin/rp-cli",
+        },
+    )
+    _mock_protocol_probe(monkeypatch, {"/usr/local/bin/rp-cli": 1})
+    _mock_bridge_probe_error(monkeypatch, "/usr/local/bin/rp-cli", code="MALFORMED_RESPONSE", message="tool list probe returned invalid JSON")
+
+    report = run_doctor(ai_root=ai_root, repo_root=repo_root)
+
+    bridge_check = next(check for check in report.checks if check.name == "rp-bridge")
+    assert bridge_check.status == "warn"
+    assert "read-only bridge probe failed" in bridge_check.detail
+    assert "tool list probe returned invalid JSON" in bridge_check.detail
+    assert bridge_check.bridge_probe_error == "tool list probe returned invalid JSON"
+
+
+def test_run_doctor_json_surfaces_bridge_tool_probe_info_with_fake_cli(tmp_path: Path, monkeypatch) -> None:
+    repo_root, ai_root = _create_workspace(tmp_path, gate_command='python -c "print(\'ok\')"')
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path)
+    _mock_which(
+        monkeypatch,
+        {
+            "python": "/usr/bin/python",
+            "uv": "/usr/bin/uv",
+            "git": "/usr/bin/git",
+            "rp-cli": str(fake_cli),
+        },
+    )
+    _mock_protocol_probe(monkeypatch, {str(fake_cli): 1})
+
+    result = runner.invoke(
+        app,
+        [
+            "doctor",
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    bridge_check = next(check for check in payload["checks"] if check["name"] == "rp-bridge")
+    assert bridge_check["status"] == "ok"
+    assert bridge_check["bridge_tools_detected"] == ["file_search", "manage_selection"]
+    assert bridge_check["bridge_probe_error"] is None
 
 
 def test_run_doctor_warns_when_rp_runtime_lacks_protocol_support(tmp_path: Path, monkeypatch) -> None:
@@ -340,21 +402,61 @@ def _mock_protocol_probe(
     version_by_path = version_by_path or {}
     unsupported_paths = unsupported_paths or set()
 
-    def fake_run(args: list[str], capture_output: bool, text: bool, check: bool, timeout: int) -> subprocess.CompletedProcess[str]:
-        assert capture_output is True
-        assert text is True
-        assert check is False
-        assert timeout == 10
-        command_path = args[0]
+    def fake_probe(command_path: str) -> tuple[bool, int | None]:
         if command_path in version_by_path:
-            return subprocess.CompletedProcess(
-                args=args,
-                returncode=0,
-                stdout=json.dumps({"protocol": "aiwf-rp-native", "version": version_by_path[command_path]}),
-                stderr="",
-            )
+            return True, version_by_path[command_path]
         if command_path in unsupported_paths:
-            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="unsupported")
+            return False, None
         raise AssertionError(f"Unexpected protocol probe for {command_path}")
 
-    monkeypatch.setattr("aiwf.doctor.subprocess.run", fake_run)
+    monkeypatch.setattr("aiwf.doctor._probe_native_runtime_protocol", fake_probe)
+
+
+def _mock_bridge_probe(monkeypatch, tools_by_path: dict[str, list[str]]) -> None:
+    def fake_probe(command_path: str) -> RpBridgeProbeResult:
+        tools = tuple(RpToolInfo(name=name) for name in tools_by_path.get(command_path, []))
+        return RpBridgeProbeResult(
+            available=True,
+            command=(command_path,),
+            path=command_path,
+            tools=tools,
+            error=None,
+        )
+
+    monkeypatch.setattr("aiwf.doctor._probe_bridge_runtime", fake_probe)
+
+
+def _mock_bridge_probe_error(monkeypatch, command_path: str, *, code: str, message: str) -> None:
+    def fake_probe(resolved_command_path: str) -> RpBridgeProbeResult:
+        assert resolved_command_path == command_path
+        return RpBridgeProbeResult(
+            available=False,
+            command=(resolved_command_path,),
+            path=resolved_command_path,
+            tools=(),
+            error=RpBridgeError(code=code, message=message, retriable=False),
+        )
+
+    monkeypatch.setattr("aiwf.doctor._probe_bridge_runtime", fake_probe)
+
+
+def _write_fake_rp_bridge_cli(tmp_path: Path) -> Path:
+    script_path = tmp_path / "fake-rp-bridge-doctor.py"
+    script_path.write_text(
+        (
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import sys\n"
+            "\n"
+            "if '--list-tools' in sys.argv:\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'file_search'}, {'name': 'manage_selection'}]}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "sys.stderr.write('unsupported invocation\\n')\n"
+            "raise SystemExit(2)\n"
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
+    return script_path

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from aiwf.adapters import ADAPTER_SPECS
+from aiwf.adapters.rp_cli_bridge import RpBridgeProbeResult, RpCliBridgeClient
 from aiwf.adapters.base import HostContract
 from aiwf.loader import load_gate_set, load_policy, load_runbook
 
@@ -32,6 +33,8 @@ class DoctorCheck:
     path: str | None = None
     protocol_supported: bool | None = None
     protocol_version: int | None = None
+    bridge_tools_detected: list[str] | None = None
+    bridge_probe_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -377,15 +380,33 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
     for command in bridge.command_candidates:
         resolved = shutil.which(command)
         if resolved:
+            probe_result = _probe_bridge_runtime(resolved)
+            if probe_result.available:
+                tools_detected = [tool.name for tool in probe_result.tools]
+                tool_detail = ", ".join(tools_detected) if tools_detected else "no tools reported"
+                return DoctorCheck(
+                    status="ok",
+                    category="tool",
+                    name=bridge_name,
+                    detail=(
+                        f"experimental RP bridge candidate detected via {command} at {resolved}; read-only bridge probe "
+                        f"detected tools: {tool_detail}. This does not imply aiwf provider/runtime support, and "
+                        "manual handoff remains the stable supported path."
+                    ),
+                    path=resolved,
+                    bridge_tools_detected=tools_detected,
+                )
             return DoctorCheck(
-                status="ok",
+                status="warn",
                 category="tool",
                 name=bridge_name,
                 detail=(
-                    f"experimental RP bridge candidate detected via {command} at {resolved}; manual-assist groundwork only — "
-                    "no automated invocation in this slice. Manual handoff remains the stable supported path."
+                    f"experimental RP bridge candidate detected via {command} at {resolved}, but the read-only bridge "
+                    f"probe failed: {probe_result.error.message if probe_result.error is not None else 'unknown probe failure'}. "
+                    "This does not imply aiwf provider/runtime support, and manual handoff remains the stable supported path."
                 ),
                 path=resolved,
+                bridge_probe_error=probe_result.error.message if probe_result.error is not None else "unknown probe failure",
             )
 
     candidates = ", ".join(bridge.command_candidates) or "-"
@@ -400,6 +421,11 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
         name=bridge_name,
         detail=detail,
     )
+
+
+def _probe_bridge_runtime(command_path: str) -> RpBridgeProbeResult:
+    client = RpCliBridgeClient((command_path,), timeout_seconds=5)
+    return client.probe_available()
 
 
 def _probe_native_runtime_protocol(command_path: str) -> tuple[bool, int | None]:
