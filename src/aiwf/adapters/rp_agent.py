@@ -933,6 +933,12 @@ class RpAgentAdapter:
                 )
             )
             if not start_result.ok or start_result.session_id is None:
+                start_transport_unavailable = self._is_bridge_transport_unavailable_error(start_result.error)
+                failure_summary = (
+                    "RepoPrompt managed-agent is unavailable in this bridge runtime; rerun with --bridge-mode manual-assist."
+                    if start_transport_unavailable
+                    else "RepoPrompt managed-agent session failed before execution could start."
+                )
                 record = RpBridgeManagedAgentRecord(
                     stage=stage,
                     session_id=start_result.session_id,
@@ -942,16 +948,19 @@ class RpAgentAdapter:
                     context_id=context_id,
                     agent_role=agent_role,
                     prompt_artifact=prompt_artifact,
-                    summary="RepoPrompt managed-agent session failed before execution could start.",
+                    summary=failure_summary,
                     log=start_result.raw_payload or {},
                     calls=calls,
                 )
                 self._append_bridge_agent_log_artifact(run_dir, record)
+                error_message = self._bridge_error_summary(start_result.error, fallback=failure_summary)
+                if start_transport_unavailable and "manual-assist" not in error_message:
+                    error_message = f"{error_message}; rerun with --bridge-mode manual-assist."
                 raise AdapterError(
-                    self._bridge_error_summary(start_result.error, fallback="RepoPrompt managed-agent start failed"),
+                    error_message,
                     path=run_dir,
                     stage=stage,
-                    error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
+                    error_code=ErrorCode.ADAPTER_UNAVAILABLE if start_transport_unavailable else ErrorCode.BRIDGE_AGENT_FAILURE,
                 )
             session_id = start_result.session_id
             resolved_workspace = start_result.workspace or workspace
@@ -1009,6 +1018,7 @@ class RpAgentAdapter:
 
         if not wait_result.ok:
             timeout = wait_result.error is not None and wait_result.error.code == "TIMEOUT"
+            transport_unavailable = self._is_bridge_transport_unavailable_error(wait_result.error)
             status = "timeout" if timeout else "failed"
             record = RpBridgeManagedAgentRecord(
                 stage=stage,
@@ -1022,17 +1032,30 @@ class RpAgentAdapter:
                 summary=(
                     "RepoPrompt managed-agent session timed out while waiting for a terminal state."
                     if timeout
-                    else "RepoPrompt managed-agent session failed while waiting for a terminal state."
+                    else (
+                        "RepoPrompt managed-agent is unavailable in this bridge runtime; rerun with --bridge-mode manual-assist."
+                        if transport_unavailable
+                        else "RepoPrompt managed-agent session failed while waiting for a terminal state."
+                    )
                 ),
                 log=log_payload,
                 calls=calls,
             )
             self._append_bridge_agent_log_artifact(run_dir, record)
+            error_message = self._bridge_error_summary(wait_result.error, fallback=record.summary)
+            if transport_unavailable and "manual-assist" not in error_message:
+                error_message = f"{error_message}; rerun with --bridge-mode manual-assist."
             raise AdapterError(
-                self._bridge_error_summary(wait_result.error, fallback=record.summary),
+                error_message,
                 path=run_dir,
                 stage=stage,
-                error_code=ErrorCode.ADAPTER_TIMEOUT if timeout else ErrorCode.BRIDGE_AGENT_FAILURE,
+                error_code=(
+                    ErrorCode.ADAPTER_TIMEOUT
+                    if timeout
+                    else ErrorCode.ADAPTER_UNAVAILABLE
+                    if transport_unavailable
+                    else ErrorCode.BRIDGE_AGENT_FAILURE
+                ),
             )
 
         terminal_status = wait_result.status or "failed"
@@ -1218,24 +1241,24 @@ class RpAgentAdapter:
             return artifact
 
         try:
-            tool_result = client.list_tools()
-            tool_names = [tool.name for tool in tool_result.tools] if tool_result.ok else []
+            probe_result = client.probe_available()
+            tool_names = [tool.name for tool in probe_result.tools] if probe_result.available else []
             calls.append(
                 self._bridge_call(
-                    step="list_tools",
-                    tool="list_tools",
-                    ok=tool_result.ok,
-                    command=tool_result.command,
+                    step="probe_available",
+                    tool="probe_available",
+                    ok=probe_result.available,
+                    command=probe_result.command,
                     summary=(
-                        f"Discovered tools: {', '.join(tool_names)}"
-                        if tool_result.ok
-                        else self._bridge_error_summary(tool_result.error, fallback="Bridge tool discovery failed")
+                        f"Bridge capability probe is available with tools: {', '.join(tool_names)}"
+                        if probe_result.available
+                        else self._bridge_error_summary(probe_result.error, fallback="Bridge tool discovery failed")
                     ),
-                    error=tool_result.error,
+                    error=probe_result.error,
                     detail={"tools": tool_names},
                 )
             )
-            if not tool_result.ok:
+            if not probe_result.available:
                 artifact = RpBridgeSeedingArtifact(
                     mode=bridge_config.mode,
                     status="failed",
@@ -1255,52 +1278,33 @@ class RpAgentAdapter:
                 self._write_bridge_seeding_artifact(run_dir, artifact)
                 return artifact
 
-            available_tools = sorted({tool.name for tool in tool_result.tools if tool.name})
-            if "manage_selection" not in available_tools:
-                artifact = RpBridgeSeedingArtifact(
-                    mode=bridge_config.mode,
-                    status="failed",
-                    workspace=bridge_config.workspace,
-                    tab=bridge_config.tab,
-                    context_id=bridge_config.context_id,
-                    agent_role=bridge_config.agent_role,
-                    summary=(
-                        "Bridge context seeding failed because the RepoPrompt bridge did not expose manage_selection; "
-                        "manually add the aiwf run artifacts before continuing the handoff."
-                    ),
-                    selected_artifacts=selected_artifacts,
-                    selected_paths=seed_paths,
-                    attempted_tools=available_tools,
-                    calls=calls,
-                )
-                self._write_bridge_seeding_artifact(run_dir, artifact)
-                return artifact
-
+            attempted_tools: list[str] = []
             current_context_id = bridge_config.context_id
-            if "workspace_context" in available_tools:
-                context_result = client.workspace_context(bridge_config.workspace)
-                calls.append(
-                    self._bridge_call(
-                        step="workspace_context_before",
-                        tool="workspace_context",
-                        ok=context_result.ok,
-                        command=context_result.command,
-                        summary=(
-                            f"Loaded workspace context snapshot with {len(context_result.selected_paths)} selected path(s)"
-                            if context_result.ok
-                            else self._bridge_error_summary(context_result.error, fallback="Workspace context snapshot failed")
-                        ),
-                        error=context_result.error,
-                        detail={
-                            "workspace": context_result.workspace,
-                            "context_id": context_result.context_id,
-                            "selected_paths": list(context_result.selected_paths),
-                        },
-                    )
+            attempted_tools.append("workspace_context")
+            context_result = client.workspace_context(bridge_config.workspace)
+            calls.append(
+                self._bridge_call(
+                    step="workspace_context_before",
+                    tool="workspace_context",
+                    ok=context_result.ok,
+                    command=context_result.command,
+                    summary=(
+                        f"Loaded workspace context snapshot with {len(context_result.selected_paths)} selected path(s)"
+                        if context_result.ok
+                        else self._bridge_error_summary(context_result.error, fallback="Workspace context snapshot failed")
+                    ),
+                    error=context_result.error,
+                    detail={
+                        "workspace": context_result.workspace,
+                        "context_id": context_result.context_id,
+                        "selected_paths": list(context_result.selected_paths),
+                    },
                 )
-                if context_result.ok and context_result.context_id:
-                    current_context_id = context_result.context_id
+            )
+            if context_result.ok and context_result.context_id:
+                current_context_id = context_result.context_id
 
+            attempted_tools.append("manage_selection")
             manage_result = client.manage_selection_add(
                 seed_paths,
                 workspace=bridge_config.workspace,
@@ -1327,6 +1331,7 @@ class RpAgentAdapter:
                     },
                 )
             )
+            attempted_tool_names = sorted({name for name in attempted_tools if name})
             if not manage_result.ok:
                 artifact = RpBridgeSeedingArtifact(
                     mode=bridge_config.mode,
@@ -1341,7 +1346,7 @@ class RpAgentAdapter:
                     ),
                     selected_artifacts=selected_artifacts,
                     selected_paths=seed_paths,
-                    attempted_tools=available_tools,
+                    attempted_tools=attempted_tool_names,
                     calls=calls,
                 )
                 self._write_bridge_seeding_artifact(run_dir, artifact)
@@ -1362,7 +1367,7 @@ class RpAgentAdapter:
                 ),
                 selected_artifacts=selected_artifacts,
                 selected_paths=final_selected_paths,
-                attempted_tools=available_tools,
+                attempted_tools=attempted_tool_names,
                 calls=calls,
             )
             self._write_bridge_seeding_artifact(run_dir, artifact)
@@ -1455,6 +1460,12 @@ class RpAgentAdapter:
         if isinstance(message, str) and message.strip():
             return message
         return fallback
+
+    def _is_bridge_transport_unavailable_error(self, error: object) -> bool:
+        if error is None:
+            return False
+        code = getattr(error, "code", None)
+        return code in {"BRIDGE_TOOL_INVOCATION_UNSUPPORTED", "TOOL_UNAVAILABLE"}
 
     def _snapshot_repo(self) -> list[str]:
         entries: list[str] = []

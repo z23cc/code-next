@@ -162,7 +162,7 @@ def test_rp_agent_adapter_manual_bridge_seeding_writes_artifact_and_keeps_manual
     assert result.metadata["bridge_seeding_status"] == "seeded"
     assert seeding_artifact["status"] == "seeded"
     assert seeding_artifact["selected_artifacts"] == ["context-pack.md", "exec-plan.md"]
-    assert seeding_artifact["attempted_tools"] == ["file_search", "manage_selection", "workspace_context"]
+    assert seeding_artifact["attempted_tools"] == ["manage_selection", "workspace_context"]
     assert seeding_artifact["selected_paths"] == [".ai/runs/test-run/context-pack.md", ".ai/runs/test-run/exec-plan.md"]
     assert "bridge_seeding_artifact: rp-bridge-seeding.json" in prompt_text
     assert "bridge_seeding_status: seeded" in prompt_text
@@ -228,6 +228,22 @@ def test_rp_agent_adapter_managed_agent_execute_waiting_for_input_blocks_with_re
     assert result.metadata["bridge_agent"]["status"] == "waiting_for_input"
     assert agent_log["sessions"][-1]["status"] == "waiting_for_input"
     assert (run_dir / "rp-agent-implement-response.md").exists() is False
+
+
+def test_rp_agent_adapter_managed_agent_transport_unavailable_maps_to_adapter_unavailable(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(mode="managed-agent", workspace="workspace-alpha", context_id="ctx-123")
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-tool-unavailable")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+
+    with pytest.raises(AdapterError) as exc_info:
+        adapter.execute(task, plan, run_dir)
+
+    assert exc_info.value.error_code is ErrorCode.ADAPTER_UNAVAILABLE
+    assert "manual-assist" in str(exc_info.value)
 
 
 def test_rp_agent_adapter_managed_agent_review_completes_with_normalized_report(tmp_path: Path) -> None:
@@ -605,19 +621,41 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "\n"
             f"MODE = {mode!r}\n"
             "\n"
-            "if '--list-tools' in sys.argv:\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'file_search'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}]}))\n"
+            "def _tool_and_payload(argv):\n"
+            "    if '-e' not in argv:\n"
+            "        return None, {}\n"
+            "    idx = argv.index('-e')\n"
+            "    if idx + 1 >= len(argv):\n"
+            "        return None, {}\n"
+            "    tool = argv[idx + 1]\n"
+            "    payload = {}\n"
+            "    if '--arguments' in argv:\n"
+            "        aidx = argv.index('--arguments')\n"
+            "        if aidx + 1 < len(argv):\n"
+            "            payload = json.loads(argv[aidx + 1])\n"
+            "    return tool, payload\n"
+            "\n"
+            "if '--help' in sys.argv:\n"
+            "    sys.stdout.write('usage: rp-cli -e TOOL --raw-json [--arguments JSON]\\n')\n"
+            "    sys.stdout.write('tool mode with -e and --raw-json\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "tool, payload = _tool_and_payload(sys.argv)\n"
+            "if tool is None:\n"
+            "    sys.stderr.write('unsupported invocation\\n')\n"
+            "    raise SystemExit(2)\n"
+            "\n"
+            "if tool == 'file_search':\n"
+            "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "if '--workspace-context' in sys.argv:\n"
-            "    workspace = sys.argv[-1] if len(sys.argv) >= 3 else None\n"
-            "    sys.stdout.write(json.dumps({'workspace': workspace, 'context_id': 'ctx-123', 'selected_paths': ['src/example.py']}))\n"
+            "if tool == 'workspace_context':\n"
+            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': 'ctx-123', 'selected_paths': ['src/example.py']}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "if '--manage-selection' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
+            "if tool == 'manage_selection':\n"
             "    if MODE == 'seed-manage-fail':\n"
             "        sys.stderr.write('manage selection failed\\n')\n"
             "        raise SystemExit(7)\n"
@@ -626,37 +664,38 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "if '--agent-run-start' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
-            "    status = 'started'\n"
-            "    sys.stdout.write(json.dumps({'session_id': f\"{payload.get('stage')}-session-123\", 'status': status, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
-            "    sys.stdout.write('\\n')\n"
-            "    raise SystemExit(0)\n"
+            "if tool == 'agent_run':\n"
+            "    if MODE == 'managed-tool-unavailable':\n"
+            "        sys.stderr.write('unknown tool agent_run\\n')\n"
+            "        raise SystemExit(6)\n"
+            "    action = payload.get('action')\n"
+            "    if action == 'start':\n"
+            "        status = 'started'\n"
+            "        sys.stdout.write(json.dumps({'session_id': f\"{payload.get('stage')}-session-123\", 'status': status, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if action == 'wait':\n"
+            "        session_id = payload.get('session_id')\n"
+            "        if MODE == 'managed-waiting':\n"
+            "            status = 'waiting_for_input'\n"
+            "            output = None\n"
+            "        elif MODE == 'managed-failed':\n"
+            "            status = 'failed'\n"
+            "            output = None\n"
+            "        elif MODE == 'managed-timeout':\n"
+            "            status = 'timeout'\n"
+            "            output = None\n"
+            "        elif session_id and session_id.startswith('review-'):\n"
+            "            status = 'completed'\n"
+            "            output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "        else:\n"
+            "            status = 'completed'\n"
+            "            output = '# Managed implement output\\n'\n"
+            "        sys.stdout.write(json.dumps({'session_id': session_id, 'status': status, 'output': output, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "\n"
-            "if '--agent-run-wait' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
-            "    session_id = payload.get('session_id')\n"
-            "    if MODE == 'managed-waiting':\n"
-            "        status = 'waiting_for_input'\n"
-            "        output = None\n"
-            "    elif MODE == 'managed-failed':\n"
-            "        status = 'failed'\n"
-            "        output = None\n"
-            "    elif MODE == 'managed-timeout':\n"
-            "        status = 'timeout'\n"
-            "        output = None\n"
-            "    elif session_id and session_id.startswith('review-'):\n"
-            "        status = 'completed'\n"
-            "        output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
-            "    else:\n"
-            "        status = 'completed'\n"
-            "        output = '# Managed implement output\\n'\n"
-            "    sys.stdout.write(json.dumps({'session_id': session_id, 'status': status, 'output': output, 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
-            "    sys.stdout.write('\\n')\n"
-            "    raise SystemExit(0)\n"
-            "\n"
-            "if '--agent-log' in sys.argv:\n"
-            "    payload = json.loads(sys.argv[-1])\n"
+            "if tool == 'agent_manage':\n"
             "    session_id = payload.get('session_id')\n"
             "    if MODE == 'managed-waiting':\n"
             "        status = 'waiting_for_input'\n"
@@ -677,8 +716,8 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
-            "sys.stderr.write('unsupported invocation\\n')\n"
-            "raise SystemExit(2)\n"
+            "sys.stderr.write('unknown tool ' + str(tool) + '\\n')\n"
+            "raise SystemExit(3)\n"
         ),
         encoding="utf-8",
     )
