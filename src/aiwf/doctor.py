@@ -444,6 +444,11 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                 elif any(tool.name == "agent_manage" for tool in probe_result.tools):
                     readiness_hints.append("transcript=advertised")
 
+                if any(tool.name == "context_builder" for tool in probe_result.tools):
+                    readiness_hints.append("context-composition=ready")
+                if any(tool.name == "ask_oracle" for tool in probe_result.tools):
+                    readiness_hints.append("advisory-oracle=ready")
+
                 readiness_suffix = f" Readiness hints: {', '.join(readiness_hints)}." if readiness_hints else ""
                 return DoctorCheck(
                     status="ok",

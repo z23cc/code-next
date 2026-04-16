@@ -442,6 +442,8 @@ def test_cli_rp_bridge_plan_command_persists_bridge_metadata(tmp_path: Path) -> 
         "agent_role": None,
         "timeout_seconds": None,
         "export_transcript": False,
+        "composition": "manage-selection",
+        "use_oracle_for_review": False,
         "resolved": None,
     }
 
@@ -456,6 +458,8 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
         "agent_role": "implementer",
         "timeout_seconds": 900,
         "export_transcript": True,
+        "composition": "manage-selection",
+        "use_oracle_for_review": False,
         "resolved": None,
     }
 
@@ -633,6 +637,70 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     resumed_meta = RunStateManager(ai_root).load_run(run_id)
     assert resumed_meta.status.value == "passed"
     assert resumed_meta.data["rp_bridge"] == bridge_payload
+
+
+def test_cli_rp_bridge_p8_options_persist_and_oracle_artifact_is_separate(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="seed-ok")
+    fake_path = f"{fake_cli.parent}:{Path(sys.executable).parent}:{Path.cwd()}"
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-workspace",
+            "workspace-alpha",
+            "--bridge-composition",
+            "context-builder",
+            "--bridge-use-oracle-for-review",
+        ],
+        env={"PATH": fake_path},
+    )
+
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    run_dir = ai_root / "runs" / run_id
+    meta = RunStateManager(ai_root).load_run(run_id)
+    assert meta.data["rp_bridge"]["composition"] == "context-builder"
+    assert meta.data["rp_bridge"]["use_oracle_for_review"] is True
+    assert (run_dir / "rp-bridge-context-builder.json").exists()
+
+    resume_result = runner.invoke(
+        app,
+        ["resume", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+    assert resume_result.exit_code == 0
+
+    review_result = runner.invoke(
+        app,
+        ["run", "review", "--run-id", run_id, "--ai-root", str(ai_root), "--repo-root", str(repo_root)],
+        env={"PATH": fake_path},
+    )
+    assert review_result.exit_code == 0
+    review_report = json.loads((run_dir / "review-report.json").read_text(encoding="utf-8"))
+    assert review_report["bridge_oracle_artifact"] == "rp-bridge-oracle.json"
+    assert (run_dir / "rp-bridge-oracle.json").exists()
+
+    inspect_result = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+    assert inspect_result.exit_code == 0
+    inspect_payload = json.loads(inspect_result.stdout)
+    assert inspect_payload["rp_bridge"]["composition"] == "context-builder"
+    assert inspect_payload["rp_bridge"]["use_oracle_for_review"] is True
+    assert inspect_payload["diagnostics"]["bridge"]["context_builder_artifact"] == "rp-bridge-context-builder.json"
+    assert inspect_payload["diagnostics"]["bridge"]["oracle_artifact"] == "rp-bridge-oracle.json"
+    assert inspect_payload["diagnostics"]["bridge"]["oracle_status"] == "ok"
+
 
 
 def test_cli_inspect_surfaces_bridge_seeding_artifact_and_status(tmp_path: Path) -> None:
@@ -2881,6 +2949,24 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        raise SystemExit(7)\n"
             "    paths = payload.get('paths', [])\n"
             "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'selected_paths': paths, 'added_paths': paths}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'context_builder':\n"
+            "    response_type = payload.get('response_type', 'clarify')\n"
+            "    if MODE == 'context-builder-apply-fail' and response_type == 'plan':\n"
+            "        sys.stderr.write('context builder apply failed\\n')\n"
+            "        raise SystemExit(8)\n"
+            "    response = 'context-builder preview' if response_type == 'clarify' else 'context-builder apply'\n"
+            "    sys.stdout.write(json.dumps({'response_type': response_type, 'context_id': 'ctx-123', 'selected_paths': ['src/example.py'], 'response': response, 'export_path': '.ai/runs/test-run/context-builder.md'}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'ask_oracle':\n"
+            "    if MODE == 'oracle-fail':\n"
+            "        sys.stderr.write('oracle failed\\n')\n"
+            "        raise SystemExit(9)\n"
+            "    sys.stdout.write(json.dumps({'mode': payload.get('mode', 'chat'), 'chat_id': 'oracle-chat-1', 'response': 'advisory oracle response', 'oracle_export_path': '.ai/runs/test-run/oracle.md'}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

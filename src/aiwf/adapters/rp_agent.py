@@ -19,7 +19,9 @@ from aiwf.exceptions import AdapterError, ErrorCode
 from aiwf.models import (
     RpBridgeAgentLogArtifact,
     RpBridgeAgentTranscriptArtifact,
+    RpBridgeContextBuilderArtifact,
     RpBridgeManagedAgentRecord,
+    RpBridgeOracleArtifact,
     RpBridgeResolvedIdentity,
     RpBridgeRunConfig,
     RpBridgeSeedingArtifact,
@@ -298,6 +300,9 @@ class RpAgentAdapter:
         bridge_metadata = self._bridge_metadata()
         if bridge_metadata is not None:
             review_report["bridge"] = bridge_metadata
+        oracle_artifact = self._capture_review_oracle_advisory(run_dir, task=task, evidence_summary=evidence_summary)
+        if oracle_artifact is not None:
+            review_report["bridge_oracle_artifact"] = oracle_artifact
         return review_report
 
     def _run_rp(
@@ -671,6 +676,8 @@ class RpAgentAdapter:
             f"- tab: {bridge_config.tab or '(unset)'}",
             f"- context_id: {bridge_config.context_id or '(unset)'}",
             f"- agent_role: {bridge_config.agent_role or '(unset)'}",
+            f"- composition: {bridge_config.composition}",
+            f"- use_oracle_for_review: {bridge_config.use_oracle_for_review}",
         ]
         if bridge_config.resolved is not None:
             resolved = bridge_config.resolved
@@ -931,6 +938,9 @@ class RpAgentAdapter:
                 "handoff_artifact": record.handoff_artifact,
             },
         }
+        oracle_artifact = self._capture_review_oracle_advisory(run_dir, task=task, evidence_summary=evidence_summary)
+        if oracle_artifact is not None:
+            review_report["bridge_oracle_artifact"] = oracle_artifact
         if record.status == "waiting_for_input":
             return review_report
 
@@ -961,6 +971,8 @@ class RpAgentAdapter:
             ) from exc
         normalized_review["bridge"] = self._bridge_metadata() or {}
         normalized_review["bridge_agent"] = review_report["bridge_agent"]
+        if oracle_artifact is not None:
+            normalized_review["bridge_oracle_artifact"] = oracle_artifact
         return normalized_review
 
     def _run_managed_agent_session(
@@ -1847,6 +1859,27 @@ class RpAgentAdapter:
             if context_result.ok and context_result.context_id:
                 current_context_id = context_result.context_id
 
+            attempted_tools.append("workspace_context")
+            snapshot_before = client.workspace_context_snapshot(include=["selection", "tokens", "prompt"])
+            calls.append(
+                self._bridge_call(
+                    step="workspace_context_snapshot_before",
+                    tool="workspace_context.snapshot",
+                    ok=snapshot_before.ok,
+                    command=snapshot_before.command,
+                    summary=(
+                        f"Captured pre-seeding workspace snapshot with {len(snapshot_before.selected_paths)} selected path(s)"
+                        if snapshot_before.ok
+                        else self._bridge_error_summary(snapshot_before.error, fallback="Pre-seeding workspace snapshot unavailable")
+                    ),
+                    error=snapshot_before.error,
+                    detail={
+                        "context_id": snapshot_before.context_id,
+                        "selected_paths": list(snapshot_before.selected_paths),
+                    },
+                )
+            )
+
             attempted_tools.append("manage_selection")
             manage_result = client.manage_selection_add(
                 seed_paths,
@@ -1874,6 +1907,128 @@ class RpAgentAdapter:
                     },
                 )
             )
+
+            final_context_id = manage_result.context_id or current_context_id
+            final_selected_paths = list(manage_result.selected_paths or manage_result.added_paths or seed_paths)
+            composition_source = "manage-selection"
+            composition_fallback = False
+
+            if manage_result.ok:
+                attempted_tools.append("workspace_context")
+                snapshot_after = client.workspace_context_snapshot(include=["selection", "tokens", "prompt"])
+                calls.append(
+                    self._bridge_call(
+                        step="workspace_context_snapshot_after",
+                        tool="workspace_context.snapshot",
+                        ok=snapshot_after.ok,
+                        command=snapshot_after.command,
+                        summary=(
+                            f"Captured post-seeding workspace snapshot with {len(snapshot_after.selected_paths)} selected path(s)"
+                            if snapshot_after.ok
+                            else self._bridge_error_summary(snapshot_after.error, fallback="Post-seeding workspace snapshot unavailable")
+                        ),
+                        error=snapshot_after.error,
+                        detail={
+                            "context_id": snapshot_after.context_id,
+                            "selected_paths": list(snapshot_after.selected_paths),
+                        },
+                    )
+                )
+                if snapshot_after.ok and snapshot_after.context_id:
+                    final_context_id = snapshot_after.context_id
+
+                attempted_tools.append("context_builder")
+                instructions = self._bridge_context_builder_instructions(
+                    run_dir,
+                    selected_paths=final_selected_paths,
+                )
+                context_preview = client.context_builder_preview(instructions)
+                calls.append(
+                    self._bridge_call(
+                        step="context_builder_preview",
+                        tool="context_builder",
+                        ok=context_preview.ok,
+                        command=context_preview.command,
+                        summary=(
+                            "Generated context_builder preview for aiwf run artifacts"
+                            if context_preview.ok
+                            else self._bridge_error_summary(context_preview.error, fallback="context_builder preview unavailable")
+                        ),
+                        error=context_preview.error,
+                        detail={
+                            "flow": context_preview.flow,
+                            "response_type": context_preview.response_type,
+                            "context_id": context_preview.context_id,
+                            "selected_paths": list(context_preview.selected_paths),
+                        },
+                    )
+                )
+                self._write_bridge_context_builder_artifact(
+                    run_dir,
+                    RpBridgeContextBuilderArtifact(
+                        flow="preview",
+                        response_type=context_preview.response_type,
+                        status="ok" if context_preview.ok else "failed",
+                        workspace=resolved_workspace,
+                        context_id=context_preview.context_id or final_context_id,
+                        response_text=context_preview.response_text,
+                        selected_paths=list(context_preview.selected_paths or final_selected_paths),
+                        export_path=context_preview.export_path,
+                        detail={
+                            "error_code": context_preview.error.code if context_preview.error is not None else None,
+                            "error_message": context_preview.error.message if context_preview.error is not None else None,
+                        },
+                    ),
+                )
+
+                if bridge_config.composition == "context-builder":
+                    context_apply = client.context_builder_apply(instructions, response_type="plan")
+                    calls.append(
+                        self._bridge_call(
+                            step="context_builder_apply",
+                            tool="context_builder",
+                            ok=context_apply.ok,
+                            command=context_apply.command,
+                            summary=(
+                                "Applied context_builder composition for seeded aiwf artifacts"
+                                if context_apply.ok
+                                else self._bridge_error_summary(context_apply.error, fallback="context_builder apply failed; using manage-selection fallback")
+                            ),
+                            error=context_apply.error,
+                            detail={
+                                "flow": context_apply.flow,
+                                "response_type": context_apply.response_type,
+                                "context_id": context_apply.context_id,
+                                "selected_paths": list(context_apply.selected_paths),
+                            },
+                        )
+                    )
+                    self._write_bridge_context_builder_artifact(
+                        run_dir,
+                        RpBridgeContextBuilderArtifact(
+                            flow="apply",
+                            response_type=context_apply.response_type,
+                            status="ok" if context_apply.ok else "failed",
+                            workspace=resolved_workspace,
+                            context_id=context_apply.context_id or final_context_id,
+                            response_text=context_apply.response_text,
+                            selected_paths=list(context_apply.selected_paths or final_selected_paths),
+                            export_path=context_apply.export_path,
+                            detail={
+                                "error_code": context_apply.error.code if context_apply.error is not None else None,
+                                "error_message": context_apply.error.message if context_apply.error is not None else None,
+                            },
+                        ),
+                    )
+                    if context_apply.ok:
+                        composition_source = "context-builder"
+                        if context_apply.context_id:
+                            final_context_id = context_apply.context_id
+                        if context_apply.selected_paths:
+                            final_selected_paths = list(context_apply.selected_paths)
+                    else:
+                        composition_fallback = True
+
             attempted_tool_names = sorted({name for name in attempted_tools if name})
             if not manage_result.ok:
                 artifact = RpBridgeSeedingArtifact(
@@ -1895,14 +2050,17 @@ class RpAgentAdapter:
                 self._write_bridge_seeding_artifact(run_dir, artifact)
                 return artifact
 
-            final_context_id = manage_result.context_id or current_context_id
-            final_selected_paths = list(manage_result.selected_paths or manage_result.added_paths or seed_paths)
             if final_context_id:
                 self._update_bridge_resolved_identity(
                     bridge_config,
                     workspace_name=manage_result.workspace or resolved_workspace or bridge_config.workspace,
                     context_id=final_context_id,
                 )
+            summary_suffix = ""
+            if composition_source == "context-builder":
+                summary_suffix = " Context composition used context_builder (opt-in)."
+            elif composition_fallback:
+                summary_suffix = " context_builder apply was unavailable; continued with manage_selection fallback."
             artifact = RpBridgeSeedingArtifact(
                 mode=bridge_config.mode,
                 status="seeded",
@@ -1912,7 +2070,7 @@ class RpAgentAdapter:
                 agent_role=bridge_config.agent_role,
                 summary=(
                     "Bridge context seeding prepared the aiwf run artifacts in RepoPrompt; manual handoff still "
-                    "requires reviewing the implementation brief."
+                    f"requires reviewing the implementation brief.{summary_suffix}"
                 ),
                 selected_artifacts=selected_artifacts,
                 selected_paths=final_selected_paths,
@@ -1974,6 +2132,88 @@ class RpAgentAdapter:
     def _write_bridge_seeding_artifact(self, run_dir: Path, artifact: RpBridgeSeedingArtifact) -> None:
         artifact_path = run_dir / "rp-bridge-seeding.json"
         artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def _write_bridge_context_builder_artifact(self, run_dir: Path, artifact: RpBridgeContextBuilderArtifact) -> None:
+        artifact_path = run_dir / "rp-bridge-context-builder.json"
+        artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def _write_bridge_oracle_artifact(self, run_dir: Path, artifact: RpBridgeOracleArtifact) -> None:
+        artifact_path = run_dir / "rp-bridge-oracle.json"
+        artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def _bridge_context_builder_instructions(
+        self,
+        run_dir: Path,
+        *,
+        selected_paths: Sequence[str],
+        task_hint: str | None = None,
+    ) -> str:
+        selected_lines = "\n".join(f"- {path}" for path in selected_paths) or "- (none)"
+        task_line = f"Task hint: {task_hint}\n\n" if task_hint else ""
+        return (
+            "<task>Prepare RepoPrompt context for aiwf run handoff</task>\n"
+            f"<context>{task_line}Run directory: {run_dir}\nSelected aiwf artifacts:\n{selected_lines}</context>\n"
+            "<discovery_agent-guidelines>Prefer already-seeded aiwf artifacts and keep context deterministic.</discovery_agent-guidelines>"
+        )
+
+    def _capture_review_oracle_advisory(
+        self,
+        run_dir: Path,
+        *,
+        task: TaskSpec,
+        evidence_summary: dict[str, object],
+    ) -> str | None:
+        bridge_config = self._active_bridge_config()
+        if bridge_config is None or not bridge_config.use_oracle_for_review:
+            return None
+        client = self._build_bridge_client(bridge_config)
+        if client is None:
+            self._write_bridge_oracle_artifact(
+                run_dir,
+                RpBridgeOracleArtifact(
+                    mode="review",
+                    status="failed",
+                    detail={"error": "bridge client unavailable"},
+                ),
+            )
+            return "rp-bridge-oracle.json"
+
+        verify_summary = str(evidence_summary.get("verify", "")).strip()
+        diagnostics_summary = str(evidence_summary.get("diagnostics", "")).strip()
+        message = (
+            f"Review advisory for task '{task.title}'. "
+            f"Verify summary: {verify_summary or '-'}; "
+            f"Diagnostics summary: {diagnostics_summary or '-'}"
+        )
+        oracle_result = client.ask_oracle(message, mode="review", export_response=True)
+        if oracle_result.ok:
+            self._write_bridge_oracle_artifact(
+                run_dir,
+                RpBridgeOracleArtifact(
+                    mode="review",
+                    status="ok",
+                    chat_id=oracle_result.chat_id,
+                    response_text=oracle_result.response_text,
+                    export_path=oracle_result.export_path,
+                    detail={"raw_stdout": oracle_result.raw_stdout, "raw_stderr": oracle_result.raw_stderr},
+                ),
+            )
+            return "rp-bridge-oracle.json"
+
+        self._write_bridge_oracle_artifact(
+            run_dir,
+            RpBridgeOracleArtifact(
+                mode="review",
+                status="failed",
+                detail={
+                    "error_code": oracle_result.error.code if oracle_result.error is not None else None,
+                    "error_message": oracle_result.error.message if oracle_result.error is not None else None,
+                    "raw_stdout": oracle_result.raw_stdout,
+                    "raw_stderr": oracle_result.raw_stderr,
+                },
+            ),
+        )
+        return "rp-bridge-oracle.json"
 
     def _bridge_call(
         self,

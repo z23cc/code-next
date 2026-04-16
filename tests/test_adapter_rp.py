@@ -164,6 +164,7 @@ def test_rp_agent_adapter_manual_bridge_seeding_writes_artifact_and_keeps_manual
     assert seeding_artifact["selected_artifacts"] == ["context-pack.md", "exec-plan.md"]
     assert seeding_artifact["attempted_tools"] == [
         "bind_context",
+        "context_builder",
         "manage_selection",
         "manage_workspaces",
         "workspace_context",
@@ -195,6 +196,51 @@ def test_rp_agent_adapter_manual_bridge_seeding_falls_back_cleanly_on_bridge_fai
     assert "bridge_seeding_status: failed" in prompt_text
     assert "Add the current aiwf run artifacts to your RepoPrompt context." in prompt_text
     assert (run_dir / "rp-agent-implement-prompt.md").exists()
+
+
+def test_rp_agent_adapter_manual_bridge_context_builder_opt_in_is_additive(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(
+        mode="manual-assist",
+        workspace="workspace-alpha",
+        context_id="ctx-123",
+        composition="context-builder",
+    )
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="seed-ok")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+
+    seeding_artifact = json.loads((run_dir / "rp-bridge-seeding.json").read_text(encoding="utf-8"))
+    context_builder_artifact = json.loads((run_dir / "rp-bridge-context-builder.json").read_text(encoding="utf-8"))
+
+    assert result.status is RunStatus.blocked
+    assert seeding_artifact["status"] == "seeded"
+    assert "Context composition used context_builder" in seeding_artifact["summary"]
+    assert context_builder_artifact["flow"] == "apply"
+    assert context_builder_artifact["status"] == "ok"
+
+
+def test_rp_agent_adapter_review_oracle_capture_is_advisory_only(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(
+        mode="manual-assist",
+        workspace="workspace-alpha",
+        use_oracle_for_review=True,
+    )
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="seed-ok")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    review = adapter.review(task, run_dir)
+    oracle_artifact = json.loads((run_dir / "rp-bridge-oracle.json").read_text(encoding="utf-8"))
+
+    assert review["mode"] == "manual"
+    assert review["prompt_file"] == "rp-agent-review-prompt.md"
+    assert review["bridge_oracle_artifact"] == "rp-bridge-oracle.json"
+    assert oracle_artifact["status"] == "ok"
+    assert oracle_artifact["mode"] == "review"
 
 
 def test_rp_agent_adapter_managed_agent_execute_completes_with_response_and_log(tmp_path: Path) -> None:
@@ -746,6 +792,24 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        raise SystemExit(7)\n"
             "    paths = payload.get('paths', [])\n"
             "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'selected_paths': paths, 'added_paths': paths}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'context_builder':\n"
+            "    response_type = payload.get('response_type', 'clarify')\n"
+            "    if MODE == 'context-builder-apply-fail' and response_type == 'plan':\n"
+            "        sys.stderr.write('context builder apply failed\\n')\n"
+            "        raise SystemExit(8)\n"
+            "    response = 'context-builder preview' if response_type == 'clarify' else 'context-builder apply'\n"
+            "    sys.stdout.write(json.dumps({'response_type': response_type, 'context_id': 'ctx-123', 'selected_paths': ['src/example.py'], 'response': response}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'ask_oracle':\n"
+            "    if MODE == 'oracle-fail':\n"
+            "        sys.stderr.write('oracle failed\\n')\n"
+            "        raise SystemExit(9)\n"
+            "    sys.stdout.write(json.dumps({'mode': payload.get('mode', 'chat'), 'chat_id': 'oracle-chat-1', 'response': 'advisory oracle response', 'oracle_export_path': '.ai/runs/test-run/oracle.md'}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

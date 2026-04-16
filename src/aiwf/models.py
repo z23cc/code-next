@@ -408,12 +408,17 @@ class RunBridgeDiagnostics(ModelBase):
     agent_role: str | None = None
     timeout_seconds: int | None = None
     export_transcript: bool = False
+    composition: Literal["manage-selection", "context-builder"] = "manage-selection"
+    use_oracle_for_review: bool = False
     resolved: RpBridgeResolvedIdentity | None = None
     summary: str
     handoff_artifacts: list[str] = Field(default_factory=list)
     seeding_artifact: str | None = None
     seeding_status: Literal["seeded", "skipped", "failed"] | None = None
     seeding_summary: str | None = None
+    context_builder_artifact: str | None = None
+    oracle_artifact: str | None = None
+    oracle_status: Literal["ok", "failed"] | None = None
     agent_log_artifact: str | None = None
     agent_status: Literal["completed", "failed", "waiting_for_input", "timeout", "cancelled"] | None = None
     agent_session_id: str | None = None

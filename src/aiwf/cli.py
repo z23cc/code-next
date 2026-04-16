@@ -167,6 +167,8 @@ def _resolve_bridge_config(
     bridge_agent_role: str | None,
     bridge_timeout: int | None,
     bridge_export_transcript: bool,
+    bridge_composition: str | None,
+    bridge_use_oracle_for_review: bool,
 ) -> RpBridgeRunConfig | None:
     any_bridge_option = any(
         [
@@ -178,6 +180,8 @@ def _resolve_bridge_config(
             bridge_agent_role is not None,
             bridge_timeout is not None,
             bridge_export_transcript,
+            bridge_composition is not None,
+            bridge_use_oracle_for_review,
         ]
     )
     if not any_bridge_option:
@@ -201,6 +205,8 @@ def _resolve_bridge_config(
             agent_role=bridge_agent_role,
             timeout_seconds=bridge_timeout,
             export_transcript=bridge_export_transcript,
+            composition=bridge_composition or "manage-selection",
+            use_oracle_for_review=bridge_use_oracle_for_review,
         )
     except Exception as exc:
         raise AiwfError(f"Invalid bridge configuration: {exc}") from exc
@@ -804,6 +810,8 @@ def _build_inspection_payload(
     provenance = _load_optional_run_surface(ai_root, run_id, "run-provenance.json")
     review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
     bridge_seeding = _load_optional_run_surface(ai_root, run_id, "rp-bridge-seeding.json")
+    bridge_context_builder = _load_optional_run_surface(ai_root, run_id, "rp-bridge-context-builder.json")
+    bridge_oracle = _load_optional_run_surface(ai_root, run_id, "rp-bridge-oracle.json")
     bridge_capture = _load_optional_run_surface(ai_root, run_id, "rp-bridge-capture.json")
     bridge_agent_log = _load_optional_run_surface(ai_root, run_id, "rp-bridge-agent-log.json")
     latest_agent_session: Mapping[str, Any] | None = None
@@ -831,6 +839,8 @@ def _build_inspection_payload(
         "provenance": provenance,
         "review_report": review_report,
         "bridge_seeding": bridge_seeding,
+        "bridge_context_builder": bridge_context_builder,
+        "bridge_oracle": bridge_oracle,
         "bridge_capture": bridge_capture,
         "bridge_agent_log": bridge_agent_log,
         "bridge_agent_transcript": bridge_agent_transcript,
@@ -840,6 +850,8 @@ def _build_inspection_payload(
             "provenance": str(_artifact_path(ai_root, run_id, "run-provenance.json")),
             "review_report": str(_artifact_path(ai_root, run_id, "review-report.json")) if review_report is not None else None,
             "bridge_seeding": str(_artifact_path(ai_root, run_id, "rp-bridge-seeding.json")) if bridge_seeding is not None else None,
+            "bridge_context_builder": str(_artifact_path(ai_root, run_id, "rp-bridge-context-builder.json")) if bridge_context_builder is not None else None,
+            "bridge_oracle": str(_artifact_path(ai_root, run_id, "rp-bridge-oracle.json")) if bridge_oracle is not None else None,
             "bridge_capture": str(_artifact_path(ai_root, run_id, "rp-bridge-capture.json")) if bridge_capture is not None else None,
             "bridge_agent_log": str(_artifact_path(ai_root, run_id, "rp-bridge-agent-log.json")) if bridge_agent_log is not None else None,
             "bridge_agent_transcript": (
@@ -1141,7 +1153,9 @@ def _print_inspection(
             f"workspace={rp_bridge.get('workspace') or '-'} "
             f"tab={rp_bridge.get('tab') or '-'} "
             f"context_id={rp_bridge.get('context_id') or '-'} "
-            f"agent_role={rp_bridge.get('agent_role') or '-'}"
+            f"agent_role={rp_bridge.get('agent_role') or '-'} "
+            f"composition={rp_bridge.get('composition') or 'manage-selection'} "
+            f"use_oracle_for_review={rp_bridge.get('use_oracle_for_review') if 'use_oracle_for_review' in rp_bridge else False}"
         )
         resolved = rp_bridge.get("resolved")
         if isinstance(resolved, Mapping):
@@ -1165,12 +1179,21 @@ def _print_inspection(
         seeding_artifact = diagnostics_bridge.get("seeding_artifact")
         seeding_status = diagnostics_bridge.get("seeding_status")
         seeding_summary = diagnostics_bridge.get("seeding_summary")
+        context_builder_artifact = diagnostics_bridge.get("context_builder_artifact")
+        oracle_artifact = diagnostics_bridge.get("oracle_artifact")
+        oracle_status = diagnostics_bridge.get("oracle_status")
         if isinstance(seeding_artifact, str) and seeding_artifact.strip():
             console.print(f"bridge_seeding_artifact={seeding_artifact}")
         if isinstance(seeding_status, str) and seeding_status.strip():
             console.print(f"bridge_seeding_status={seeding_status}")
         if isinstance(seeding_summary, str) and seeding_summary.strip():
             console.print(f"bridge_seeding_summary={seeding_summary}")
+        if isinstance(context_builder_artifact, str) and context_builder_artifact.strip():
+            console.print(f"bridge_context_builder_artifact={context_builder_artifact}")
+        if isinstance(oracle_artifact, str) and oracle_artifact.strip():
+            console.print(f"bridge_oracle_artifact={oracle_artifact}")
+        if isinstance(oracle_status, str) and oracle_status.strip():
+            console.print(f"bridge_oracle_status={oracle_status}")
         agent_log_artifact = diagnostics_bridge.get("agent_log_artifact")
         agent_status = diagnostics_bridge.get("agent_status")
         agent_session_id = diagnostics_bridge.get("agent_session_id")
@@ -1279,6 +1302,10 @@ def _print_inspection(
     console.print(f"provenance={artifacts['provenance']}")
     if artifacts.get("bridge_seeding"):
         console.print(f"bridge_seeding={artifacts['bridge_seeding']}")
+    if artifacts.get("bridge_context_builder"):
+        console.print(f"bridge_context_builder={artifacts['bridge_context_builder']}")
+    if artifacts.get("bridge_oracle"):
+        console.print(f"bridge_oracle={artifacts['bridge_oracle']}")
     if artifacts.get("bridge_capture"):
         console.print(f"bridge_capture={artifacts['bridge_capture']}")
     if artifacts.get("bridge_agent_log"):
@@ -1304,6 +1331,8 @@ def run_plan(
     bridge_agent_role: Annotated[str | None, typer.Option("--bridge-agent-role", help="Operator-defined RepoPrompt agent role label.")] = None,
     bridge_timeout: Annotated[int | None, typer.Option("--bridge-timeout", help="Reserved bridge timeout hint for future slices.")] = None,
     bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Export managed-agent transcript/handoff provenance when the RP bridge exposes those surfaces.")] = False,
+    bridge_composition: Annotated[str | None, typer.Option("--bridge-composition", help="Bridge context composition strategy (manage-selection or context-builder).")]=None,
+    bridge_use_oracle_for_review: Annotated[bool, typer.Option("--bridge-use-oracle-for-review", help="Capture advisory ask_oracle output during review without changing review contract requirements.")] = False,
 ) -> None:
     """Run the plan workflow."""
     engine = _build_engine_or_exit(
@@ -1324,6 +1353,8 @@ def run_plan(
                 bridge_agent_role=bridge_agent_role,
                 bridge_timeout=bridge_timeout,
                 bridge_export_transcript=bridge_export_transcript,
+                bridge_composition=bridge_composition,
+                bridge_use_oracle_for_review=bridge_use_oracle_for_review,
             ),
         ),
     )
@@ -1345,6 +1376,8 @@ def run_implement(
     bridge_agent_role: Annotated[str | None, typer.Option("--bridge-agent-role", help="Operator-defined RepoPrompt agent role label.")] = None,
     bridge_timeout: Annotated[int | None, typer.Option("--bridge-timeout", help="Reserved bridge timeout hint for future slices.")] = None,
     bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Export managed-agent transcript/handoff provenance when the RP bridge exposes those surfaces.")] = False,
+    bridge_composition: Annotated[str | None, typer.Option("--bridge-composition", help="Bridge context composition strategy (manage-selection or context-builder).")]=None,
+    bridge_use_oracle_for_review: Annotated[bool, typer.Option("--bridge-use-oracle-for-review", help="Capture advisory ask_oracle output during review without changing review contract requirements.")] = False,
 ) -> None:
     """Run the implement workflow."""
     engine = _build_engine_or_exit(
@@ -1365,6 +1398,8 @@ def run_implement(
                 bridge_agent_role=bridge_agent_role,
                 bridge_timeout=bridge_timeout,
                 bridge_export_transcript=bridge_export_transcript,
+                bridge_composition=bridge_composition,
+                bridge_use_oracle_for_review=bridge_use_oracle_for_review,
             ),
         ),
     )

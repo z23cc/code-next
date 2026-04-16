@@ -16,7 +16,9 @@ from aiwf.models import (
     EventRecord,
     GateSet,
     RpBridgeAgentLogArtifactContent,
+    RpBridgeContextBuilderArtifactContent,
     RpBridgeManagedAgentRecordContent,
+    RpBridgeOracleArtifactContent,
     RpBridgeRunConfig,
     RunArtifactRef,
     RunBridgeDiagnostics,
@@ -747,6 +749,18 @@ class WorkflowEngine:
             ],
         )
         latest_bridge_agent_record = self._latest_bridge_agent_record(store.run_dir)
+        add_artifact(
+            "rp-bridge-context-builder.json",
+            stage="implement",
+            category="bridge_context_builder",
+            related_artifacts=[name for name in ["rp-bridge-seeding.json", "context-pack.md", "exec-plan.md"] if name in artifact_refs],
+        )
+        add_artifact(
+            "rp-bridge-oracle.json",
+            stage="review",
+            category="bridge_oracle",
+            related_artifacts=[name for name in ["review-report.json", "run-diagnostics.json", "run-provenance.json"] if name in artifact_refs],
+        )
         if latest_bridge_agent_record is not None:
             if latest_bridge_agent_record.transcript_artifact:
                 add_artifact(
@@ -933,6 +947,28 @@ class WorkflowEngine:
         except ArtifactError:
             return None
 
+    def _load_bridge_context_builder_artifact(self, run_dir: Path) -> RpBridgeContextBuilderArtifactContent | None:
+        artifact_path = run_dir / "rp-bridge-context-builder.json"
+        if not artifact_path.exists():
+            return None
+        try:
+            return ArtifactStore(run_dir, state_manager=self.state_manager).read_validated_artifact(
+                "rp-bridge-context-builder.json", RpBridgeContextBuilderArtifactContent
+            )
+        except ArtifactError:
+            return None
+
+    def _load_bridge_oracle_artifact(self, run_dir: Path) -> RpBridgeOracleArtifactContent | None:
+        artifact_path = run_dir / "rp-bridge-oracle.json"
+        if not artifact_path.exists():
+            return None
+        try:
+            return ArtifactStore(run_dir, state_manager=self.state_manager).read_validated_artifact(
+                "rp-bridge-oracle.json", RpBridgeOracleArtifactContent
+            )
+        except ArtifactError:
+            return None
+
     def _latest_bridge_agent_record(
         self,
         run_dir: Path,
@@ -1031,6 +1067,8 @@ class WorkflowEngine:
             handoff_artifacts = self._linked_review_artifact_names_from_run_dir(run_dir)
 
         bridge_seeding = self._load_bridge_seeding_artifact(run_dir)
+        bridge_context_builder = self._load_bridge_context_builder_artifact(run_dir)
+        bridge_oracle = self._load_bridge_oracle_artifact(run_dir)
         bridge_agent_log = self._load_bridge_agent_log_artifact(run_dir)
         return RunBridgeDiagnostics(
             mode=self.bridge_config.mode,
@@ -1040,12 +1078,17 @@ class WorkflowEngine:
             agent_role=self.bridge_config.agent_role,
             timeout_seconds=self.bridge_config.timeout_seconds,
             export_transcript=self.bridge_config.export_transcript,
+            composition=self.bridge_config.composition,
+            use_oracle_for_review=self.bridge_config.use_oracle_for_review,
             resolved=self.bridge_config.resolved,
             summary=self._bridge_summary(meta, handoff_artifacts, latest_agent_record),
             handoff_artifacts=handoff_artifacts,
             seeding_artifact="rp-bridge-seeding.json" if bridge_seeding is not None else None,
             seeding_status=bridge_seeding.status if bridge_seeding is not None else None,
             seeding_summary=bridge_seeding.summary if bridge_seeding is not None else None,
+            context_builder_artifact="rp-bridge-context-builder.json" if bridge_context_builder is not None else None,
+            oracle_artifact="rp-bridge-oracle.json" if bridge_oracle is not None else None,
+            oracle_status=bridge_oracle.status if bridge_oracle is not None else None,
             agent_log_artifact="rp-bridge-agent-log.json" if bridge_agent_log is not None else None,
             agent_status=latest_agent_record.status if latest_agent_record is not None else None,
             agent_session_id=latest_agent_record.session_id if latest_agent_record is not None else None,
