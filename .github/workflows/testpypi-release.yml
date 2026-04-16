@@ -97,12 +97,22 @@ jobs:
             echo "Package not visible on TestPyPI yet; retrying in 30s (attempt ${attempt}/5)..."
             sleep 30
           done
+          python -m pip install ./tools/rp-cli-stub
           reported_version="$(python -m aiwf --version)"
           test "$reported_version" = "$AIWF_VERSION"
+          python -m aiwf conformance rp --rp-command rp-cli-stub --json | tee testpypi-rp-conformance-report.json
           {
             echo "## TestPyPI Install Smoke"
             echo
             echo "- package: `aiwf==${AIWF_VERSION}`"
             echo "- index: `https://test.pypi.org/simple/`"
             echo "- reported version: `${reported_version}`"
+            echo "- rp conformance: `passed`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload RP conformance report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiwf-testpypi-rp-conformance-report
+          path: testpypi-rp-conformance-report.json
