@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from aiwf.models import (
     GateSet,
     RpBridgeAgentTranscriptArtifactContent,
+    RpBridgeContextBuilderArtifactContent,
+    RpBridgeOracleArtifactContent,
     RpBridgeResolvedIdentity,
     RpBridgeRunConfig,
     RpBridgeSeedingArtifactContent,
@@ -96,6 +98,8 @@ def test_rp_bridge_run_config_round_trips() -> None:
         "agent_role": "implementer",
         "timeout_seconds": 900,
         "export_transcript": True,
+        "composition": "manage-selection",
+        "use_oracle_for_review": False,
         "resolved": None,
     }
 
@@ -141,6 +145,42 @@ def test_rp_bridge_agent_transcript_artifact_content_validates() -> None:
 
     assert payload.session_id == "agent-session-1"
     assert payload.handoff_summary == "ready for review"
+
+
+def test_rp_bridge_context_builder_artifact_content_validates() -> None:
+    payload = RpBridgeContextBuilderArtifactContent.model_validate(
+        {
+            "version": 1,
+            "flow": "preview",
+            "response_type": "clarify",
+            "status": "ok",
+            "workspace": "workspace-alpha",
+            "context_id": "ctx-123",
+            "response_text": "selection prepared",
+            "selected_paths": ["src/example.py"],
+            "detail": {"selection_count": 1},
+        }
+    )
+
+    assert payload.flow == "preview"
+    assert payload.response_type == "clarify"
+
+
+def test_rp_bridge_oracle_artifact_content_validates() -> None:
+    payload = RpBridgeOracleArtifactContent.model_validate(
+        {
+            "version": 1,
+            "mode": "review",
+            "status": "ok",
+            "chat_id": "rp-chat-1",
+            "response_text": "looks consistent",
+            "export_path": ".ai/runs/run-1/rp-oracle.md",
+            "detail": {"provider": "rp"},
+        }
+    )
+
+    assert payload.mode == "review"
+    assert payload.chat_id == "rp-chat-1"
 
 
 def test_rp_bridge_seeding_artifact_content_validates() -> None:

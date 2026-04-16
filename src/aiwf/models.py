@@ -184,6 +184,8 @@ class RpBridgeRunConfig(ModelBase):
     agent_role: StrictStr | None = None
     timeout_seconds: StrictInt | None = None
     export_transcript: StrictBool = False
+    composition: Literal["manage-selection", "context-builder"] = "manage-selection"
+    use_oracle_for_review: StrictBool = False
     resolved: RpBridgeResolvedIdentity | None = None
 
     @field_validator("workspace", "tab", "context_id", "agent_role")
@@ -329,6 +331,33 @@ class RpBridgeAgentTranscriptArtifact(ModelBase):
     events: list[dict[str, Any]] = Field(default_factory=list)
     handoff_summary: str | None = None
     captured_at: datetime = Field(default_factory=utc_now)
+
+
+class RpBridgeContextBuilderArtifact(ModelBase):
+    """Typed record of bridge context_builder preview/apply outputs."""
+
+    version: int = 1
+    flow: Literal["preview", "apply"]
+    response_type: Literal["clarify", "plan", "question", "review"]
+    status: Literal["ok", "failed"]
+    workspace: str | None = None
+    context_id: str | None = None
+    response_text: str | None = None
+    selected_paths: list[str] = Field(default_factory=list)
+    export_path: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class RpBridgeOracleArtifact(ModelBase):
+    """Typed record of bridge ask_oracle outputs."""
+
+    version: int = 1
+    mode: Literal["chat", "plan", "review"]
+    status: Literal["ok", "failed"]
+    chat_id: str | None = None
+    response_text: str | None = None
+    export_path: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkReceipt(ModelBase):
@@ -757,6 +786,55 @@ class RpBridgeAgentTranscriptArtifactContent(ArtifactSchemaBase):
     captured_at: datetime
 
     @field_validator("session_id", "transcript", "handoff_summary")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeContextBuilderArtifactContent(ArtifactSchemaBase):
+    """Strict artifact schema for `rp-bridge-context-builder.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    version: StrictInt = 1
+    flow: Literal["preview", "apply"]
+    response_type: Literal["clarify", "plan", "question", "review"]
+    status: Literal["ok", "failed"]
+    workspace: StrictStr | None = None
+    context_id: StrictStr | None = None
+    response_text: StrictStr | None = None
+    selected_paths: list[StrictStr] = Field(default_factory=list)
+    export_path: StrictStr | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("workspace", "context_id", "response_text", "export_path")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeOracleArtifactContent(ArtifactSchemaBase):
+    """Strict artifact schema for `rp-bridge-oracle.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    version: StrictInt = 1
+    mode: Literal["chat", "plan", "review"]
+    status: Literal["ok", "failed"]
+    chat_id: StrictStr | None = None
+    response_text: StrictStr | None = None
+    export_path: StrictStr | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("chat_id", "response_text", "export_path")
     @classmethod
     def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
         if value is None:

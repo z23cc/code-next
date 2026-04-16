@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,49 @@ class RpWorkspaceContextResult:
     workspace: str | None = None
     context_id: str | None = None
     selected_paths: tuple[str, ...] = ()
+    prompt: str | None = None
+    tokens: dict[str, Any] | None = None
+    sections: dict[str, Any] | None = None
+    export_path: str | None = None
     error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpContextBuilderResult:
+    """Typed result of a context_builder bridge call."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    flow: Literal["preview", "apply"]
+    response_type: str
+    context_id: str | None = None
+    workspace: str | None = None
+    selected_paths: tuple[str, ...] = ()
+    response_text: str | None = None
+    export_path: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpAskOracleResult:
+    """Typed result of an ask_oracle bridge call."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    mode: str
+    chat_id: str | None = None
+    response_text: str | None = None
+    export_path: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
     raw_stdout: str | None = None
     raw_stderr: str | None = None
 
@@ -577,6 +619,181 @@ class RpCliBridgeClient:
             workspace=self._optional_string(response.get("workspace")),
             context_id=self._optional_string(response.get("context_id")),
             selected_paths=self._extract_selected_paths(response),
+            prompt=self._optional_string(response.get("prompt")),
+            tokens=dict(response.get("tokens")) if isinstance(response.get("tokens"), dict) else None,
+            sections=dict(response.get("sections")) if isinstance(response.get("sections"), dict) else None,
+            export_path=self._optional_string(response.get("export_path"))
+            or self._optional_string(response.get("path")),
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def workspace_context_snapshot(
+        self,
+        *,
+        include: Sequence[str] | None = None,
+        path_display: str | None = None,
+        copy_preset: str | None = None,
+    ) -> RpWorkspaceContextResult:
+        capability_error = self._capability_error("workspace_context", operation="snapshot")
+        if capability_error is not None:
+            return RpWorkspaceContextResult(ok=False, command=self.command, path=self.command[0], error=capability_error)
+        payload: dict[str, Any] = {"op": "snapshot"}
+        normalized_include = [item.strip() for item in (include or ()) if isinstance(item, str) and item.strip()]
+        if normalized_include:
+            payload["include"] = normalized_include
+        if path_display is not None:
+            payload["path_display"] = path_display
+        if copy_preset is not None:
+            payload["copy_preset"] = copy_preset
+        invocation = self._invoke_tool("workspace_context", payload, context="workspace_context_snapshot")
+        if not invocation.ok:
+            return RpWorkspaceContextResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="workspace_context_snapshot")
+        if not isinstance(response, dict):
+            return RpWorkspaceContextResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="workspace_context_snapshot",
+                    message="workspace_context_snapshot did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpWorkspaceContextResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            workspace=self._optional_string(response.get("workspace")),
+            context_id=self._optional_string(response.get("context_id")),
+            selected_paths=self._extract_selected_paths(response),
+            prompt=self._optional_string(response.get("prompt")),
+            tokens=dict(response.get("tokens")) if isinstance(response.get("tokens"), dict) else None,
+            sections={
+                key: response.get(key)
+                for key in ("selection", "code", "files", "tree")
+                if response.get(key) is not None
+            }
+            or None,
+            export_path=self._optional_string(response.get("path"))
+            or self._optional_string(response.get("export_path")),
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def context_builder_preview(self, instructions: str | None = None) -> RpContextBuilderResult:
+        return self._context_builder_call(
+            instructions=instructions,
+            response_type="clarify",
+            export_response=False,
+            flow="preview",
+        )
+
+    def context_builder_apply(
+        self,
+        instructions: str,
+        *,
+        response_type: Literal["plan", "question", "review"] = "plan",
+        export_response: bool = False,
+    ) -> RpContextBuilderResult:
+        normalized_instructions = instructions.strip()
+        if not normalized_instructions:
+            raise ValueError("context_builder_apply requires non-empty instructions")
+        return self._context_builder_call(
+            instructions=normalized_instructions,
+            response_type=response_type,
+            export_response=export_response,
+            flow="apply",
+        )
+
+    def ask_oracle(
+        self,
+        message: str,
+        *,
+        mode: Literal["chat", "plan", "review"] = "chat",
+        chat_id: str | None = None,
+        new_chat: bool | None = None,
+        export_response: bool = False,
+    ) -> RpAskOracleResult:
+        capability_error = self._capability_error("ask_oracle")
+        if capability_error is not None:
+            return RpAskOracleResult(ok=False, command=self.command, path=self.command[0], mode=mode, error=capability_error)
+        normalized_message = message.strip()
+        if not normalized_message:
+            raise ValueError("ask_oracle requires a non-empty message")
+        if not self._tool_property_supports_value("ask_oracle", "mode", mode):
+            return RpAskOracleResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                mode=mode,
+                error=RpBridgeError(
+                    code="TOOL_UNAVAILABLE",
+                    message=f"RP bridge tool 'ask_oracle' does not support mode {mode!r}",
+                    retriable=False,
+                    detail={"tool": "ask_oracle", "mode": mode},
+                ),
+            )
+        payload: dict[str, Any] = {"message": normalized_message, "mode": mode}
+        if chat_id is not None:
+            payload["chat_id"] = chat_id
+        if new_chat is not None:
+            payload["new_chat"] = new_chat
+        if export_response:
+            payload["export_response"] = True
+
+        invocation = self._invoke_tool("ask_oracle", payload, context="ask_oracle")
+        if not invocation.ok:
+            return RpAskOracleResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                mode=mode,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="ask_oracle")
+        if response is not None and not isinstance(response, dict):
+            return RpAskOracleResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                mode=mode,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="ask_oracle",
+                    message="ask_oracle did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        mapping = response if isinstance(response, dict) else {}
+        return RpAskOracleResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            mode=self._optional_string(mapping.get("mode")) or mode,
+            chat_id=self._optional_string(mapping.get("chat_id")),
+            response_text=self._extract_output_text(mapping)
+            or self._optional_string(mapping.get("response"))
+            or (invocation.stdout or "").strip()
+            or None,
+            export_path=self._optional_string(mapping.get("oracle_export_path"))
+            or self._optional_string(mapping.get("export_path")),
+            raw_payload=mapping or None,
             raw_stdout=invocation.stdout,
             raw_stderr=invocation.stderr,
         )
@@ -1451,6 +1668,93 @@ class RpCliBridgeClient:
             raw_stderr=invocation.stderr,
         )
 
+    def _context_builder_call(
+        self,
+        *,
+        instructions: str | None,
+        response_type: str,
+        export_response: bool,
+        flow: Literal["preview", "apply"],
+    ) -> RpContextBuilderResult:
+        capability_error = self._capability_error("context_builder")
+        if capability_error is not None:
+            return RpContextBuilderResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                flow=flow,
+                response_type=response_type,
+                error=capability_error,
+            )
+        if not self._tool_property_supports_value("context_builder", "response_type", response_type):
+            return RpContextBuilderResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                flow=flow,
+                response_type=response_type,
+                error=RpBridgeError(
+                    code="TOOL_UNAVAILABLE",
+                    message=f"RP bridge tool 'context_builder' does not support response_type {response_type!r}",
+                    retriable=False,
+                    detail={"tool": "context_builder", "response_type": response_type},
+                ),
+            )
+        payload: dict[str, Any] = {"response_type": response_type}
+        normalized_instructions = instructions.strip() if isinstance(instructions, str) else None
+        if normalized_instructions:
+            payload["instructions"] = normalized_instructions
+        if export_response:
+            payload["export_response"] = True
+        invocation = self._invoke_tool("context_builder", payload, context=f"context_builder_{flow}")
+        if not invocation.ok:
+            return RpContextBuilderResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                flow=flow,
+                response_type=response_type,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context=f"context_builder_{flow}")
+        if response is not None and not isinstance(response, dict):
+            return RpContextBuilderResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                flow=flow,
+                response_type=response_type,
+                error=self._malformed_response_error(
+                    invocation,
+                    context=f"context_builder_{flow}",
+                    message=f"context_builder_{flow} did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        mapping = response if isinstance(response, dict) else {}
+        return RpContextBuilderResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            flow=flow,
+            response_type=self._optional_string(mapping.get("response_type")) or response_type,
+            context_id=self._optional_string(mapping.get("context_id")),
+            workspace=self._optional_string(mapping.get("workspace")),
+            selected_paths=self._extract_selected_paths(mapping),
+            response_text=self._extract_output_text(mapping)
+            or self._optional_string(mapping.get("response"))
+            or (invocation.stdout or "").strip()
+            or None,
+            export_path=self._optional_string(mapping.get("oracle_export_path"))
+            or self._optional_string(mapping.get("export_path")),
+            raw_payload=mapping or None,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
     def _capability_error(self, tool: str, *, operation: str | None = None) -> RpBridgeError | None:
         mode = self._detect_invocation_mode()
         if mode is _ToolInvocationMode.UNAVAILABLE:
@@ -1495,6 +1799,19 @@ class RpCliBridgeClient:
         return operation in operations
 
     def _tool_operations(self, tool: RpToolInfo) -> set[str]:
+        operations: set[str] = set()
+        for key in ("op", "action"):
+            operations.update(self._tool_property_enum_values(tool, key))
+        return operations
+
+    def _tool_property_supports_value(self, tool_name: str, property_name: str, value: str) -> bool:
+        tool_info = self._tool_info(tool_name)
+        if tool_info is None:
+            return False
+        supported = self._tool_property_enum_values(tool_info, property_name)
+        return not supported or value in supported
+
+    def _tool_property_enum_values(self, tool: RpToolInfo, property_name: str) -> set[str]:
         metadata = tool.metadata or {}
         input_schema = metadata.get("inputSchema")
         if not isinstance(input_schema, dict):
@@ -1502,18 +1819,17 @@ class RpCliBridgeClient:
         properties = input_schema.get("properties")
         if not isinstance(properties, dict):
             return set()
-        operations: set[str] = set()
-        for key in ("op", "action"):
-            raw_property = properties.get(key)
-            if not isinstance(raw_property, dict):
-                continue
-            raw_enum = raw_property.get("enum")
-            if not isinstance(raw_enum, list):
-                continue
-            for value in raw_enum:
-                if isinstance(value, str) and value.strip():
-                    operations.add(value.strip())
-        return operations
+        raw_property = properties.get(property_name)
+        if not isinstance(raw_property, dict):
+            return set()
+        raw_enum = raw_property.get("enum")
+        if not isinstance(raw_enum, list):
+            return set()
+        values: set[str] = set()
+        for item in raw_enum:
+            if isinstance(item, str) and item.strip():
+                values.add(item.strip())
+        return values
 
     def _detect_invocation_mode(self) -> _ToolInvocationMode:
         if self._invocation_mode is not None:
@@ -2006,10 +2322,12 @@ __all__ = [
     "RpAgentRunStartResult",
     "RpAgentRunWaitResult",
     "RpAgentTranscriptResult",
+    "RpAskOracleResult",
     "RpBindContextResult",
     "RpBridgeError",
     "RpBridgeProbeResult",
     "RpCliBridgeClient",
+    "RpContextBuilderResult",
     "RpManageSelectionResult",
     "RpReadFileResult",
     "RpToolInfo",

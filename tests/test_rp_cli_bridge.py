@@ -47,6 +47,41 @@ def test_rp_cli_bridge_workspace_context_success(tmp_path: Path) -> None:
     assert result.selected_paths == ("src/example.py", ".ai/runs/sample/context-pack.md")
 
 
+def test_rp_cli_bridge_workspace_context_snapshot_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="context-oracle-ok")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    result = client.workspace_context_snapshot(include=["prompt", "selection", "tokens"])
+
+    assert result.ok is True
+    assert result.prompt == "# Prompt"
+    assert result.tokens == {"selection": 12, "files": 8}
+    assert result.sections is not None
+    assert "selection" in result.sections
+
+
+def test_rp_cli_bridge_context_builder_and_oracle_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="context-oracle-ok")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    preview = client.context_builder_preview("<task>preview</task>")
+    apply = client.context_builder_apply("<task>apply</task>", response_type="plan", export_response=True)
+    oracle = client.ask_oracle("Review this", mode="review", export_response=True)
+
+    assert preview.ok is True
+    assert preview.flow == "preview"
+    assert preview.response_type == "clarify"
+    assert preview.response_text == "context-builder preview"
+    assert apply.ok is True
+    assert apply.flow == "apply"
+    assert apply.response_type == "plan"
+    assert apply.export_path == ".ai/runs/run-1/context-builder-plan.md"
+    assert oracle.ok is True
+    assert oracle.mode == "review"
+    assert oracle.chat_id == "rp-chat-7"
+    assert oracle.export_path == ".ai/runs/run-1/oracle-review.md"
+
+
 def test_rp_cli_bridge_manage_workspaces_and_bind_context_success(tmp_path: Path) -> None:
     script_path = _write_fake_rp_bridge_cli(tmp_path, mode="workspace-bind-ok")
     client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
@@ -322,7 +357,7 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    if MODE == 'malformed':\n"
             "        sys.stdout.write('not-json\\n')\n"
             "        raise SystemExit(0)\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces', 'inputSchema': {'properties': {'action': {'enum': ['list', 'list_tabs', 'select_tab']}}}}, {'name': 'bind_context', 'inputSchema': {'properties': {'op': {'enum': ['list', 'status', 'bind']}}}}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run', 'inputSchema': {'properties': {'op': {'enum': ['start', 'poll', 'wait', 'cancel']}}}}, {'name': 'agent_manage', 'inputSchema': {'properties': {'op': {'enum': agent_manage_ops}}}}, {'name': 'read_file'}, {'name': 'file_search', 'description': 'Search files'}]}))\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces', 'inputSchema': {'properties': {'action': {'enum': ['list', 'list_tabs', 'select_tab']}}}}, {'name': 'bind_context', 'inputSchema': {'properties': {'op': {'enum': ['list', 'status', 'bind']}}}}, {'name': 'manage_selection'}, {'name': 'workspace_context', 'inputSchema': {'properties': {'op': {'enum': ['snapshot', 'export', 'list_presets', 'select_preset']}}}}, {'name': 'context_builder', 'inputSchema': {'properties': {'response_type': {'enum': ['clarify', 'plan', 'question', 'review']}}}}, {'name': 'ask_oracle', 'inputSchema': {'properties': {'mode': {'enum': ['chat', 'plan', 'review']}}}}, {'name': 'agent_run', 'inputSchema': {'properties': {'op': {'enum': ['start', 'poll', 'wait', 'cancel']}}}}, {'name': 'agent_manage', 'inputSchema': {'properties': {'op': {'enum': agent_manage_ops}}}}, {'name': 'read_file'}, {'name': 'file_search', 'description': 'Search files'}]}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
@@ -358,7 +393,29 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    if MODE == 'fail':\n"
             "        sys.stderr.write('workspace context failed\\n')\n"
             "        raise SystemExit(9)\n"
+            "    if MODE == 'context-oracle-ok' and payload.get('op') == 'snapshot':\n"
+            "        sys.stdout.write(json.dumps({'context_id': 'ctx-123', 'prompt': '# Prompt', 'selection': {'paths': ['src/example.py']}, 'tokens': {'selection': 12, 'files': 8}}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': 'ctx-123', 'selection': ['src/example.py', '.ai/runs/sample/context-pack.md']}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'context_builder':\n"
+            "    response_type = payload.get('response_type', 'clarify')\n"
+            "    response_text = 'context-builder preview' if response_type == 'clarify' else 'context-builder applied'\n"
+            "    result = {'response_type': response_type, 'context_id': 'ctx-123', 'selected_paths': ['src/example.py'], 'response': response_text}\n"
+            "    if payload.get('export_response'):\n"
+            "        result['export_path'] = '.ai/runs/run-1/context-builder-plan.md'\n"
+            "    sys.stdout.write(json.dumps(result))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'ask_oracle':\n"
+            "    result = {'mode': payload.get('mode', 'chat'), 'chat_id': 'rp-chat-7', 'response': 'oracle response'}\n"
+            "    if payload.get('export_response'):\n"
+            "        result['oracle_export_path'] = '.ai/runs/run-1/oracle-review.md'\n"
+            "    sys.stdout.write(json.dumps(result))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

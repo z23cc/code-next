@@ -317,3 +317,65 @@ def test_artifact_store_validates_rp_bridge_capture_artifact(tmp_path: Path) -> 
 
     assert artifact.captures[0].stage == "implement"
     assert artifact.captures[0].response_artifact == "rp-agent-implement-response.md"
+
+
+def test_artifact_store_validates_rp_bridge_context_builder_artifact(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Bridge context builder", body="Store context-builder artifact."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+
+    (run_dir / "rp-bridge-context-builder.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "flow": "preview",
+                "response_type": "clarify",
+                "status": "ok",
+                "workspace": "workspace-alpha",
+                "context_id": "ctx-123",
+                "response_text": "prepared",
+                "selected_paths": ["src/example.py"],
+                "detail": {"selection_count": 1},
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    artifact = store.read_validated_artifact("rp-bridge-context-builder.json")
+
+    assert artifact.flow == "preview"
+    assert artifact.response_type == "clarify"
+
+
+def test_artifact_store_validates_rp_bridge_oracle_artifact(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Bridge oracle", body="Store oracle artifact."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+
+    (run_dir / "rp-bridge-oracle.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "mode": "review",
+                "status": "ok",
+                "chat_id": "chat-1",
+                "response_text": "all good",
+                "export_path": "rp-oracle.md",
+                "detail": {"provider": "rp"},
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    artifact = store.read_validated_artifact("rp-bridge-oracle.json")
+
+    assert artifact.mode == "review"
+    assert artifact.chat_id == "chat-1"
