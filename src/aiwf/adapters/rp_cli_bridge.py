@@ -212,6 +212,8 @@ class RpCliBridgeClient:
         self.timeout_seconds = timeout_seconds
         self._invocation_mode: _ToolInvocationMode | None = None
         self._invocation_detection_error: RpBridgeError | None = None
+        self._detected_tools: tuple[RpToolInfo, ...] | None = None
+        self._tool_schema_command: tuple[str, ...] | None = None
 
     @classmethod
     def from_command_candidates(
@@ -252,9 +254,9 @@ class RpCliBridgeClient:
             )
         return RpToolListResult(
             ok=True,
-            command=self.command,
+            command=self._tool_schema_command or self.command,
             path=self.command[0],
-            tools=_REPOPROMPT_MCP_TOOL_MANIFEST,
+            tools=self._detected_tools or _REPOPROMPT_MCP_TOOL_MANIFEST,
         )
 
     def workspace_context(self, workspace: str | None = None) -> RpWorkspaceContextResult:
@@ -658,51 +660,57 @@ class RpCliBridgeClient:
         help_text = "\n".join(
             part for part in ((help_invocation.stdout or ""), (help_invocation.stderr or "")) if part
         ).lower()
-        has_markers = "-e" in help_text and "--raw-json" in help_text
+        has_markers = "-c" in help_text and "-j" in help_text and "--tools-schema" in help_text
         if not has_markers:
             self._invocation_mode = _ToolInvocationMode.UNAVAILABLE
             self._invocation_detection_error = RpBridgeError(
                 code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
-                message="RP bridge does not advertise MCP tool invocation flags (-e/--raw-json)",
+                message="RP bridge does not advertise MCP tool invocation flags (-c/-j/--tools-schema)",
                 retriable=False,
             )
             return self._invocation_mode
 
-        probe_invocation = self._invoke_tool_with_mode(
-            _ToolInvocationMode.COMMAND_MODE_RAW_JSON,
-            "file_search",
-            {"pattern": "", "count_only": True, "max_results": 1},
-            context="invocation probe",
-        )
-        if not probe_invocation.ok:
+        tools_invocation = self._execute_command((*self.command, "--tools-schema", "--raw-json"))
+        self._tool_schema_command = tools_invocation.command
+        if not tools_invocation.ok:
             self._invocation_mode = _ToolInvocationMode.UNAVAILABLE
-            probe_error = probe_invocation.error
-            if probe_error is None:
+            tools_error = tools_invocation.error
+            if tools_error is None:
                 self._invocation_detection_error = RpBridgeError(
                     code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
-                    message="RP bridge MCP tool invocation probe failed",
+                    message="RP bridge tools schema probe failed",
                     retriable=False,
                 )
-                return self._invocation_mode
-            if probe_error.code in {"TIMEOUT", "NOT_INSTALLED", "COMMAND_UNAVAILABLE"}:
-                self._invocation_detection_error = probe_error
+            elif tools_error.code in {"TIMEOUT", "NOT_INSTALLED", "COMMAND_UNAVAILABLE"}:
+                self._invocation_detection_error = tools_error
             else:
                 self._invocation_detection_error = RpBridgeError(
                     code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
-                    message="RP bridge MCP tool invocation probe did not return valid JSON",
+                    message="RP bridge tools schema probe failed",
                     retriable=False,
-                    detail={"probe_error": probe_error.code},
+                    detail={"probe_error": tools_error.code},
                 )
             return self._invocation_mode
 
-        probe_payload = self._load_json_payload(probe_invocation, context="invocation probe")
-        if not isinstance(probe_payload, (dict, list)):
+        tools_payload = self._load_json_payload(tools_invocation, context="tools schema")
+        if not isinstance(tools_payload, (dict, list)):
             self._invocation_mode = _ToolInvocationMode.UNAVAILABLE
             self._invocation_detection_error = RpBridgeError(
                 code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
-                message="RP bridge MCP tool invocation probe did not return valid JSON",
+                message="RP bridge tools schema probe did not return valid JSON",
                 retriable=False,
-                detail={"stdout": (probe_invocation.stdout or "").strip()[:400]},
+                detail={"stdout": (tools_invocation.stdout or "").strip()[:400]},
+            )
+            return self._invocation_mode
+
+        try:
+            self._detected_tools = self._parse_tools_schema_payload(tools_payload)
+        except ValueError as exc:
+            self._invocation_mode = _ToolInvocationMode.UNAVAILABLE
+            self._invocation_detection_error = RpBridgeError(
+                code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                message=f"RP bridge tools schema probe could not parse tool inventory: {exc}",
+                retriable=False,
             )
             return self._invocation_mode
 
@@ -753,9 +761,7 @@ class RpCliBridgeClient:
                 ),
             )
 
-        command = [*self.command, "-e", tool, "--raw-json"]
-        if arguments is not None:
-            command.extend(("--arguments", json.dumps(dict(arguments), ensure_ascii=False)))
+        command = [*self.command, "-c", tool, "-j", json.dumps(dict(arguments or {}), ensure_ascii=False), "--raw-json"]
         invocation = self._execute_command(tuple(command), tool=tool)
         return invocation
 
@@ -819,6 +825,8 @@ class RpCliBridgeClient:
                     "tool not found",
                     "no such tool",
                     "unsupported tool",
+                    "unknown command",
+                    "unknown mcp tool",
                 )
             ):
                 return _RpInvocation(
@@ -894,6 +902,50 @@ class RpCliBridgeClient:
             if isinstance(parsed_value, (dict, list)):
                 return parsed_value
         return None
+
+    def _parse_tools_schema_payload(self, payload: dict[str, Any] | list[Any]) -> tuple[RpToolInfo, ...]:
+        if isinstance(payload, list):
+            return self._parse_tools_payload(payload)
+
+        if not isinstance(payload, dict):
+            raise ValueError("tools schema payload is not a JSON object")
+
+        raw_tools = payload.get("tools")
+        if isinstance(raw_tools, list):
+            return self._parse_tools_payload(raw_tools)
+        if isinstance(raw_tools, dict):
+            return self._parse_tool_mapping(raw_tools)
+
+        raw_tool_schemas = payload.get("tool_schemas")
+        if isinstance(raw_tool_schemas, list):
+            return self._parse_tools_payload(raw_tool_schemas)
+        if isinstance(raw_tool_schemas, dict):
+            return self._parse_tool_mapping(raw_tool_schemas)
+
+        if payload and all(isinstance(name, str) and isinstance(schema, dict) for name, schema in payload.items()):
+            return self._parse_tool_mapping(payload)
+
+        raise ValueError("tools schema did not include a parseable tools inventory")
+
+    def _parse_tool_mapping(self, mapping: Mapping[str, Any]) -> tuple[RpToolInfo, ...]:
+        tools: list[RpToolInfo] = []
+        for name, raw_schema in mapping.items():
+            normalized_name = name.strip() if isinstance(name, str) else ""
+            if not normalized_name:
+                continue
+            metadata: dict[str, Any] = {}
+            description: str | None = None
+            if isinstance(raw_schema, dict):
+                raw_description = raw_schema.get("description")
+                if isinstance(raw_description, str) and raw_description.strip():
+                    description = raw_description.strip()
+                metadata = dict(raw_schema)
+            elif raw_schema is not None:
+                metadata = {"schema": raw_schema}
+            tools.append(RpToolInfo(name=normalized_name, description=description, metadata=metadata))
+        if not tools:
+            raise ValueError("tools schema mapping did not include any named tools")
+        return tuple(tools)
 
     def _parse_tools_payload(self, payload: dict[str, Any] | list[Any]) -> tuple[RpToolInfo, ...]:
         raw_tools: Any

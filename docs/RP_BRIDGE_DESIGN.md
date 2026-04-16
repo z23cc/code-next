@@ -79,9 +79,9 @@ aiwf
 
 bridge transport 采用真实 RepoPrompt CLI 的通用工具调用形态：
 
-- `rp-cli -e <tool> --raw-json --arguments <json>`
+- `rp-cli -c <tool> -j '<json>' --raw-json`
 
-并通过 capability probe 判定该调用面是否可用，而不是依赖伪造的单独 flag（例如 `--list-tools` / `--agent-run-start`）。
+并通过 capability probe（优先 `--tools-schema`）判定该调用面是否可用，而不是依赖伪造的单独 flag（例如 `--list-tools` / `--agent-run-start`）。
 
 ## 5. 建议的 bridge 模式
 
