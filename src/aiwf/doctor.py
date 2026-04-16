@@ -450,6 +450,13 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                     readiness_hints.append("advisory-oracle=ready")
                 if any(tool.name == "file_search" for tool in probe_result.tools):
                     readiness_hints.append("repo-search=ready")
+                destructive_warning = ""
+                if any(tool.name == "apply_edits" for tool in probe_result.tools):
+                    readiness_hints.append("destructive-editing=advertised")
+                    destructive_warning = (
+                        " Destructive warning: apply_edits is advertised by this bridge candidate, "
+                        "but aiwf keeps destructive flows default-off and contract-gated."
+                    )
 
                 readiness_suffix = f" Readiness hints: {', '.join(readiness_hints)}." if readiness_hints else ""
                 return DoctorCheck(
@@ -473,6 +480,7 @@ def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                         + "."
                         + workspace_hint
                         + readiness_suffix
+                        + destructive_warning
                         + " Manual handoff remains the stable supported path."
                     ),
                     path=resolved,

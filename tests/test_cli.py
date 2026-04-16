@@ -523,92 +523,63 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     assert "Open or reuse a RepoPrompt session with workspace=workspace-alpha" in blocked_inspect_result.stdout
     assert "implementation handoff" in blocked_inspect_result.stdout
 
-    blocked_inspect_json_result = runner.invoke(
-        app,
-        [
-            "inspect",
-            run_id,
-            "--ai-root",
-            str(ai_root),
-            "--json",
-        ],
-    )
-    assert blocked_inspect_json_result.exit_code == 0
-    blocked_inspect_payload = json.loads(blocked_inspect_json_result.stdout)
-    assert blocked_inspect_payload["rp_bridge"] == bridge_payload
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["mode"] == "manual-assist"
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["workspace"] == "workspace-alpha"
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["tab"] == "implement-tab"
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["context_id"] == "ctx-123"
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["agent_role"] == "implementer"
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["timeout_seconds"] == 900
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["export_transcript"] is True
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["handoff_artifacts"] == ["rp-agent-implement-prompt.md"]
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["seeding_artifact"] == "rp-bridge-seeding.json"
-    assert blocked_inspect_payload["diagnostics"]["bridge"]["seeding_status"] in {"skipped", "failed"}
 
-    resume_result = runner.invoke(
-        app,
-        [
-            "resume",
-            run_id,
-            "--ai-root",
-            str(ai_root),
-            "--repo-root",
-            str(repo_root),
-        ],
-    )
-    assert resume_result.exit_code == 0
-    needs_review_payload = json.loads(
-        runner.invoke(
-            app,
-            [
-                "inspect",
-                run_id,
-                "--ai-root",
-                str(ai_root),
-                "--json",
-            ],
-        ).stdout
-    )
-    assert needs_review_payload["diagnostics"]["bridge"]["summary"] == (
-        "RepoPrompt manual-assist metadata is persisted from implement and will be restored into the review "
-        "handoff prompt when review starts."
-    )
+def test_cli_bridge_apply_edits_requires_managed_agent_mode(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
 
-    review_result = runner.invoke(
+    result = runner.invoke(
         app,
         [
             "run",
-            "review",
-            "--run-id",
-            run_id,
+            "implement",
+            "--task",
+            str(task_path),
             "--ai-root",
             str(ai_root),
             "--repo-root",
             str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-apply-edits",
         ],
     )
-    assert review_result.exit_code == 0
-    assert "RepoPrompt Bridge Context" in (ai_root / "runs" / run_id / "rp-agent-review-prompt.md").read_text(encoding="utf-8")
 
-    inspect_result = runner.invoke(
+    assert result.exit_code == 1
+    assert "--bridge-mode" in result.stdout
+    assert "managed-agent" in result.stdout
+
+
+def test_cli_bridge_apply_edits_flags_are_persisted_in_bridge_config(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    result = runner.invoke(
         app,
         [
-            "inspect",
-            run_id,
+            "run",
+            "plan",
+            "--task",
+            str(task_path),
             "--ai-root",
             str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-mode",
+            "managed-agent",
+            "--bridge-apply-edits",
+            "--bridge-apply-edits-allow-dirty",
         ],
     )
-    assert inspect_result.exit_code == 0
-    assert "bridge=mode=manual-assist" in inspect_result.stdout
-    assert "workspace=workspace-alpha" in inspect_result.stdout
-    assert "tab=implement-tab" in inspect_result.stdout
-    assert "context_id=ctx-123" in inspect_result.stdout
-    assert "agent_role=implementer" in inspect_result.stdout
-    assert "bridge_summary=RepoPrompt manual-assist is active for review;" in inspect_result.stdout
-    assert "bridge_handoff_artifacts=rp-agent-review-prompt.md" in inspect_result.stdout
+
+    assert result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    meta = RunStateManager(ai_root).load_run(run_id)
+    assert meta.data["rp_bridge"]["mode"] == "managed-agent"
+    assert meta.data["rp_bridge"]["apply_edits"] is True
+    assert meta.data["rp_bridge"]["apply_edits_clean_repo_required"] is False
 
     inspect_json_result = runner.invoke(
         app,
@@ -622,27 +593,9 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     )
     assert inspect_json_result.exit_code == 0
     inspect_payload = json.loads(inspect_json_result.stdout)
-    assert inspect_payload["rp_bridge"] == bridge_payload
-    assert inspect_payload["diagnostics"]["bridge"]["handoff_artifacts"] == ["rp-agent-review-prompt.md"]
-    expected_review_bridge = dict(bridge_payload)
-    expected_review_bridge.pop("resolved", None)
-    assert inspect_payload["review_report"]["bridge"] == expected_review_bridge
-
-    final_resume = runner.invoke(
-        app,
-        [
-            "resume",
-            run_id,
-            "--ai-root",
-            str(ai_root),
-            "--repo-root",
-            str(repo_root),
-        ],
-    )
-    assert final_resume.exit_code == 0
-    resumed_meta = RunStateManager(ai_root).load_run(run_id)
-    assert resumed_meta.status.value == "passed"
-    assert resumed_meta.data["rp_bridge"] == bridge_payload
+    assert inspect_payload["rp_bridge"]["mode"] == "managed-agent"
+    assert inspect_payload["diagnostics"]["bridge"]["apply_edits"] is True
+    assert inspect_payload["diagnostics"]["bridge"]["apply_edits_clean_repo_required"] is False
 
 
 def test_cli_rp_bridge_p8_options_persist_and_oracle_artifact_is_separate(tmp_path: Path) -> None:

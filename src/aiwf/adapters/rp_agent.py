@@ -5,8 +5,9 @@ from __future__ import annotations
 import fnmatch
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from aiwf.adapters.base import BridgeContract, HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
 from aiwf.adapters.rp_bridge_normalize import (
@@ -20,6 +21,9 @@ from aiwf.models import (
     RpBridgeAgentLogArtifact,
     RpBridgeAgentTranscriptArtifact,
     RpBridgeContextBuilderArtifact,
+    RpBridgeEditApply,
+    RpBridgeEditPreview,
+    RpBridgeEditsArtifact,
     RpBridgeManagedAgentRecord,
     RpBridgeOracleArtifact,
     RpBridgeSearchArtifact,
@@ -122,6 +126,12 @@ RP_AUTO_CONTRACT = HostContract(
     ),
     native_runtime=RP_NATIVE_RUNTIME,
 )
+
+
+@dataclass(frozen=True)
+class _BridgeEditsOutcome:
+    status: str
+    summary: str
 
 
 class RpAgentAdapter:
@@ -681,6 +691,8 @@ class RpAgentAdapter:
             f"- agent_role: {bridge_config.agent_role or '(unset)'}",
             f"- composition: {bridge_config.composition}",
             f"- use_oracle_for_review: {bridge_config.use_oracle_for_review}",
+            f"- apply_edits: {bridge_config.apply_edits}",
+            f"- apply_edits_clean_repo_required: {bridge_config.apply_edits_clean_repo_required}",
         ]
         if bridge_config.resolved is not None:
             resolved = bridge_config.resolved
@@ -865,8 +877,9 @@ class RpAgentAdapter:
                 stage="implement",
                 error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
             )
+        response_body, apply_edits_requests, file_action_requests = self._extract_bridge_edit_envelope(response_text)
         response_path = run_dir / "rp-agent-implement-response.md"
-        response_path.write_text(normalize_implement_capture(response_text), encoding="utf-8")
+        response_path.write_text(normalize_implement_capture(response_body), encoding="utf-8")
         outputs.append(response_path.name)
         metadata = {
             "mode": "manual",
@@ -883,6 +896,30 @@ class RpAgentAdapter:
             },
             "agent_log_artifact": "rp-bridge-agent-log.json",
         }
+
+        edits_outcome = self._run_bridge_destructive_flow(
+            run_dir,
+            stage="implement",
+            apply_edits_requests=apply_edits_requests,
+            file_action_requests=file_action_requests,
+        )
+        if edits_outcome is not None:
+            outputs.append("rp-bridge-edits.json")
+            metadata["bridge_edits_artifact"] = "rp-bridge-edits.json"
+            metadata["bridge_edits_status"] = edits_outcome.status
+            if edits_outcome.status in {"failed", "partially_applied"}:
+                metadata["blocked_resume_stage"] = "implement"
+                if bridge_seeding is not None:
+                    metadata["bridge_seeding_artifact"] = "rp-bridge-seeding.json"
+                    metadata["bridge_seeding_status"] = bridge_seeding.status
+                return StageResult(
+                    stage="implement",
+                    status=RunStatus.blocked,
+                    summary=edits_outcome.summary,
+                    outputs=outputs,
+                    metadata=metadata,
+                )
+
         if bridge_seeding is not None:
             metadata["bridge_seeding_artifact"] = "rp-bridge-seeding.json"
             metadata["bridge_seeding_status"] = bridge_seeding.status
@@ -1404,6 +1441,389 @@ class RpAgentAdapter:
             stage=stage,
             error_code=ErrorCode.BRIDGE_AGENT_FAILURE,
         )
+
+    def _extract_bridge_edit_envelope(self, response_text: str) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        stripped = response_text.strip()
+        if not stripped.startswith("{"):
+            return response_text, [], []
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return response_text, [], []
+        if not isinstance(payload, dict):
+            return response_text, [], []
+        raw_bridge_edits = payload.get("bridge_edits")
+        if not isinstance(raw_bridge_edits, dict):
+            return response_text, [], []
+        raw_apply_requests = raw_bridge_edits.get("apply_edits")
+        raw_file_actions = raw_bridge_edits.get("file_actions")
+        apply_requests = [item for item in raw_apply_requests if isinstance(item, dict)] if isinstance(raw_apply_requests, list) else []
+        file_actions = [item for item in raw_file_actions if isinstance(item, dict)] if isinstance(raw_file_actions, list) else []
+        rendered_response = payload.get("response_text")
+        response_body = rendered_response if isinstance(rendered_response, str) and rendered_response.strip() else response_text
+        return response_body, apply_requests, file_actions
+
+    def _run_bridge_destructive_flow(
+        self,
+        run_dir: Path,
+        *,
+        stage: str,
+        apply_edits_requests: Sequence[Mapping[str, Any]],
+        file_action_requests: Sequence[Mapping[str, Any]],
+    ) -> _BridgeEditsOutcome | None:
+        bridge_config = self._require_bridge_config_mode("managed-agent")
+        if not bridge_config.apply_edits:
+            return None
+        if stage != "implement":
+            raise AdapterError(
+                "Bridge destructive edits are only supported during implement stage",
+                path=run_dir,
+                stage=stage,
+                error_code=ErrorCode.STATE_VIOLATION,
+            )
+        normalized_apply_requests = [dict(item) for item in apply_edits_requests if isinstance(item, Mapping)]
+        normalized_file_actions = [dict(item) for item in file_action_requests if isinstance(item, Mapping)]
+        preview_payload: dict[str, Any] = {
+            "apply_edits": normalized_apply_requests,
+            "file_actions": normalized_file_actions,
+        }
+        preview_paths = self._collect_bridge_edit_target_paths(normalized_apply_requests, normalized_file_actions)
+
+        if not self.host_contract.bridge.allows_mutations:
+            summary = "Bridge destructive edits are disabled by host contract (allows_mutations=false)"
+            self._write_bridge_edits_artifact(
+                run_dir,
+                RpBridgeEditsArtifact(
+                    status="failed",
+                    preview=RpBridgeEditPreview(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        payload=preview_payload,
+                        target_paths=preview_paths,
+                    ),
+                    applied=RpBridgeEditApply(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        ok=False,
+                        status="failed",
+                        target_paths=[],
+                        summary=summary,
+                        detail={"gate": "contract"},
+                    ),
+                ),
+            )
+            raise AdapterError(
+                summary,
+                path=run_dir,
+                stage=stage,
+                error_code=ErrorCode.STATE_VIOLATION,
+            )
+
+        self._write_bridge_edits_artifact(
+            run_dir,
+            RpBridgeEditsArtifact(
+                status="previewed",
+                preview=RpBridgeEditPreview(
+                    tool="apply_edits" if normalized_apply_requests else "file_actions",
+                    payload=preview_payload,
+                    target_paths=preview_paths,
+                ),
+            ),
+        )
+
+        if bridge_config.apply_edits_clean_repo_required and not self._is_repo_clean_for_bridge_edits():
+            summary = (
+                "RepoPrompt bridge destructive edits require a clean git worktree before commit; "
+                "run with --bridge-apply-edits-allow-dirty only when you explicitly accept this risk."
+            )
+            self._write_bridge_edits_artifact(
+                run_dir,
+                RpBridgeEditsArtifact(
+                    status="failed",
+                    preview=RpBridgeEditPreview(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        payload=preview_payload,
+                        target_paths=preview_paths,
+                    ),
+                    applied=RpBridgeEditApply(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        ok=False,
+                        status="failed",
+                        target_paths=[],
+                        summary=summary,
+                        detail={"clean_repo_required": True},
+                    ),
+                ),
+            )
+            return _BridgeEditsOutcome(status="failed", summary=summary)
+
+        client = self._build_bridge_client(bridge_config)
+        if client is None:
+            summary = "RepoPrompt managed-agent bridge command is not available for destructive edit flow"
+            self._write_bridge_edits_artifact(
+                run_dir,
+                RpBridgeEditsArtifact(
+                    status="failed",
+                    preview=RpBridgeEditPreview(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        payload=preview_payload,
+                        target_paths=preview_paths,
+                    ),
+                    applied=RpBridgeEditApply(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        ok=False,
+                        status="failed",
+                        target_paths=[],
+                        summary=summary,
+                        detail={"gate": "bridge_client"},
+                    ),
+                ),
+            )
+            raise AdapterError(
+                summary,
+                path=run_dir,
+                stage=stage,
+                error_code=ErrorCode.ADAPTER_UNAVAILABLE,
+            )
+
+        probe = client.probe_available()
+        if not probe.available:
+            message = self._bridge_error_summary(probe.error, fallback="RP bridge capability probe failed")
+            self._write_bridge_edits_artifact(
+                run_dir,
+                RpBridgeEditsArtifact(
+                    status="failed",
+                    preview=RpBridgeEditPreview(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        payload=preview_payload,
+                        target_paths=preview_paths,
+                    ),
+                    applied=RpBridgeEditApply(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        ok=False,
+                        status="failed",
+                        target_paths=[],
+                        summary=message,
+                        detail={"probe_error": probe.error.code if probe.error is not None else None},
+                    ),
+                ),
+            )
+            return _BridgeEditsOutcome(status="failed", summary=message)
+
+        available_tools = {tool.name for tool in probe.tools}
+        requested_tools: set[str] = set()
+        if normalized_apply_requests:
+            requested_tools.add("apply_edits")
+        if normalized_file_actions:
+            requested_tools.add("file_actions")
+        if not requested_tools:
+            return _BridgeEditsOutcome(
+                status="previewed",
+                summary="RepoPrompt bridge destructive edit flow was enabled but no edit/file-action requests were provided.",
+            )
+
+        contract_caps = set(self.host_contract.bridge.destructive_capabilities)
+        if contract_caps and not requested_tools.issubset(contract_caps):
+            summary = (
+                "Bridge destructive edit request includes tools not permitted by host contract: "
+                + ", ".join(sorted(requested_tools - contract_caps))
+            )
+            self._write_bridge_edits_artifact(
+                run_dir,
+                RpBridgeEditsArtifact(
+                    status="failed",
+                    preview=RpBridgeEditPreview(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        payload=preview_payload,
+                        target_paths=preview_paths,
+                    ),
+                    applied=RpBridgeEditApply(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        ok=False,
+                        status="failed",
+                        target_paths=[],
+                        summary=summary,
+                        detail={"requested_tools": sorted(requested_tools), "allowed_tools": sorted(contract_caps)},
+                    ),
+                ),
+            )
+            return _BridgeEditsOutcome(status="failed", summary=summary)
+
+        missing_capabilities = sorted(tool for tool in requested_tools if tool not in available_tools)
+        if missing_capabilities:
+            summary = (
+                "Bridge destructive edit flow was enabled, but required capabilities are unavailable: "
+                + ", ".join(missing_capabilities)
+            )
+            self._write_bridge_edits_artifact(
+                run_dir,
+                RpBridgeEditsArtifact(
+                    status="failed",
+                    preview=RpBridgeEditPreview(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        payload=preview_payload,
+                        target_paths=preview_paths,
+                    ),
+                    applied=RpBridgeEditApply(
+                        tool="apply_edits" if normalized_apply_requests else "file_actions",
+                        ok=False,
+                        status="failed",
+                        target_paths=[],
+                        summary=summary,
+                        detail={"missing_capabilities": missing_capabilities},
+                    ),
+                ),
+            )
+            return _BridgeEditsOutcome(status="failed", summary=summary)
+
+        apply_token = f"aiwf-p10-managed-{stage}"
+        applied_paths: list[str] = []
+        last_tool = "apply_edits" if normalized_apply_requests else "file_actions"
+
+        def _write_failure(status: str, summary: str, *, detail: dict[str, Any]) -> _BridgeEditsOutcome:
+            self._write_bridge_edits_artifact(
+                run_dir,
+                RpBridgeEditsArtifact(
+                    status=status,
+                    preview=RpBridgeEditPreview(
+                        tool=last_tool,
+                        payload=preview_payload,
+                        target_paths=preview_paths,
+                    ),
+                    applied=RpBridgeEditApply(
+                        tool=last_tool,
+                        ok=False,
+                        status=status,
+                        target_paths=applied_paths,
+                        summary=summary,
+                        detail=detail,
+                    ),
+                ),
+            )
+            return _BridgeEditsOutcome(status=status, summary=summary)
+
+        for index, request in enumerate(normalized_apply_requests):
+            path = str(request.get("path", "")).strip()
+            if not path:
+                status = "partially_applied" if applied_paths else "failed"
+                return _write_failure(
+                    status,
+                    "Bridge apply_edits request is missing required path field.",
+                    detail={"request_index": index, "tool": "apply_edits"},
+                )
+            last_tool = "apply_edits"
+            result = client.apply_edits_commit(
+                apply_token=apply_token,
+                path=path,
+                rewrite=request.get("rewrite") if isinstance(request.get("rewrite"), str) else None,
+                search=request.get("search") if isinstance(request.get("search"), str) else None,
+                replace=request.get("replace") if isinstance(request.get("replace"), str) else None,
+                edits=[item for item in request.get("edits", []) if isinstance(item, Mapping)]
+                if isinstance(request.get("edits"), list)
+                else None,
+                all=request.get("all") if isinstance(request.get("all"), bool) else None,
+                on_missing=request.get("on_missing") if request.get("on_missing") in {"error", "create"} else None,
+                verbose=request.get("verbose") if isinstance(request.get("verbose"), bool) else None,
+            )
+            if not result.ok:
+                status = "partially_applied" if applied_paths else "failed"
+                summary = self._bridge_error_summary(result.error, fallback="Bridge apply_edits commit failed")
+                return _write_failure(
+                    status,
+                    summary,
+                    detail={
+                        "request_index": index,
+                        "tool": "apply_edits",
+                        "error_code": result.error.code if result.error is not None else None,
+                    },
+                )
+            for changed_path in result.changed_paths:
+                if changed_path not in applied_paths:
+                    applied_paths.append(changed_path)
+
+        for index, request in enumerate(normalized_file_actions):
+            action = str(request.get("action", "")).strip()
+            path = str(request.get("path", "")).strip()
+            if action not in {"create", "delete", "move"} or not path:
+                status = "partially_applied" if applied_paths else "failed"
+                return _write_failure(
+                    status,
+                    "Bridge file_actions request is missing required action/path fields.",
+                    detail={"request_index": index, "tool": "file_actions"},
+                )
+            last_tool = "file_actions"
+            result = client.file_actions_commit(
+                apply_token=apply_token,
+                action=action,  # type: ignore[arg-type]
+                path=path,
+                content=request.get("content") if isinstance(request.get("content"), str) else None,
+                new_path=request.get("new_path") if isinstance(request.get("new_path"), str) else None,
+                if_exists=request.get("if_exists") if request.get("if_exists") in {"error", "overwrite"} else None,
+            )
+            if not result.ok:
+                status = "partially_applied" if applied_paths else "failed"
+                summary = self._bridge_error_summary(result.error, fallback="Bridge file_actions commit failed")
+                return _write_failure(
+                    status,
+                    summary,
+                    detail={
+                        "request_index": index,
+                        "tool": "file_actions",
+                        "error_code": result.error.code if result.error is not None else None,
+                    },
+                )
+            for changed_path in result.changed_paths:
+                if changed_path not in applied_paths:
+                    applied_paths.append(changed_path)
+
+        summary = (
+            f"RepoPrompt bridge destructive edits applied {len(applied_paths)} path(s)."
+            if applied_paths
+            else "RepoPrompt bridge destructive edit flow completed with no changed paths."
+        )
+        self._write_bridge_edits_artifact(
+            run_dir,
+            RpBridgeEditsArtifact(
+                status="applied",
+                preview=RpBridgeEditPreview(
+                    tool="apply_edits" if normalized_apply_requests else "file_actions",
+                    payload=preview_payload,
+                    target_paths=preview_paths,
+                ),
+                applied=RpBridgeEditApply(
+                    tool=last_tool,
+                    ok=True,
+                    status="applied",
+                    target_paths=applied_paths,
+                    summary=summary,
+                    detail={"changed_count": len(applied_paths)},
+                ),
+            ),
+        )
+        return _BridgeEditsOutcome(status="applied", summary=summary)
+
+    def _collect_bridge_edit_target_paths(
+        self,
+        apply_edits_requests: Sequence[Mapping[str, Any]],
+        file_action_requests: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        paths: list[str] = []
+        for request in apply_edits_requests:
+            path = request.get("path")
+            if isinstance(path, str) and path.strip() and path.strip() not in paths:
+                paths.append(path.strip())
+        for request in file_action_requests:
+            path = request.get("path")
+            if isinstance(path, str) and path.strip() and path.strip() not in paths:
+                paths.append(path.strip())
+            new_path = request.get("new_path")
+            if isinstance(new_path, str) and new_path.strip() and new_path.strip() not in paths:
+                paths.append(new_path.strip())
+        return paths
+
+    def _is_repo_clean_for_bridge_edits(self) -> bool:
+        output = self._run_git_command(["status", "--porcelain", "--untracked-files=all"])
+        if output is None:
+            return False
+        return not any(line.strip() for line in output.splitlines())
 
     def _require_bridge_config_mode(self, mode: str) -> RpBridgeRunConfig:
         bridge_config = self._active_bridge_config()
@@ -2201,6 +2621,10 @@ class RpAgentAdapter:
 
     def _write_bridge_oracle_artifact(self, run_dir: Path, artifact: RpBridgeOracleArtifact) -> None:
         artifact_path = run_dir / "rp-bridge-oracle.json"
+        artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def _write_bridge_edits_artifact(self, run_dir: Path, artifact: RpBridgeEditsArtifact) -> None:
+        artifact_path = run_dir / "rp-bridge-edits.json"
         artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     def _write_bridge_search_artifact(self, run_dir: Path, artifact: RpBridgeSearchArtifact) -> str:

@@ -286,6 +286,110 @@ def test_rp_agent_adapter_managed_agent_execute_completes_with_response_and_log(
     assert agent_log["sessions"][-1]["response_artifact"] == "rp-agent-implement-response.md"
 
 
+def test_rp_agent_adapter_managed_agent_destructive_bridge_flow_requires_contract_gate(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(
+        mode="managed-agent",
+        workspace="workspace-alpha",
+        context_id="ctx-123",
+        apply_edits=True,
+        apply_edits_clean_repo_required=False,
+    )
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-edits-apply")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+
+    with pytest.raises(AdapterError) as exc_info:
+        adapter.execute(task, plan, run_dir)
+
+    assert exc_info.value.error_code is ErrorCode.STATE_VIOLATION
+    assert "allows_mutations=false" in str(exc_info.value)
+    edits_artifact = json.loads((run_dir / "rp-bridge-edits.json").read_text(encoding="utf-8"))
+    assert edits_artifact["status"] == "failed"
+    assert edits_artifact["applied"]["detail"]["gate"] == "contract"
+
+
+def test_rp_agent_adapter_managed_agent_destructive_bridge_flow_applies_when_all_gates_pass(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_contract = BridgeContract(
+        enabled=True,
+        default_mode="manual-assist",
+        supported_modes=("disabled", "manual-assist", "managed-agent"),
+        command_candidates=("rp", "rp-cli"),
+        install_hint="Install rp bridge tooling.",
+        allows_mutations=True,
+        destructive_capabilities=("apply_edits", "file_actions"),
+    )
+    host_contract = replace(RP_MANUAL_CONTRACT, bridge=bridge_contract)
+    bridge_config = RpBridgeRunConfig(
+        mode="managed-agent",
+        workspace="workspace-alpha",
+        context_id="ctx-123",
+        apply_edits=True,
+        apply_edits_clean_repo_required=False,
+    )
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-edits-apply")
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        host_contract=host_contract,
+        bridge_config=bridge_config,
+        rp_command=[str(bridge_cli)],
+    )
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+
+    assert result.status is RunStatus.passed
+    assert result.metadata["bridge_edits_artifact"] == "rp-bridge-edits.json"
+    assert result.metadata["bridge_edits_status"] == "applied"
+    edits_artifact = json.loads((run_dir / "rp-bridge-edits.json").read_text(encoding="utf-8"))
+    assert edits_artifact["status"] == "applied"
+    assert edits_artifact["applied"]["status"] == "applied"
+    assert "src/main.py" in edits_artifact["applied"]["target_paths"]
+
+
+def test_rp_agent_adapter_managed_agent_destructive_bridge_partial_failure_blocks(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_contract = BridgeContract(
+        enabled=True,
+        default_mode="manual-assist",
+        supported_modes=("disabled", "manual-assist", "managed-agent"),
+        command_candidates=("rp", "rp-cli"),
+        install_hint="Install rp bridge tooling.",
+        allows_mutations=True,
+        destructive_capabilities=("apply_edits",),
+    )
+    host_contract = replace(RP_MANUAL_CONTRACT, bridge=bridge_contract)
+    bridge_config = RpBridgeRunConfig(
+        mode="managed-agent",
+        workspace="workspace-alpha",
+        context_id="ctx-123",
+        apply_edits=True,
+        apply_edits_clean_repo_required=False,
+    )
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-edits-partial")
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        host_contract=host_contract,
+        bridge_config=bridge_config,
+        rp_command=[str(bridge_cli)],
+    )
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+
+    assert result.status is RunStatus.blocked
+    assert result.metadata["blocked_resume_stage"] == "implement"
+    assert result.metadata["bridge_edits_status"] == "partially_applied"
+    edits_artifact = json.loads((run_dir / "rp-bridge-edits.json").read_text(encoding="utf-8"))
+    assert edits_artifact["status"] == "partially_applied"
+    assert edits_artifact["applied"]["tool"] == "apply_edits"
+
+
 def test_rp_agent_adapter_managed_agent_execute_waiting_for_input_blocks_with_resume_cursor(tmp_path: Path) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
     bridge_config = RpBridgeRunConfig(mode="managed-agent", workspace="workspace-alpha", context_id="ctx-123")
@@ -773,7 +877,7 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    raise SystemExit(0)\n"
             "\n"
             "if '--tools-schema' in sys.argv:\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces', 'inputSchema': {'properties': {'action': {'enum': ['list']}}}}, {'name': 'bind_context', 'inputSchema': {'properties': {'op': {'enum': ['list', 'status', 'bind']}}}}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run', 'inputSchema': {'properties': {'op': {'enum': ['start', 'poll', 'wait', 'cancel']}}}}, {'name': 'agent_manage', 'inputSchema': {'properties': {'op': {'enum': ['get_log', 'list_sessions', 'resume_session', 'extract_handoff', 'get_transcript']}}}}, {'name': 'read_file'}, {'name': 'file_search'}]}))\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces', 'inputSchema': {'properties': {'action': {'enum': ['list']}}}}, {'name': 'bind_context', 'inputSchema': {'properties': {'op': {'enum': ['list', 'status', 'bind']}}}}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run', 'inputSchema': {'properties': {'op': {'enum': ['start', 'poll', 'wait', 'cancel']}}}}, {'name': 'agent_manage', 'inputSchema': {'properties': {'op': {'enum': ['get_log', 'list_sessions', 'resume_session', 'extract_handoff', 'get_transcript']}}}}, {'name': 'read_file'}, {'name': 'file_search'}, {'name': 'apply_edits'}, {'name': 'file_actions'}]}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
@@ -805,6 +909,24 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        sys.stdout.write('\\n')\n"
             "        raise SystemExit(0)\n"
             "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'apply_edits':\n"
+            "    path = payload.get('path')\n"
+            "    if MODE == 'managed-edits-partial' and isinstance(path, str) and path.endswith('fail.py'):\n"
+            "        sys.stderr.write('apply edits failed\\n')\n"
+            "        raise SystemExit(10)\n"
+            "    sys.stdout.write(json.dumps({'status': 'applied', 'changed_paths': [path], 'summary': 'applied edit'}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'file_actions':\n"
+            "    action = payload.get('action')\n"
+            "    path = payload.get('path')\n"
+            "    new_path = payload.get('new_path')\n"
+            "    changed = new_path if action == 'move' and new_path else path\n"
+            "    sys.stdout.write(json.dumps({'status': 'applied', 'changed_paths': [changed], 'summary': 'applied file action'}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
@@ -875,6 +997,12 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        elif session_id and session_id.startswith('review-'):\n"
             "            status = 'completed'\n"
             "            output = json.dumps({'summary': 'Managed review passed', 'issues': []})\n"
+            "        elif MODE == 'managed-edits-apply':\n"
+            "            status = 'completed'\n"
+            "            output = json.dumps({'response_text': '# Managed implement output\\n', 'bridge_edits': {'apply_edits': [{'path': 'src/main.py', 'search': 'old', 'replace': 'new'}], 'file_actions': [{'action': 'move', 'path': 'src/old.py', 'new_path': 'src/new.py'}]}})\n"
+            "        elif MODE == 'managed-edits-partial':\n"
+            "            status = 'completed'\n"
+            "            output = json.dumps({'response_text': '# Managed implement output\\n', 'bridge_edits': {'apply_edits': [{'path': 'src/main.py', 'search': 'old', 'replace': 'new'}, {'path': 'src/fail.py', 'search': 'a', 'replace': 'b'}]}})\n"
             "        else:\n"
             "            status = 'completed'\n"
             "            output = '# Managed implement output\\n'\n"

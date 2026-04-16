@@ -17,6 +17,7 @@ from aiwf.models import (
     GateSet,
     RpBridgeAgentLogArtifactContent,
     RpBridgeContextBuilderArtifactContent,
+    RpBridgeEditsArtifactContent,
     RpBridgeManagedAgentRecordContent,
     RpBridgeOracleArtifactContent,
     RpBridgeRunConfig,
@@ -768,6 +769,12 @@ class WorkflowEngine:
             category="bridge_oracle",
             related_artifacts=[name for name in ["review-report.json", "run-diagnostics.json", "run-provenance.json"] if name in artifact_refs],
         )
+        add_artifact(
+            "rp-bridge-edits.json",
+            stage="implement",
+            category="bridge_edits",
+            related_artifacts=[name for name in ["rp-bridge-agent-log.json", "rp-agent-implement-response.md"] if name in artifact_refs],
+        )
         if latest_bridge_agent_record is not None:
             if latest_bridge_agent_record.transcript_artifact:
                 add_artifact(
@@ -987,6 +994,17 @@ class WorkflowEngine:
         except ArtifactError:
             return None
 
+    def _load_bridge_edits_artifact(self, run_dir: Path) -> RpBridgeEditsArtifactContent | None:
+        artifact_path = run_dir / "rp-bridge-edits.json"
+        if not artifact_path.exists():
+            return None
+        try:
+            return ArtifactStore(run_dir, state_manager=self.state_manager).read_validated_artifact(
+                "rp-bridge-edits.json", RpBridgeEditsArtifactContent
+            )
+        except ArtifactError:
+            return None
+
     def _latest_bridge_agent_record(
         self,
         run_dir: Path,
@@ -1086,6 +1104,7 @@ class WorkflowEngine:
 
         bridge_seeding = self._load_bridge_seeding_artifact(run_dir)
         bridge_search = self._load_bridge_search_artifact(run_dir)
+        bridge_edits = self._load_bridge_edits_artifact(run_dir)
         bridge_context_builder = self._load_bridge_context_builder_artifact(run_dir)
         bridge_oracle = self._load_bridge_oracle_artifact(run_dir)
         bridge_agent_log = self._load_bridge_agent_log_artifact(run_dir)
@@ -1099,6 +1118,8 @@ class WorkflowEngine:
             export_transcript=self.bridge_config.export_transcript,
             composition=self.bridge_config.composition,
             use_oracle_for_review=self.bridge_config.use_oracle_for_review,
+            apply_edits=self.bridge_config.apply_edits,
+            apply_edits_clean_repo_required=self.bridge_config.apply_edits_clean_repo_required,
             resolved=self.bridge_config.resolved,
             summary=self._bridge_summary(meta, handoff_artifacts, latest_agent_record),
             handoff_artifacts=handoff_artifacts,
@@ -1114,6 +1135,8 @@ class WorkflowEngine:
             context_builder_artifact="rp-bridge-context-builder.json" if bridge_context_builder is not None else None,
             oracle_artifact="rp-bridge-oracle.json" if bridge_oracle is not None else None,
             oracle_status=bridge_oracle.status if bridge_oracle is not None else None,
+            edits_artifact="rp-bridge-edits.json" if bridge_edits is not None else None,
+            edits_status=bridge_edits.status if bridge_edits is not None else None,
             agent_log_artifact="rp-bridge-agent-log.json" if bridge_agent_log is not None else None,
             agent_status=latest_agent_record.status if latest_agent_record is not None else None,
             agent_session_id=latest_agent_record.session_id if latest_agent_record is not None else None,

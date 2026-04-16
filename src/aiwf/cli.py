@@ -173,6 +173,8 @@ def _resolve_bridge_config(
     bridge_export_transcript: bool,
     bridge_composition: str | None,
     bridge_use_oracle_for_review: bool,
+    bridge_apply_edits: bool,
+    bridge_apply_edits_allow_dirty: bool,
 ) -> RpBridgeRunConfig | None:
     any_bridge_option = any(
         [
@@ -186,6 +188,8 @@ def _resolve_bridge_config(
             bridge_export_transcript,
             bridge_composition is not None,
             bridge_use_oracle_for_review,
+            bridge_apply_edits,
+            bridge_apply_edits_allow_dirty,
         ]
     )
     if not any_bridge_option:
@@ -199,6 +203,8 @@ def _resolve_bridge_config(
     resolved_mode = bridge_mode or bridge_contract.default_mode
     if resolved_mode not in bridge_contract.supported_modes:
         raise AiwfError(f"Bridge mode '{resolved_mode}' is not supported in this slice")
+    if bridge_apply_edits and resolved_mode != "managed-agent":
+        raise AiwfError("Bridge destructive edits currently require --bridge-mode managed-agent")
 
     try:
         return RpBridgeRunConfig(
@@ -211,6 +217,8 @@ def _resolve_bridge_config(
             export_transcript=bridge_export_transcript,
             composition=bridge_composition or "manage-selection",
             use_oracle_for_review=bridge_use_oracle_for_review,
+            apply_edits=bridge_apply_edits,
+            apply_edits_clean_repo_required=not bridge_apply_edits_allow_dirty,
         )
     except Exception as exc:
         raise AiwfError(f"Invalid bridge configuration: {exc}") from exc
@@ -928,6 +936,7 @@ def _build_inspection_payload(
     review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
     bridge_seeding = _load_optional_run_surface(ai_root, run_id, "rp-bridge-seeding.json")
     bridge_search = _load_optional_run_surface(ai_root, run_id, "rp-bridge-search.json")
+    bridge_edits = _load_optional_run_surface(ai_root, run_id, "rp-bridge-edits.json")
     bridge_context_builder = _load_optional_run_surface(ai_root, run_id, "rp-bridge-context-builder.json")
     bridge_oracle = _load_optional_run_surface(ai_root, run_id, "rp-bridge-oracle.json")
     bridge_capture = _load_optional_run_surface(ai_root, run_id, "rp-bridge-capture.json")
@@ -958,6 +967,7 @@ def _build_inspection_payload(
         "review_report": review_report,
         "bridge_seeding": bridge_seeding,
         "bridge_search": bridge_search,
+        "bridge_edits": bridge_edits,
         "bridge_context_builder": bridge_context_builder,
         "bridge_oracle": bridge_oracle,
         "bridge_capture": bridge_capture,
@@ -970,6 +980,7 @@ def _build_inspection_payload(
             "review_report": str(_artifact_path(ai_root, run_id, "review-report.json")) if review_report is not None else None,
             "bridge_seeding": str(_artifact_path(ai_root, run_id, "rp-bridge-seeding.json")) if bridge_seeding is not None else None,
             "bridge_search": str(_artifact_path(ai_root, run_id, "rp-bridge-search.json")) if bridge_search is not None else None,
+            "bridge_edits": str(_artifact_path(ai_root, run_id, "rp-bridge-edits.json")) if bridge_edits is not None else None,
             "bridge_context_builder": str(_artifact_path(ai_root, run_id, "rp-bridge-context-builder.json")) if bridge_context_builder is not None else None,
             "bridge_oracle": str(_artifact_path(ai_root, run_id, "rp-bridge-oracle.json")) if bridge_oracle is not None else None,
             "bridge_capture": str(_artifact_path(ai_root, run_id, "rp-bridge-capture.json")) if bridge_capture is not None else None,
@@ -1275,7 +1286,9 @@ def _print_inspection(
             f"context_id={rp_bridge.get('context_id') or '-'} "
             f"agent_role={rp_bridge.get('agent_role') or '-'} "
             f"composition={rp_bridge.get('composition') or 'manage-selection'} "
-            f"use_oracle_for_review={rp_bridge.get('use_oracle_for_review') if 'use_oracle_for_review' in rp_bridge else False}"
+            f"use_oracle_for_review={rp_bridge.get('use_oracle_for_review') if 'use_oracle_for_review' in rp_bridge else False} "
+            f"apply_edits={rp_bridge.get('apply_edits') if 'apply_edits' in rp_bridge else False} "
+            f"apply_edits_clean_repo_required={rp_bridge.get('apply_edits_clean_repo_required') if 'apply_edits_clean_repo_required' in rp_bridge else True}"
         )
         resolved = rp_bridge.get("resolved")
         if isinstance(resolved, Mapping):
@@ -1304,6 +1317,8 @@ def _print_inspection(
         context_builder_artifact = diagnostics_bridge.get("context_builder_artifact")
         oracle_artifact = diagnostics_bridge.get("oracle_artifact")
         oracle_status = diagnostics_bridge.get("oracle_status")
+        edits_artifact = diagnostics_bridge.get("edits_artifact")
+        edits_status = diagnostics_bridge.get("edits_status")
         if isinstance(seeding_artifact, str) and seeding_artifact.strip():
             console.print(f"bridge_seeding_artifact={seeding_artifact}")
         if isinstance(seeding_status, str) and seeding_status.strip():
@@ -1320,6 +1335,10 @@ def _print_inspection(
             console.print(f"bridge_oracle_artifact={oracle_artifact}")
         if isinstance(oracle_status, str) and oracle_status.strip():
             console.print(f"bridge_oracle_status={oracle_status}")
+        if isinstance(edits_artifact, str) and edits_artifact.strip():
+            console.print(f"bridge_edits_artifact={edits_artifact}")
+        if isinstance(edits_status, str) and edits_status.strip():
+            console.print(f"bridge_edits_status={edits_status}")
         agent_log_artifact = diagnostics_bridge.get("agent_log_artifact")
         agent_status = diagnostics_bridge.get("agent_status")
         agent_session_id = diagnostics_bridge.get("agent_session_id")
@@ -1430,6 +1449,8 @@ def _print_inspection(
         console.print(f"bridge_seeding={artifacts['bridge_seeding']}")
     if artifacts.get("bridge_search"):
         console.print(f"bridge_search={artifacts['bridge_search']}")
+    if artifacts.get("bridge_edits"):
+        console.print(f"bridge_edits={artifacts['bridge_edits']}")
     if artifacts.get("bridge_context_builder"):
         console.print(f"bridge_context_builder={artifacts['bridge_context_builder']}")
     if artifacts.get("bridge_oracle"):
@@ -1461,6 +1482,8 @@ def run_plan(
     bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Export managed-agent transcript/handoff provenance when the RP bridge exposes those surfaces.")] = False,
     bridge_composition: Annotated[str | None, typer.Option("--bridge-composition", help="Bridge context composition strategy (manage-selection or context-builder).")]=None,
     bridge_use_oracle_for_review: Annotated[bool, typer.Option("--bridge-use-oracle-for-review", help="Capture advisory ask_oracle output during review without changing review contract requirements.")] = False,
+    bridge_apply_edits: Annotated[bool, typer.Option("--bridge-apply-edits", help="Enable experimental destructive bridge edits/file-actions (managed-agent only, gated).")] = False,
+    bridge_apply_edits_allow_dirty: Annotated[bool, typer.Option("--bridge-apply-edits-allow-dirty", help="Allow destructive bridge edits when git worktree is dirty.")] = False,
 ) -> None:
     """Run the plan workflow."""
     engine = _build_engine_or_exit(
@@ -1483,6 +1506,8 @@ def run_plan(
                 bridge_export_transcript=bridge_export_transcript,
                 bridge_composition=bridge_composition,
                 bridge_use_oracle_for_review=bridge_use_oracle_for_review,
+                bridge_apply_edits=bridge_apply_edits,
+                bridge_apply_edits_allow_dirty=bridge_apply_edits_allow_dirty,
             ),
         ),
     )
@@ -1506,6 +1531,8 @@ def run_implement(
     bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Export managed-agent transcript/handoff provenance when the RP bridge exposes those surfaces.")] = False,
     bridge_composition: Annotated[str | None, typer.Option("--bridge-composition", help="Bridge context composition strategy (manage-selection or context-builder).")]=None,
     bridge_use_oracle_for_review: Annotated[bool, typer.Option("--bridge-use-oracle-for-review", help="Capture advisory ask_oracle output during review without changing review contract requirements.")] = False,
+    bridge_apply_edits: Annotated[bool, typer.Option("--bridge-apply-edits", help="Enable experimental destructive bridge edits/file-actions (managed-agent only, gated).")] = False,
+    bridge_apply_edits_allow_dirty: Annotated[bool, typer.Option("--bridge-apply-edits-allow-dirty", help="Allow destructive bridge edits when git worktree is dirty.")] = False,
 ) -> None:
     """Run the implement workflow."""
     engine = _build_engine_or_exit(
@@ -1528,6 +1555,8 @@ def run_implement(
                 bridge_export_transcript=bridge_export_transcript,
                 bridge_composition=bridge_composition,
                 bridge_use_oracle_for_review=bridge_use_oracle_for_review,
+                bridge_apply_edits=bridge_apply_edits,
+                bridge_apply_edits_allow_dirty=bridge_apply_edits_allow_dirty,
             ),
         ),
     )

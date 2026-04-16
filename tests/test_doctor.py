@@ -250,6 +250,7 @@ def test_run_doctor_reports_bridge_readiness_hints_from_tool_operations(tmp_path
                 RpToolInfo(name="context_builder"),
                 RpToolInfo(name="ask_oracle"),
                 RpToolInfo(name="file_search"),
+                RpToolInfo(name="apply_edits"),
             ),
             error=None,
         )
@@ -273,6 +274,8 @@ def test_run_doctor_reports_bridge_readiness_hints_from_tool_operations(tmp_path
     assert "context-composition=ready" in bridge_check.detail
     assert "advisory-oracle=ready" in bridge_check.detail
     assert "repo-search=ready" in bridge_check.detail
+    assert "destructive-editing=advertised" in bridge_check.detail
+    assert "Destructive warning" in bridge_check.detail
 
 
 def test_run_doctor_warns_when_bridge_probe_fails(tmp_path: Path, monkeypatch) -> None:
