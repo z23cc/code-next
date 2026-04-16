@@ -476,6 +476,54 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     assert meta.data["rp_bridge"] == bridge_payload
     assert "RepoPrompt Bridge Context" in (ai_root / "runs" / run_id / "rp-agent-implement-prompt.md").read_text(encoding="utf-8")
 
+    blocked_inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+        ],
+    )
+    assert blocked_inspect_result.exit_code == 0
+    assert "bridge=mode=manual-assist" in blocked_inspect_result.stdout
+    assert "workspace=workspace-alpha" in blocked_inspect_result.stdout
+    assert "tab=implement-tab" in blocked_inspect_result.stdout
+    assert "context_id=ctx-123" in blocked_inspect_result.stdout
+    assert "agent_role=implementer" in blocked_inspect_result.stdout
+    assert "bridge_summary=RepoPrompt manual-assist is active for implement;" in blocked_inspect_result.stdout
+    assert "bridge_handoff_artifacts=rp-agent-implement-prompt.md" in blocked_inspect_result.stdout
+    assert "Open or reuse a RepoPrompt session with workspace=workspace-alpha" in blocked_inspect_result.stdout
+    assert "implementation handoff" in blocked_inspect_result.stdout
+
+    blocked_inspect_json_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--json",
+        ],
+    )
+    assert blocked_inspect_json_result.exit_code == 0
+    blocked_inspect_payload = json.loads(blocked_inspect_json_result.stdout)
+    assert blocked_inspect_payload["rp_bridge"] == bridge_payload
+    assert blocked_inspect_payload["diagnostics"]["bridge"] == {
+        "mode": "manual-assist",
+        "workspace": "workspace-alpha",
+        "tab": "implement-tab",
+        "context_id": "ctx-123",
+        "agent_role": "implementer",
+        "timeout_seconds": 900,
+        "export_transcript": True,
+        "summary": (
+            "RepoPrompt manual-assist is active for implement; complete the RepoPrompt-side handoff "
+            "using rp-agent-implement-prompt.md with the stored bridge hints, then resume."
+        ),
+        "handoff_artifacts": ["rp-agent-implement-prompt.md"],
+    }
+
     resume_result = runner.invoke(
         app,
         [
@@ -488,6 +536,22 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
         ],
     )
     assert resume_result.exit_code == 0
+    needs_review_payload = json.loads(
+        runner.invoke(
+            app,
+            [
+                "inspect",
+                run_id,
+                "--ai-root",
+                str(ai_root),
+                "--json",
+            ],
+        ).stdout
+    )
+    assert needs_review_payload["diagnostics"]["bridge"]["summary"] == (
+        "RepoPrompt manual-assist metadata is persisted from implement and will be restored into the review "
+        "handoff prompt when review starts."
+    )
 
     review_result = runner.invoke(
         app,
@@ -503,6 +567,7 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
         ],
     )
     assert review_result.exit_code == 0
+    assert "RepoPrompt Bridge Context" in (ai_root / "runs" / run_id / "rp-agent-review-prompt.md").read_text(encoding="utf-8")
 
     inspect_result = runner.invoke(
         app,
@@ -519,6 +584,8 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     assert "tab=implement-tab" in inspect_result.stdout
     assert "context_id=ctx-123" in inspect_result.stdout
     assert "agent_role=implementer" in inspect_result.stdout
+    assert "bridge_summary=RepoPrompt manual-assist is active for review;" in inspect_result.stdout
+    assert "bridge_handoff_artifacts=rp-agent-review-prompt.md" in inspect_result.stdout
 
     inspect_json_result = runner.invoke(
         app,
@@ -533,6 +600,7 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     assert inspect_json_result.exit_code == 0
     inspect_payload = json.loads(inspect_json_result.stdout)
     assert inspect_payload["rp_bridge"] == bridge_payload
+    assert inspect_payload["diagnostics"]["bridge"]["handoff_artifacts"] == ["rp-agent-review-prompt.md"]
     assert inspect_payload["review_report"]["bridge"] == bridge_payload
 
     final_resume = runner.invoke(

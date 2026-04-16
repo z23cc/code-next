@@ -828,6 +828,14 @@ def _print_inspection(
             f"context_id={rp_bridge.get('context_id') or '-'} "
             f"agent_role={rp_bridge.get('agent_role') or '-'}"
         )
+    diagnostics_bridge = diagnostics.get("bridge")
+    if isinstance(diagnostics_bridge, Mapping):
+        summary = str(diagnostics_bridge.get("summary", "")).strip()
+        if summary:
+            console.print(f"bridge_summary={summary}")
+        handoff_artifacts = diagnostics_bridge.get("handoff_artifacts")
+        if isinstance(handoff_artifacts, list) and handoff_artifacts:
+            console.print(f"bridge_handoff_artifacts={_format_csv(handoff_artifacts)}")
 
     _print_inspection_diff(payload)
 

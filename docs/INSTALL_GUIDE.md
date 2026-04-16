@@ -139,6 +139,78 @@ uv run aiwf resume <run_id>
 
 还可以在 RP manual 模式下显式加 `--bridge`（以及可选的 `--bridge-workspace` / `--bridge-tab` / `--bridge-context-id` / `--bridge-agent-role` 等参数）启用**实验性的 manual-assist groundwork**。在当前 slice 中，这只会为 manual prompt artifact 增加 bridge context 并持久化 `rp_bridge` metadata；**不会调用 rp-cli MCP/tools**，也不会改变稳定的 manual artifact 名称或 review contract。
 
+#### 什么时候用 `--bridge`
+
+当前 `--bridge` 适合下面这种场景：
+
+- 你已经知道自己要在哪个 RepoPrompt workspace / tab / context 里完成这次 implement/review
+- 你希望这些提示被 `aiwf` 持久化，并在 implement -> `resume` -> `run review` -> `resume` 的整个 manual flow 中保持一致
+- 你需要 `inspect` / `run-diagnostics.json` 明确提示下一步应该在哪个 RepoPrompt 会话里继续
+
+当前 `--bridge` **不** 适合下面这种预期：
+
+- 希望 `aiwf` 自动调用真实 `rp-cli`
+- 希望 `aiwf` 自动绑定 RepoPrompt session / 自动准备 selection / 自动发第一条消息
+- 希望 `aiwf` 自动抓取 transcript 或自动回填 review artifacts
+
+这些能力属于后续 phase，不在当前 P1 scope 内。
+
+#### 当前 manual-assist operator flow
+
+一个最小、可信的 `--bridge` 用法如下：
+
+1. 启动 implement，并把你已知的 RepoPrompt 会话提示写进 run metadata：
+
+   ```bash
+   uv run aiwf run implement \
+     --task .ai/tasks/<task>.md \
+     --adapter rp \
+     --bridge \
+     --bridge-workspace <workspace> \
+     --bridge-tab <tab> \
+     --bridge-context-id <context_id>
+   ```
+
+2. 查看 `aiwf` 给出的 operator guidance：
+
+   ```bash
+   uv run aiwf inspect <run_id>
+   ```
+
+   这里会显示：
+
+   - `bridge=...`：当前持久化的 workspace / tab / context / agent_role
+   - `bridge_summary=...`：当前是 implement 还是 review handoff
+   - `next_actions:`：下一步应该查看哪个 RP prompt artifact，以及何时执行 `resume`
+
+3. 在你自己的 RepoPrompt 会话里完成 implement handoff，核心 artifact 是：
+
+   - `.ai/runs/<run_id>/rp-agent-implement-prompt.md`
+
+4. 完成 RepoPrompt 侧 implement 后，回到 `aiwf`：
+
+   ```bash
+   uv run aiwf resume <run_id>
+   ```
+
+5. 当 run 进入 `needs_review` 后，启动 review：
+
+   ```bash
+   uv run aiwf run review --run-id <run_id>
+   ```
+
+   这一步会从已存储的 `rp_bridge` metadata 恢复同一份 bridge 配置，并把它重新写入：
+
+   - `.ai/runs/<run_id>/rp-agent-review-prompt.md`
+
+6. 在同一个（或你手动重新对齐的）RepoPrompt 会话里完成 review handoff，然后再次：
+
+   ```bash
+   uv run aiwf resume <run_id>
+   ```
+
+结论上，当前 `--bridge` 的价值是：**让 manual RP handoff 在整条 operator loop 中带着稳定的会话提示信息前进**，而不是替你操作真实 RepoPrompt runtime。
+
 #### 实验性 auto 路径（仅限已验证的真实 RepoPrompt runtime）
 
 > **Experimental status:** 只有当机器上的 `rp` 或 `rp-cli` 确认就是实现了 `aiwf-rp-native/v1` 的真实 RepoPrompt app / MCP CLI runtime 时，才应尝试这条路径。仓库内的 `rp-cli-stub` 仅用于协议测试；CI 中的 stub conformance 也不代表真实运行时 readiness。

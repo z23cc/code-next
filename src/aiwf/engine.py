@@ -17,6 +17,7 @@ from aiwf.models import (
     GateSet,
     RpBridgeRunConfig,
     RunArtifactRef,
+    RunBridgeDiagnostics,
     RunDiagnostics,
     RunGateEvidence,
     RunHostDiagnostics,
@@ -460,6 +461,7 @@ class WorkflowEngine:
         except ValueError as exc:
             raise StateError("Run does not include valid stored RP bridge metadata", path=meta.run_dir, stage=stage) from exc
 
+        self._validate_bridge_restore_contract(contract, bridge_config, run_dir=Path(meta.run_dir), stage=stage)
         self.host_contract = contract
         current_bridge_config = getattr(self.adapter, "bridge_config", None)
         if self.adapter.host_contract == contract and current_bridge_config == bridge_config:
@@ -625,6 +627,7 @@ class WorkflowEngine:
         events = self.state_manager.load_events(run_id)
         key_artifacts = self._collect_key_artifacts(run_dir)
         artifact_names = {artifact.name for artifact in key_artifacts}
+        bridge = self._build_bridge_diagnostics(meta, artifact_names, run_dir)
 
         return RunDiagnostics(
             run_id=run_id,
@@ -645,6 +648,7 @@ class WorkflowEngine:
                 supports_auto_execution=self.host_contract.capabilities.supports_auto_execution,
                 requires_explicit_review_handoff=self.host_contract.capabilities.requires_explicit_review_handoff,
             ),
+            bridge=bridge,
             key_artifacts=key_artifacts,
             stage_timeline=self._build_stage_timeline(events),
         )
@@ -831,6 +835,99 @@ class WorkflowEngine:
         value = payload.get(key)
         return value if isinstance(value, bool) else None
 
+    def _validate_bridge_restore_contract(
+        self,
+        contract: HostContract,
+        bridge_config: RpBridgeRunConfig | None,
+        *,
+        run_dir: Path,
+        stage: str,
+    ) -> None:
+        if bridge_config is None:
+            return
+        if contract.adapter != "rp" or contract.mode != "manual":
+            raise StateError(
+                "Stored RP bridge metadata requires an rp/manual host contract",
+                path=run_dir,
+                stage=stage,
+            )
+        if not contract.bridge.enabled:
+            raise StateError(
+                "Stored RP bridge metadata requires bridge support, but the restored host contract disables bridge",
+                path=run_dir,
+                stage=stage,
+            )
+        if bridge_config.mode not in contract.bridge.supported_modes:
+            raise StateError(
+                f"Stored RP bridge mode {bridge_config.mode!r} is not supported by the restored host contract",
+                path=run_dir,
+                stage=stage,
+            )
+
+    def _bridge_target_label(self) -> str | None:
+        if self.bridge_config is None:
+            return None
+        parts: list[str] = []
+        if self.bridge_config.workspace:
+            parts.append(f"workspace={self.bridge_config.workspace}")
+        if self.bridge_config.tab:
+            parts.append(f"tab={self.bridge_config.tab}")
+        if self.bridge_config.context_id:
+            parts.append(f"context_id={self.bridge_config.context_id}")
+        if self.bridge_config.agent_role:
+            parts.append(f"agent_role={self.bridge_config.agent_role}")
+        return ", ".join(parts) if parts else None
+
+    def _build_bridge_diagnostics(
+        self,
+        meta: RunMeta,
+        artifact_names: set[str],
+        run_dir: Path,
+    ) -> RunBridgeDiagnostics | None:
+        if self.bridge_config is None:
+            return None
+
+        handoff_artifacts: list[str] = []
+        if meta.last_completed_stage == "implement":
+            handoff_artifacts = self._matching_artifact_names(artifact_names, stage="implement")
+        elif meta.last_completed_stage == "review":
+            review_handoff = self._linked_review_artifact_name(run_dir)
+            if review_handoff:
+                handoff_artifacts = [review_handoff]
+
+        return RunBridgeDiagnostics(
+            mode=self.bridge_config.mode,
+            workspace=self.bridge_config.workspace,
+            tab=self.bridge_config.tab,
+            context_id=self.bridge_config.context_id,
+            agent_role=self.bridge_config.agent_role,
+            timeout_seconds=self.bridge_config.timeout_seconds,
+            export_transcript=self.bridge_config.export_transcript,
+            summary=self._bridge_summary(meta, handoff_artifacts),
+            handoff_artifacts=handoff_artifacts,
+        )
+
+    def _bridge_summary(self, meta: RunMeta, handoff_artifacts: list[str]) -> str:
+        artifact_phrase = f" using {', '.join(handoff_artifacts)}" if handoff_artifacts else ""
+        if meta.status is RunStatus.blocked and meta.last_completed_stage == "implement":
+            return (
+                "RepoPrompt manual-assist is active for implement; complete the RepoPrompt-side handoff"
+                f"{artifact_phrase} with the stored bridge hints, then resume."
+            )
+        if meta.status is RunStatus.needs_review:
+            return (
+                "RepoPrompt manual-assist metadata is persisted from implement and will be restored into the review "
+                "handoff prompt when review starts."
+            )
+        if meta.status is RunStatus.blocked and meta.last_completed_stage == "review":
+            return (
+                "RepoPrompt manual-assist is active for review; complete the RepoPrompt-side review handoff"
+                f"{artifact_phrase}, then resume."
+            )
+        if meta.status is RunStatus.passed:
+            return "RepoPrompt manual-assist metadata persisted cleanly across implement, review, and resume."
+        return "RepoPrompt manual-assist metadata is stored for this run and will be restored on later manual stages."
+
     def _diagnostics_status_reason(self, meta: RunMeta, artifact_names: set[str], run_dir: Path) -> str:
         if meta.status is RunStatus.passed:
             return "Run completed successfully."
@@ -865,24 +962,51 @@ class WorkflowEngine:
         run_id: str,
         run_dir: Path,
     ) -> list[str]:
+        bridge_target = self._bridge_target_label()
+        bridge_target_hint = f" with {bridge_target}" if bridge_target else ""
         if meta.status is RunStatus.needs_review:
             actions = ["Inspect verify-report.json and implementation artifacts before review."]
+            if self.bridge_config is not None:
+                actions[0] = (
+                    "Inspect verify-report.json and implementation artifacts before review; keep or reopen the "
+                    f"RepoPrompt session{bridge_target_hint} so the stored manual-assist context lines up with review."
+                )
             actions.append(f"Run `uv run aiwf run review --run-id {run_id}` to start review.")
             return actions
         if meta.status is RunStatus.blocked:
             if meta.last_completed_stage == "implement":
                 handoff_artifacts = self._matching_artifact_names(artifact_names, stage="implement")
                 if handoff_artifacts:
+                    if self.bridge_config is not None:
+                        return [
+                            f"Open or reuse a RepoPrompt session{bridge_target_hint}, then inspect {', '.join(handoff_artifacts)} to complete the manual-assist implementation handoff.",
+                            f"Run `uv run aiwf resume {run_id}` when the implementation handoff is complete.",
+                        ]
                     return [
                         f"Inspect {', '.join(handoff_artifacts)} to complete the external implementation handoff.",
+                        f"Run `uv run aiwf resume {run_id}` when the implementation handoff is complete.",
+                    ]
+                if self.bridge_config is not None:
+                    return [
+                        f"Open or reuse a RepoPrompt session{bridge_target_hint} before completing the blocked implementation step.",
                         f"Run `uv run aiwf resume {run_id}` when the implementation handoff is complete.",
                     ]
                 return [f"Run `uv run aiwf resume {run_id}` when the blocked implementation step is complete."]
             if meta.last_completed_stage == "review":
                 review_handoff = self._linked_review_artifact_name(run_dir)
                 if review_handoff:
+                    if self.bridge_config is not None:
+                        return [
+                            f"Open or reuse the RepoPrompt session{bridge_target_hint}, then inspect {review_handoff} to complete the manual-assist review handoff.",
+                            f"Run `uv run aiwf resume {run_id}` when review is complete.",
+                        ]
                     return [
                         f"Inspect {review_handoff} to complete the review handoff.",
+                        f"Run `uv run aiwf resume {run_id}` when review is complete.",
+                    ]
+                if self.bridge_config is not None:
+                    return [
+                        f"Open or reuse the RepoPrompt session{bridge_target_hint} before completing the blocked review step.",
                         f"Run `uv run aiwf resume {run_id}` when review is complete.",
                     ]
                 return [f"Run `uv run aiwf resume {run_id}` when the blocked review step is complete."]

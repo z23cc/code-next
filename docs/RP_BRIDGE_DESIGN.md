@@ -257,33 +257,44 @@ bridge 更现实，原因有三点：
 
 ## 11. 推荐落地顺序
 
-### Phase 1
+### Phase 1 — manual-assist hardening（已落地）
 
-> **Status (2026-04-16): foundation slice landed.** 当前已落地的是 additive contract/model surface、`rp_bridge` run metadata、RP manual prompt enrichment、CLI/inspect/doctor surfacing，以及 projection/docs 更新。**当前不会调用 rp-cli MCP/tools**；stable path 仍然是 manual handoff + `resume`。
+> **Status (2026-04-16): P1 completed.** 当前已落地的是 `--bridge` manual-assist 的 operator hardening：`rp_bridge` run metadata 持久化、implement/review prompt 中的 bridge context 重放、`resume`/`run review` 的 bridge restore、`inspect` / `run-diagnostics.json` 中的 bridge summary + next actions，以及对 contract downgrade / unsupported bridge mode 的 fail-fast 校验。**当前仍然不会调用 rp-cli MCP/tools**。
 
-先做 **manual-assist bridge** 设计验证：
+当前可用的 manual-assist 语义是：
 
-- 自动绑定 workspace
-- 自动组织 selection/context
-- 自动发起第一条 implement/review 指令
-- 遇到复杂状态仍回退到 `blocked`
+- operator 手动决定 RepoPrompt workspace / tab / context
+- `aiwf` 把这些提示写入 `rp_bridge` metadata
+- implement 阶段把提示写进 `rp-agent-implement-prompt.md`
+- `inspect` 明确显示 bridge summary、handoff artifact、以及下一步 `resume` / `run review` 指令
+- review 阶段恢复同一份 bridge 配置，并重新写进 `rp-agent-review-prompt.md`
+- 如果后续 stored host contract 不再支持 bridge，或不再支持 `manual-assist`，restore 会直接失败，而不是悄悄降级
 
-### Phase 2
+一个最小 operator loop 是：
 
-再做 **managed-agent bridge**：
+1. `uv run aiwf run implement --adapter rp --bridge ...`
+2. 在指定 RepoPrompt 会话中按 `rp-agent-implement-prompt.md` 完成实现
+3. `uv run aiwf resume <run_id>`
+4. `uv run aiwf run review --run-id <run_id>`
+5. 在同一 RepoPrompt 会话中按 `rp-agent-review-prompt.md` 完成 review
+6. `uv run aiwf resume <run_id>`
 
-- `agent_run start`
-- `wait/poll`
-- `extract_handoff`
-- 规范化回填 artifacts
+### Phase 2 — 只读 rp-cli reconnaissance
 
-### Phase 3
+下一步才是：
 
-最后才考虑：
+- 探测真实 `rp-cli` 是否存在
+- 只读列出 tool surface / workspace context
+- 把这些信息安全地暴露给 `doctor` / `inspect`
 
-- 更强的 transcript/export 结构
-- 更完整的 review-report 自动规范化
-- 与 `inspect` / `resume` 的更深层集成
+### Phase 3+
+
+再之后才考虑：
+
+- context seeding / selection automation
+- capture / transcript normalization
+- managed-agent bridge
+- 更深的 `inspect` / provenance / review contract 自动化
 
 ## 12. 一句话结论
 

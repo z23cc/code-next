@@ -242,6 +242,20 @@ class RunHostDiagnostics(ModelBase):
     requires_explicit_review_handoff: bool
 
 
+class RunBridgeDiagnostics(ModelBase):
+    """RP bridge summary relevant to operator action."""
+
+    mode: str
+    workspace: str | None = None
+    tab: str | None = None
+    context_id: str | None = None
+    agent_role: str | None = None
+    timeout_seconds: int | None = None
+    export_transcript: bool = False
+    summary: str
+    handoff_artifacts: list[str] = Field(default_factory=list)
+
+
 class RunDiagnostics(ModelBase):
     """Structured diagnostics/explainability surface for a workflow run."""
 
@@ -258,6 +272,7 @@ class RunDiagnostics(ModelBase):
     error: str | None = None
     error_code: ErrorCode | None = None
     host: RunHostDiagnostics
+    bridge: RunBridgeDiagnostics | None = None
     key_artifacts: list[RunArtifactRef] = Field(default_factory=list)
     stage_timeline: list[RunTimelineEntry] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=utc_now)

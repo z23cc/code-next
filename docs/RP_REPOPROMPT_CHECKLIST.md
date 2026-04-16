@@ -47,17 +47,25 @@ Validation notes:
 
 目标：让 `--bridge` manual-assist 在不调用真实 `rp-cli` 的前提下达到“可用”。
 
-- [ ] 在 diagnostics / inspect 中加入 bridge-specific summary
-- [ ] 补充 resume / review 对 `rp_bridge` 的完整 round-trip 测试
-- [ ] 增加 bridge contract downgrade / unsupported mode 负向测试
-- [ ] 明确 `--bridge` 的 operator next actions
-- [ ] 更新使用文档，给出清晰 manual-assist 操作步骤
+- [x] 在 diagnostics / inspect 中加入 bridge-specific summary
+- [x] 补充 resume / review 对 `rp_bridge` 的完整 round-trip 测试
+- [x] 增加 bridge contract downgrade / unsupported mode 负向测试
+- [x] 明确 `--bridge` 的 operator next actions
+- [x] 更新使用文档，给出清晰 manual-assist 操作步骤
 
 Exit criteria:
 
-- [ ] bridge-enabled manual flow 可稳定运行
-- [ ] `inspect` 可清楚展示 bridge 状态与下一步
-- [ ] 文档可指导真实操作
+- [x] bridge-enabled manual flow 可稳定运行
+- [x] `inspect` 可清楚展示 bridge 状态与下一步
+- [x] 文档可指导真实操作
+
+Validation notes:
+
+- 日期：2026-04-16
+- P1 结论：manual-assist 现在已经达到“可用”门槛；`inspect`/`run-diagnostics.json` 会给出 bridge summary、handoff artifact 和 operator next actions，`resume` / `run review` 会稳定恢复同一份 `rp_bridge` metadata。
+- 已执行命令：`uv run aiwf contracts lint`
+- 已执行命令：`uv run pytest tests/test_engine.py tests/test_cli.py tests/test_adapter_contracts.py tests/test_adapter_rp.py tests/test_compile.py tests/test_doctor.py -q`
+- 结果：`contracts lint` 通过；focused pytest `137 passed`
 
 ---
 
@@ -161,7 +169,7 @@ Exit criteria:
 当前阶段：
 
 - [x] P0 completed
-- [ ] P1 pending
+- [x] P1 completed
 - [ ] P2 pending
 - [ ] P3 pending
 - [ ] P4 pending
