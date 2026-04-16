@@ -198,6 +198,71 @@ Validation notes:
 
 ---
 
+## P7 — Session/workspace restore and identity truthfulness
+
+目标：补齐 session/workspace 解析与恢复语义，让 managed-agent 恢复行为和 operator surface 与真实 bridge 能力一致。
+
+- [x] bridge transport 增强：`manage_workspaces` / `bind_context` / richer `agent_manage` transcript-handoff surface
+- [x] adapter 恢复逻辑：managed-agent `resume` 复用已有 session，而不是盲目新建
+- [x] run metadata / diagnostics / inspect 持久化 resolved bridge identity 与 transcript/handoff/session-recovery 元数据
+- [x] manual fallback 语义保持不变
+
+Exit criteria:
+
+- [x] managed-agent 可恢复路径与已有 session 绑定一致
+- [x] session/workspace identity 与 handoff/recovery 证据可见且可恢复
+
+---
+
+## P8 — Context composition + advisory oracle (bridge path)
+
+目标：在 bridge path 中加入可选的上下文组合与 advisory oracle 捕获，并明确不替代 review contract。
+
+- [x] bridge transport 增强：`context_builder` / `ask_oracle` / deeper `workspace_context` snapshot typing
+- [x] adapter 在 bridge seeding/managed flow 中支持 additive + opt-in 的 context composition
+- [x] advisory oracle 输出单独持久化（如 `rp-bridge-oracle.json`），不覆盖 `review-report.json` contract
+- [x] CLI/doctor truth surface 补齐（可见 composition/oracle 配置与artifact状态）
+
+Exit criteria:
+
+- [x] composition/oracle 都是 opt-in，默认行为不变
+- [x] oracle 只做 advisory，不绕过 review contract
+
+---
+
+## P9 — Repo exploration/read surfaces (read-only)
+
+目标：把 RepoPrompt 的探索/读取能力接入 bridge 并保持严格只读边界。
+
+- [x] bridge 新增 `file_search` 与更完整 `read_file` range surface
+- [x] adapter/CLI 在任务驱动或 operator 驱动场景中可显式触发 read-only exploration
+- [x] 探索/读取结果以 artifact/diagnostics 方式可追踪落盘
+- [x] 明确不引入任何编辑/文件变更能力
+
+Exit criteria:
+
+- [x] `file_search` + deeper `read_file` 可经 bridge 使用
+- [x] 全路径保持 read-only，行为与 artifact 显式可审计
+
+---
+
+## P10 — Destructive bridge surfaces (gated)
+
+目标：补齐 destructive transport/contract/gating 与受控 orchestration/operator surface，默认保持关闭。
+
+- [x] transport 层支持 `apply_edits` / `file_actions` typed 调用面（P10A）
+- [x] contract/config/schema 增加 destructive gating foundation，默认 off（P10A）
+- [x] adapter-level destructive flow 仅在 contract + config + capability gates 全部通过时可达（P10B）
+- [x] clean-repo preflight、blocked/partial-failure handling、deterministic edit artifact/status 持久化（P10B）
+- [x] CLI/doctor 增加 destructive path truth surface（状态、前提、告警）
+
+Exit criteria:
+
+- [x] 默认行为与既有非 destructive 路径保持一致
+- [x] destructive path 受控、可审计、失败可恢复
+
+---
+
 ## 当前顺序
 
 当前执行顺序固定为：
@@ -210,6 +275,10 @@ Validation notes:
 6. P5
 7. P6
 8. P7
+9. P8
+10. P9
+11. P10
+12. P11
 
 当前阶段：
 
@@ -221,3 +290,7 @@ Validation notes:
 - [x] P5 completed
 - [x] P6 completed
 - [x] P7 completed (session/workspace foundation + orchestration/operator wiring)
+- [x] P8 completed (context composition + advisory oracle foundations/orchestration)
+- [x] P9 completed (bridge read-only exploration/read surfaces)
+- [x] P10 completed (destructive transport + gated orchestration/operator surfaces; defaults remain off)
+- [x] P11 completed (docs/checklist/tracker closure for P7–P10)

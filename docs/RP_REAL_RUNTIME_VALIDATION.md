@@ -96,6 +96,8 @@ If the real runtime probe fails or the conformance run does not pass cleanly:
 - do **not** treat native RP auto/provider mode as supported product behavior, and
 - continue using `--bridge` / manual-assist / managed-agent flows as the supported integration path.
 
+As of P7–P10 landing (2026-04-17), bridge orchestration now includes richer session recovery, context composition/oracle advisory surfaces, read-only exploration, and gated destructive transports. That does **not** change this certification rule: bridge capability/readiness and native-provider certification remain separate signals.
+
 ## Heuristic notes for doctor
 
 Current `doctor` labels a detected binary as `stub-like` when it matches signs such as:

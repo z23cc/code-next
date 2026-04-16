@@ -395,6 +395,26 @@ bridge 更现实，原因有三点：
 - 不新增外部 runtime guarantees
 - 仍然不改变 `rp/manual` host contract 本身；managed-agent 只是 bridge mode
 
+### Phase 6 — real runtime certification posture（已落地）
+
+> **Status (2026-04-17): P6 completed.** runtime scope labeling 与 real-runtime certification 流程已在 conformance/doctor 与 `docs/RP_REAL_RUNTIME_VALIDATION.md` 落地。bridge readiness 与 native-provider certification 已明确分离。
+
+### Phase 7 — session/workspace recovery truthfulness（已落地）
+
+> **Status (2026-04-17): P7 completed.** bridge transport 与 adapter 恢复路径已补齐 session/workspace 解析与 transcript/handoff/recovery metadata 持久化；managed-agent `resume` 复用已有 session；manual fallback 保持不变。
+
+### Phase 8 — context composition + advisory oracle（已落地）
+
+> **Status (2026-04-17): P8 completed.** bridge 已支持 opt-in 的 context composition（`context_builder` 等）与 advisory oracle 捕获；oracle artifact 与 review contract artifact 分离，oracle 不替代 `review-report.json`。
+
+### Phase 9 — read-only exploration/read surfaces（已落地）
+
+> **Status (2026-04-17): P9 completed.** bridge 已支持 read-only `file_search` 与 deeper `read_file` 范围读取，并在 adapter/CLI surface 暴露显式探索路径与 artifact/diagnostics 追踪；未引入编辑能力。
+
+### Phase 10 — destructive bridge surfaces (gated)（已落地）
+
+> **Status (2026-04-17): P10 completed.** `apply_edits` / `file_actions` transport 与 destructive gates 已落地；adapter destructive flow 受 contract + config + capability gates 与 clean-repo preflight 共同控制；默认仍关闭，未开启时行为与既有非 destructive 路径一致。
+
 ## 12. 一句话结论
 
 如果真实 RepoPrompt CLI 不是 `aiwf` provider，最佳路线不是硬凑 provider 协议，  
