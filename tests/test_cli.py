@@ -11,7 +11,7 @@ from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.cli import app
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import ErrorCode
-from aiwf.models import RunStatus, TaskSpec
+from aiwf.models import RpBridgeRunConfig, RunStatus, TaskSpec
 from aiwf.state import RunStateManager
 
 
@@ -393,6 +393,165 @@ def test_cli_rp_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path)
     assert (ai_root / "runs" / run_id / "review-report.json").exists()
 
 
+def test_cli_rp_bridge_plan_command_persists_bridge_metadata(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "plan",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-workspace",
+            "workspace-alpha",
+        ],
+    )
+
+    assert result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    meta = RunStateManager(ai_root).load_run(run_id)
+    assert meta.data["host_contract"]["adapter"] == "rp"
+    assert meta.data["rp_bridge"] == {
+        "mode": "manual-assist",
+        "workspace": "workspace-alpha",
+        "tab": None,
+        "context_id": None,
+        "agent_role": None,
+        "timeout_seconds": None,
+        "export_transcript": False,
+    }
+
+
+def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    bridge_payload = {
+        "mode": "manual-assist",
+        "workspace": "workspace-alpha",
+        "tab": "implement-tab",
+        "context_id": "ctx-123",
+        "agent_role": "implementer",
+        "timeout_seconds": 900,
+        "export_transcript": True,
+    }
+
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-workspace",
+            "workspace-alpha",
+            "--bridge-tab",
+            "implement-tab",
+            "--bridge-context-id",
+            "ctx-123",
+            "--bridge-agent-role",
+            "implementer",
+            "--bridge-timeout",
+            "900",
+            "--bridge-export-transcript",
+        ],
+    )
+
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    meta = RunStateManager(ai_root).load_run(run_id)
+    assert meta.data["rp_bridge"] == bridge_payload
+    assert "RepoPrompt Bridge Context" in (ai_root / "runs" / run_id / "rp-agent-implement-prompt.md").read_text(encoding="utf-8")
+
+    resume_result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert resume_result.exit_code == 0
+
+    review_result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert review_result.exit_code == 0
+
+    inspect_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+        ],
+    )
+    assert inspect_result.exit_code == 0
+    assert "bridge=mode=manual-assist" in inspect_result.stdout
+    assert "workspace=workspace-alpha" in inspect_result.stdout
+    assert "tab=implement-tab" in inspect_result.stdout
+    assert "context_id=ctx-123" in inspect_result.stdout
+    assert "agent_role=implementer" in inspect_result.stdout
+
+    inspect_json_result = runner.invoke(
+        app,
+        [
+            "inspect",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--json",
+        ],
+    )
+    assert inspect_json_result.exit_code == 0
+    inspect_payload = json.loads(inspect_json_result.stdout)
+    assert inspect_payload["rp_bridge"] == bridge_payload
+    assert inspect_payload["review_report"]["bridge"] == bridge_payload
+
+    final_resume = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+    assert final_resume.exit_code == 0
+    resumed_meta = RunStateManager(ai_root).load_run(run_id)
+    assert resumed_meta.status.value == "passed"
+    assert resumed_meta.data["rp_bridge"] == bridge_payload
+
+
 def test_cli_codex_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
 
@@ -519,7 +678,7 @@ def test_cli_review_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
         },
     )
 
-    seen: list[HostContract | None] = []
+    seen: list[tuple[HostContract | None, RpBridgeRunConfig | None]] = []
 
     class FakeEngine:
         def run_review(self, captured_run_id: str) -> str:
@@ -533,12 +692,13 @@ def test_cli_review_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
         adapter_name: str | None = None,
         auto: bool = False,
         host_contract: HostContract | None = None,
+        bridge_config: RpBridgeRunConfig | None = None,
     ) -> FakeEngine:
         assert ai_root_arg == ai_root
         assert repo_root_arg == repo_root
         assert adapter_name is None
         assert auto is False
-        seen.append(host_contract)
+        seen.append((host_contract, bridge_config))
         return FakeEngine()
 
     monkeypatch.setattr("aiwf.cli._build_engine", fake_build_engine)
@@ -559,20 +719,23 @@ def test_cli_review_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
 
     assert result.exit_code == 0
     assert seen == [
-        HostContract(
-            adapter="claude",
-            mode="auto",
-            capabilities=HostCapabilities(
-                supports_auto_execution=True,
-                requires_explicit_review_handoff=False,
+        (
+            HostContract(
+                adapter="claude",
+                mode="auto",
+                capabilities=HostCapabilities(
+                    supports_auto_execution=True,
+                    requires_explicit_review_handoff=False,
+                ),
+                review=ReviewArtifactContract(
+                    required_run_artifacts=("verify-report.json",),
+                    required_report_string_fields=("summary", "mode", "response_file"),
+                    required_report_list_fields=("issues",),
+                    expected_report_mode="auto",
+                    linked_report_artifact_field="response_file",
+                ),
             ),
-            review=ReviewArtifactContract(
-                required_run_artifacts=("verify-report.json",),
-                required_report_string_fields=("summary", "mode", "response_file"),
-                required_report_list_fields=("issues",),
-                expected_report_mode="auto",
-                linked_report_artifact_field="response_file",
-            ),
+            None,
         )
     ]
 
@@ -609,7 +772,7 @@ def test_cli_resume_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
         },
     )
 
-    seen: list[HostContract | None] = []
+    seen: list[tuple[HostContract | None, RpBridgeRunConfig | None]] = []
 
     class FakeEngine:
         def resume(self, captured_run_id: str) -> str:
@@ -623,12 +786,13 @@ def test_cli_resume_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
         adapter_name: str | None = None,
         auto: bool = False,
         host_contract: HostContract | None = None,
+        bridge_config: RpBridgeRunConfig | None = None,
     ) -> FakeEngine:
         assert ai_root_arg == ai_root
         assert repo_root_arg == repo_root
         assert adapter_name is None
         assert auto is False
-        seen.append(host_contract)
+        seen.append((host_contract, bridge_config))
         return FakeEngine()
 
     monkeypatch.setattr("aiwf.cli._build_engine", fake_build_engine)
@@ -647,22 +811,300 @@ def test_cli_resume_builds_engine_from_stored_run_metadata(tmp_path: Path, monke
 
     assert result.exit_code == 0
     assert seen == [
-        HostContract(
-            adapter="claude",
-            mode="auto",
-            capabilities=HostCapabilities(
-                supports_auto_execution=True,
-                requires_explicit_review_handoff=False,
+        (
+            HostContract(
+                adapter="claude",
+                mode="auto",
+                capabilities=HostCapabilities(
+                    supports_auto_execution=True,
+                    requires_explicit_review_handoff=False,
+                ),
+                review=ReviewArtifactContract(
+                    required_run_artifacts=("verify-report.json",),
+                    required_report_string_fields=("summary", "mode", "response_file"),
+                    required_report_list_fields=("issues",),
+                    expected_report_mode="auto",
+                    linked_report_artifact_field="response_file",
+                ),
             ),
-            review=ReviewArtifactContract(
-                required_run_artifacts=("verify-report.json",),
-                required_report_string_fields=("summary", "mode", "response_file"),
-                required_report_list_fields=("issues",),
-                expected_report_mode="auto",
-                linked_report_artifact_field="response_file",
-            ),
+            None,
         )
     ]
+
+
+def test_cli_rejects_bridge_when_adapter_is_not_rp(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "plan",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "claude",
+            "--bridge",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "supported with --adapter rp" in result.stdout
+
+
+def test_cli_rejects_bridge_when_auto_mode_is_requested(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--auto",
+            "--bridge",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "only supported with RP manual mode" in result.stdout
+
+
+def test_cli_rejects_unsupported_bridge_mode(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "plan",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+            "--bridge",
+            "--bridge-mode",
+            "managed-agent",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "not supported in this slice" in result.stdout
+
+
+def test_cli_review_builds_engine_from_stored_bridge_metadata(tmp_path: Path, monkeypatch) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    state_manager = RunStateManager(ai_root)
+    state_manager.update_run(
+        run_id,
+        data={
+            "host_contract": {
+                "adapter": "rp",
+                "mode": "manual",
+                "capabilities": {
+                    "supports_auto_execution": False,
+                    "requires_explicit_review_handoff": True,
+                },
+            },
+            "rp_bridge": {
+                "mode": "manual-assist",
+                "workspace": "workspace-alpha",
+                "tab": "implement-tab",
+                "context_id": "ctx-123",
+                "agent_role": "implementer",
+                "timeout_seconds": 900,
+                "export_transcript": True,
+            },
+        },
+    )
+
+    seen: list[tuple[HostContract | None, RpBridgeRunConfig | None]] = []
+
+    class FakeEngine:
+        def run_review(self, captured_run_id: str) -> str:
+            assert captured_run_id == run_id
+            return captured_run_id
+
+    def fake_build_engine(
+        ai_root_arg: Path,
+        repo_root_arg: Path,
+        *,
+        adapter_name: str | None = None,
+        auto: bool = False,
+        host_contract: HostContract | None = None,
+        bridge_config: RpBridgeRunConfig | None = None,
+    ) -> FakeEngine:
+        assert ai_root_arg == ai_root
+        assert repo_root_arg == repo_root
+        assert adapter_name is None
+        assert auto is False
+        seen.append((host_contract, bridge_config))
+        return FakeEngine()
+
+    monkeypatch.setattr("aiwf.cli._build_engine", fake_build_engine)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "review",
+            "--run-id",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert len(seen) == 1
+    seen_host_contract, seen_bridge_config = seen[0]
+    assert seen_host_contract is not None
+    assert seen_host_contract.adapter == "rp"
+    assert seen_host_contract.mode == "manual"
+    assert seen_host_contract.review.linked_report_artifact_field == "prompt_file"
+    assert seen_host_contract.bridge.enabled is True
+    assert seen_bridge_config == RpBridgeRunConfig(
+        mode="manual-assist",
+        workspace="workspace-alpha",
+        tab="implement-tab",
+        context_id="ctx-123",
+        agent_role="implementer",
+        timeout_seconds=900,
+        export_transcript=True,
+    )
+
+
+def test_cli_resume_builds_engine_from_stored_bridge_metadata(tmp_path: Path, monkeypatch) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    implement_result = runner.invoke(
+        app,
+        [
+            "run",
+            "implement",
+            "--task",
+            str(task_path),
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+            "--adapter",
+            "rp",
+        ],
+    )
+    assert implement_result.exit_code == 0
+    run_id = next((ai_root / "runs").iterdir()).name
+    state_manager = RunStateManager(ai_root)
+    state_manager.update_run(
+        run_id,
+        data={
+            "host_contract": {
+                "adapter": "rp",
+                "mode": "manual",
+                "capabilities": {
+                    "supports_auto_execution": False,
+                    "requires_explicit_review_handoff": True,
+                },
+            },
+            "rp_bridge": {
+                "mode": "manual-assist",
+                "workspace": "workspace-alpha",
+                "tab": "implement-tab",
+                "context_id": "ctx-123",
+                "agent_role": "implementer",
+                "timeout_seconds": 900,
+                "export_transcript": True,
+            },
+        },
+    )
+
+    seen: list[tuple[HostContract | None, RpBridgeRunConfig | None]] = []
+
+    class FakeEngine:
+        def resume(self, captured_run_id: str) -> str:
+            assert captured_run_id == run_id
+            return captured_run_id
+
+    def fake_build_engine(
+        ai_root_arg: Path,
+        repo_root_arg: Path,
+        *,
+        adapter_name: str | None = None,
+        auto: bool = False,
+        host_contract: HostContract | None = None,
+        bridge_config: RpBridgeRunConfig | None = None,
+    ) -> FakeEngine:
+        assert ai_root_arg == ai_root
+        assert repo_root_arg == repo_root
+        assert adapter_name is None
+        assert auto is False
+        seen.append((host_contract, bridge_config))
+        return FakeEngine()
+
+    monkeypatch.setattr("aiwf.cli._build_engine", fake_build_engine)
+
+    result = runner.invoke(
+        app,
+        [
+            "resume",
+            run_id,
+            "--ai-root",
+            str(ai_root),
+            "--repo-root",
+            str(repo_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert len(seen) == 1
+    seen_host_contract, seen_bridge_config = seen[0]
+    assert seen_host_contract is not None
+    assert seen_host_contract.adapter == "rp"
+    assert seen_host_contract.mode == "manual"
+    assert seen_host_contract.review.linked_report_artifact_field == "prompt_file"
+    assert seen_host_contract.bridge.enabled is True
+    assert seen_bridge_config == RpBridgeRunConfig(
+        mode="manual-assist",
+        workspace="workspace-alpha",
+        tab="implement-tab",
+        context_id="ctx-123",
+        agent_role="implementer",
+        timeout_seconds=900,
+        export_transcript=True,
+    )
 
 
 def test_cli_rejects_auto_when_adapter_contract_does_not_support_it(tmp_path: Path) -> None:
@@ -687,6 +1129,26 @@ def test_cli_rejects_auto_when_adapter_contract_does_not_support_it(tmp_path: Pa
 
     assert result.exit_code == 1
     assert "does not support auto mode" in result.stdout
+
+
+def test_cli_run_plan_help_marks_stub_internal_and_rp_auto_experimental() -> None:
+    result = runner.invoke(app, ["run", "plan", "--help"])
+
+    assert result.exit_code == 0
+    assert "internal/test-only" in result.stdout
+    assert "--auto" in result.stdout
+    assert "experimental" in result.stdout
+    assert "--bridge" in result.stdout
+    assert "--bridge-workspace" in result.stdout
+
+
+def test_cli_conformance_rp_help_targets_real_repoprompt_runtime() -> None:
+    result = runner.invoke(app, ["conformance", "rp", "--help"])
+
+    assert result.exit_code == 0
+    assert "official target is the real RepoPrompt app" in result.stdout
+    assert "rp-cli-stub" in result.stdout
+    assert "reference/test-only" in result.stdout
 
 
 def test_cli_contract_lint_command_succeeds() -> None:

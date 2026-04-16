@@ -21,6 +21,8 @@
 - `docs/QUICKSTART.md`：快速上手
 - `docs/INSTALL_GUIDE.md`：RP / Claude 编译产物的安装与集成方式
 - `docs/compatibility-policy.md`：run metadata / host contract / projection 兼容性策略
+- `docs/RP_PROVIDER_GAP_ANALYSIS.md`：真实 RepoPrompt CLI 与 aiwf provider 期待之间的差距分析
+- `docs/RP_BRIDGE_DESIGN.md`：基于真实 `rp-cli` tool surface 的 bridge 集成方案
 
 ## 安装
 
@@ -51,9 +53,9 @@ uv run aiwf compile codex --output .codex/compiled
 
 说明：
 
-- 支持适配器：`claude` / `rp` / `codex` / `stub`。
-- `--auto` 仅在宿主契约声明支持自动执行时生效；当前 `claude` 与 `rp` 支持 auto，`codex` 仍是 manual-only。
-- `rp` 当前是 native-ready：若 PATH 上有 `rp` / `rp-cli` 可走 `--auto`，否则仍可走 manual handoff + `resume`。
+- 支持适配器：`claude` / `rp` / `codex` / `stub`（其中 `stub` 仅用于仓库内测试）。
+- `--auto` 仅在宿主契约声明支持自动执行时生效；当前 `claude` 是稳定 auto 路径，`rp` 仅保留实验性 auto/native 路径，`codex` 仍是 manual-only。
+- `rp` 当前稳定路径是 manual handoff + `resume`。产品层面唯一官方 RP target 是真实 RepoPrompt app / MCP CLI runtime；仓库内的 `rp-cli-stub` 仅用于协议/CI 测试，不代表真实 RepoPrompt runtime readiness。
 - `codex` 当前仍是 manual-first（通过 handoff prompt + `resume` 流程推进）。
 - `run review` 基于已有 run（`--run-id`），并按已存储的 `host_contract.review` 契约校验证据。
 
@@ -76,7 +78,7 @@ uv run aiwf compile codex --output .codex/compiled
   codex-review-prompt.md
   rp-agent-implement-prompt.md   # manual RP handoff
   rp-agent-review-prompt.md
-  rp-agent-implement-response.md # RP auto/native
+  rp-agent-implement-response.md # RP experimental auto/native
   rp-agent-review-response.md
   claude-implement-response.md   # Claude auto
   claude-review-response.md

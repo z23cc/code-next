@@ -33,6 +33,15 @@
           "enabled": false,
           "command_candidates": [],
           "install_hint": null
+        },
+        "bridge": {
+          "enabled": false,
+          "default_mode": "disabled",
+          "supported_modes": [
+            "disabled"
+          ],
+          "command_candidates": [],
+          "install_hint": null
         }
       },
       "auto": {
@@ -59,6 +68,15 @@
         },
         "native_runtime": {
           "enabled": false,
+          "command_candidates": [],
+          "install_hint": null
+        },
+        "bridge": {
+          "enabled": false,
+          "default_mode": "disabled",
+          "supported_modes": [
+            "disabled"
+          ],
           "command_candidates": [],
           "install_hint": null
         }

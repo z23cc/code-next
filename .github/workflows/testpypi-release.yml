@@ -97,22 +97,24 @@ jobs:
             echo "Package not visible on TestPyPI yet; retrying in 30s (attempt ${attempt}/5)..."
             sleep 30
           done
+          # Reference harness only: rp-cli-stub exercises aiwf's RP protocol path, not a production RepoPrompt runtime.
           python -m pip install ./tools/rp-cli-stub
           reported_version="$(python -m aiwf --version)"
           test "$reported_version" = "$AIWF_VERSION"
-          python -m aiwf conformance rp --rp-command rp-cli-stub --json | tee testpypi-rp-conformance-report.json
+          python -m aiwf conformance rp --rp-command rp-cli-stub --json | tee testpypi-rp-reference-conformance-report.json
           {
             echo "## TestPyPI Install Smoke"
             echo
             echo "- package: `aiwf==${AIWF_VERSION}`"
             echo "- index: `https://test.pypi.org/simple/`"
             echo "- reported version: `${reported_version}`"
-            echo "- rp conformance: `passed`"
+            echo "- rp reference-stub conformance: `passed`"
+            echo "  - This validates aiwf against `rp-cli-stub` only; it does not certify the real RepoPrompt app / MCP CLI runtime."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload RP conformance report on failure
+      - name: Upload RP reference conformance report on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: aiwf-testpypi-rp-conformance-report
-          path: testpypi-rp-conformance-report.json
+          name: aiwf-testpypi-rp-reference-conformance-report
+          path: testpypi-rp-reference-conformance-report.json

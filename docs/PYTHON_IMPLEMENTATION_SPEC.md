@@ -4,7 +4,7 @@
 
 实现一个名为 `aiwf` 的 Python 工作流内核，作用是把任务输入、runbook 语义、上下文发现、宿主执行、gates、artifacts 和 resume 串成一个稳定流程。
 
-这个内核是 RepoPrompt Agent Run、Claude Code、Codex 的共享底座；当前实现已覆盖多宿主（Claude/RP/Codex/stub）与显式契约治理。Claude 与 RP 支持 manual/auto 双模式；Codex 仍是 manual-first。RP 的 auto 依赖 PATH 上可用的 `rp` / `rp-cli` native runtime。
+这个内核面向真实 RepoPrompt app / MCP CLI runtime、Claude Code、Codex；当前实现已覆盖多宿主（Claude/RP/Codex，另含 internal stub test adapter）与显式契约治理。Claude 支持稳定 manual/auto 双模式；RP 的稳定路径是 manual handoff，auto/native 仅保留为面向真实 RepoPrompt runtime 的实验性路径；Codex 仍是 manual-first。
 
 ## 2. 设计立场
 
@@ -247,8 +247,8 @@ uv run aiwf compile codex
 - schema 稳定
 - 状态可恢复
 - artifact 可落盘
-- 多宿主路径可跑通（Claude/RP/Codex/stub）
-- manual-first 与 auto（Claude/RP）边界清晰
+- 多宿主路径可跑通（Claude/RP/Codex；`stub` 仅用于内部测试）
+- manual-first 与 auto 边界清晰，其中 Claude auto 稳定，RP auto/native 仅是面向真实 RepoPrompt runtime 的实验性路径
 
 可以暂缓这些：
 - Codex 的 native execution（当前仍 manual-first）

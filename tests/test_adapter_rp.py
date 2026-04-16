@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import sys
 from pathlib import Path
 
 import pytest
 
-from aiwf.adapters.rp_agent import RpAgentAdapter
+from aiwf.adapters.base import BridgeContract
+from aiwf.adapters.rp_agent import RP_MANUAL_CONTRACT, RpAgentAdapter
 from aiwf.exceptions import AdapterError, ErrorCode
-from aiwf.models import RunStatus, TaskSpec
+from aiwf.models import RpBridgeRunConfig, RunStatus, TaskSpec
 
 
 def test_rp_agent_adapter_generates_manual_handoff_outputs(tmp_path: Path) -> None:
@@ -55,13 +57,88 @@ def test_rp_agent_adapter_generates_manual_handoff_outputs(tmp_path: Path) -> No
         "rp-agent-implement-prompt.md",
     ]
     assert (run_dir / "rp-agent-review-prompt.md").exists()
+    implement_prompt_text = (run_dir / "rp-agent-implement-prompt.md").read_text(encoding="utf-8")
+    assert "RepoPrompt Bridge Context" not in implement_prompt_text
     prompt_text = (run_dir / "rp-agent-review-prompt.md").read_text(encoding="utf-8")
+    assert "RepoPrompt Bridge Context" not in prompt_text
     assert "run-diagnostics.json" in prompt_text
     assert "run-provenance.json" in prompt_text
     assert "Evidence summary:" in prompt_text
     assert "verify: gate_set=default passed=True" in prompt_text
     assert "diagnostics: status=needs_review reviewable=True resumable=False" in prompt_text
     assert "provenance: gate_report=" in prompt_text
+
+
+def test_rp_agent_adapter_rejects_bridge_config_when_contract_bridge_is_disabled(tmp_path: Path) -> None:
+    repo_root, _, _ = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(mode="manual-assist")
+    disabled_bridge_contract = replace(RP_MANUAL_CONTRACT, bridge=BridgeContract())
+
+    with pytest.raises(ValueError, match="does not support bridge"):
+        RpAgentAdapter(repo_root=repo_root, host_contract=disabled_bridge_contract, bridge_config=bridge_config)
+
+
+def test_rp_agent_adapter_rejects_bridge_config_when_mode_is_unsupported(tmp_path: Path) -> None:
+    repo_root, _, _ = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(mode="manual-assist")
+    unsupported_bridge_contract = replace(
+        RP_MANUAL_CONTRACT,
+        bridge=BridgeContract(
+            enabled=True,
+            default_mode="disabled",
+            supported_modes=("disabled",),
+            command_candidates=("rp",),
+            install_hint="Install rp bridge tooling.",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not supported"):
+        RpAgentAdapter(repo_root=repo_root, host_contract=unsupported_bridge_contract, bridge_config=bridge_config)
+
+
+def test_rp_agent_adapter_rejects_bridge_config_in_auto_mode(tmp_path: Path) -> None:
+    repo_root, _, _ = _create_workspace(tmp_path)
+
+    with pytest.raises(ValueError, match="only supported with RP manual mode"):
+        RpAgentAdapter(
+            repo_root=repo_root,
+            auto=True,
+            bridge_config=RpBridgeRunConfig(mode="manual-assist"),
+        )
+
+
+def test_rp_agent_adapter_manual_bridge_enriches_prompt_artifacts_and_metadata(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(
+        mode="manual-assist",
+        workspace="workspace-alpha",
+        tab="implement-tab",
+        context_id="ctx-123",
+        agent_role="implementer",
+        timeout_seconds=900,
+        export_transcript=True,
+    )
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config)
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+    review = adapter.review(task, run_dir)
+
+    implement_prompt_text = (run_dir / "rp-agent-implement-prompt.md").read_text(encoding="utf-8")
+    review_prompt_text = (run_dir / "rp-agent-review-prompt.md").read_text(encoding="utf-8")
+
+    assert "## RepoPrompt Bridge Context (manual-assist)" in implement_prompt_text
+    assert "- workspace: workspace-alpha" in implement_prompt_text
+    assert "- tab: implement-tab" in implement_prompt_text
+    assert "- context_id: ctx-123" in implement_prompt_text
+    assert "- agent_role: implementer" in implement_prompt_text
+    assert "## RepoPrompt Bridge Context (manual-assist)" in review_prompt_text
+    assert result.metadata["bridge"] == bridge_config.model_dump(mode="json", exclude_none=True)
+    assert review["bridge"] == bridge_config.model_dump(mode="json", exclude_none=True)
+    assert result.metadata["prompt_file"] == "rp-agent-implement-prompt.md"
+    assert review["prompt_file"] == "rp-agent-review-prompt.md"
+    assert review["mode"] == "manual"
 
 
 def test_rp_agent_adapter_auto_mode_uses_subprocess_output(tmp_path: Path) -> None:

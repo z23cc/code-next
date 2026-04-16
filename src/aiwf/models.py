@@ -42,6 +42,7 @@ class RunStatus(str, Enum):
 
 
 StagePauseStatus = Literal["blocked", "needs_review"]
+RpBridgeMode = Literal["disabled", "manual-assist"]
 
 
 class StageSpec(ModelBase):
@@ -171,6 +172,36 @@ class RunMeta(ModelBase):
     error: str | None = None
     error_code: ErrorCode | None = None
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+class RpBridgeRunConfig(ModelBase):
+    """Validated per-run RepoPrompt bridge configuration persisted in run metadata."""
+
+    mode: RpBridgeMode
+    workspace: StrictStr | None = None
+    tab: StrictStr | None = None
+    context_id: StrictStr | None = None
+    agent_role: StrictStr | None = None
+    timeout_seconds: StrictInt | None = None
+    export_transcript: StrictBool = False
+
+    @field_validator("workspace", "tab", "context_id", "agent_role")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def validate_timeout_seconds(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("timeout_seconds must be greater than 0")
+        return value
 
 
 class WorkReceipt(ModelBase):

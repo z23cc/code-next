@@ -279,7 +279,11 @@ def _check_host_tools() -> list[DoctorCheck]:
     checks.append(_tool_check("uv", required=False, reason="recommended for local aiwf commands"))
     checks.append(_tool_check("git", required=False, reason="useful for repo-aware workflows"))
     checks.append(_tool_check("claude", required=False, reason="needed for Claude adapter workflows"))
-    checks.append(_check_native_runtime("rp", ADAPTER_SPECS["rp"].resolve_contract()))
+    rp_contract = ADAPTER_SPECS["rp"].resolve_contract()
+    checks.append(_check_native_runtime("rp", rp_contract))
+    bridge_check = _check_bridge_runtime("rp", rp_contract)
+    if bridge_check is not None:
+        checks.append(bridge_check)
     return checks
 
 
@@ -305,9 +309,10 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                         category="tool",
                         name=adapter_name,
                         detail=(
-                            f"native runtime found via {command} at {resolved}; protocol probe reported "
+                            f"RP runtime found via {command} at {resolved}; protocol probe reported "
                             f"aiwf-rp-native v{detected_version}, but aiwf currently advertises v{declared_version}. "
-                            "Legacy/manual fallback remains available if negotiation cannot agree on a version."
+                            "Verify this is the real RepoPrompt app / MCP CLI runtime; manual handoff remains the "
+                            "stable supported path if negotiation cannot agree on a version."
                         ),
                         path=resolved,
                         protocol_supported=True,
@@ -318,8 +323,9 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                     category="tool",
                     name=adapter_name,
                     detail=(
-                        f"native-ready via {command} at {resolved}; protocol aiwf-rp-native v{detected_version} detected. "
-                        "Manual handoff remains available when auto execution is not desired."
+                        f"experimental RP auto runtime detected via {command} at {resolved}; protocol "
+                        f"aiwf-rp-native v{detected_version} detected. Verify this is the real RepoPrompt app / "
+                        "MCP CLI runtime, not a reference stub. Manual handoff remains the stable supported path."
                     ),
                     path=resolved,
                     protocol_supported=True,
@@ -330,8 +336,8 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
                 category="tool",
                 name=adapter_name,
                 detail=(
-                    f"native runtime found via {command} at {resolved}, but protocol negotiation support "
-                    f"was not detected; legacy text fallback remains available"
+                    f"RP runtime found via {command} at {resolved}, but protocol negotiation support "
+                    f"was not detected; treat RP auto/native as unavailable and use the stable manual handoff path"
                     + (
                         f" (aiwf advertises protocol v{declared_version})."
                         if declared_version is not None
@@ -349,8 +355,8 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
         category="tool",
         name=adapter_name,
         detail=(
-            "manual-only fallback active; native runtime contract is declared but no compatible "
-            f"RepoPrompt runtime was found on PATH ({candidates}). "
+            "stable manual handoff path active; no RepoPrompt runtime compatible with RP experimental "
+            f"auto/native was found on PATH ({candidates}). "
             + (
                 f"aiwf advertises protocol v{native_runtime.protocol_version}. "
                 if native_runtime.protocol_version is not None
@@ -359,6 +365,40 @@ def _check_native_runtime(adapter_name: str, contract: HostContract) -> DoctorCh
             + hint
         ),
         protocol_supported=False,
+    )
+
+
+def _check_bridge_runtime(adapter_name: str, contract: HostContract) -> DoctorCheck | None:
+    bridge = contract.bridge
+    if not bridge.enabled:
+        return None
+
+    bridge_name = f"{adapter_name}-bridge"
+    for command in bridge.command_candidates:
+        resolved = shutil.which(command)
+        if resolved:
+            return DoctorCheck(
+                status="ok",
+                category="tool",
+                name=bridge_name,
+                detail=(
+                    f"experimental RP bridge candidate detected via {command} at {resolved}; manual-assist groundwork only — "
+                    "no automated invocation in this slice. Manual handoff remains the stable supported path."
+                ),
+                path=resolved,
+            )
+
+    candidates = ", ".join(bridge.command_candidates) or "-"
+    detail = (
+        f"RP bridge candidate not found on PATH ({candidates}); bridge is groundwork-only and the stable manual handoff path remains active."
+    )
+    if bridge.install_hint:
+        detail = f"{detail} {bridge.install_hint}"
+    return DoctorCheck(
+        status="warn",
+        category="tool",
+        name=bridge_name,
+        detail=detail,
     )
 
 

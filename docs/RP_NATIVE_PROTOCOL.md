@@ -1,10 +1,12 @@
 # RP Native I/O Protocol Specification
 
-This document specifies the structured I/O protocol between `aiwf` and a RepoPrompt (RP) native runtime binary.
+This document specifies the structured I/O protocol between `aiwf` and a real RepoPrompt (RP) app / MCP CLI native runtime binary.
 
-**Status:** Design specification — not yet implemented in runtime code.
+**Status:** Design/reference specification — this repo ships a reference stub for protocol testing, but real RepoPrompt runtime integration must be verified against the actual app / MCP CLI runtime.
 
 **Audience:** RP runtime implementors, aiwf adapter maintainers, integration authors.
+
+> **Product-facing note:** `tools/rp-cli-stub` is an internal reference harness for exercising the protocol contract. Passing the stub does **not** certify readiness of the real RepoPrompt runtime.
 
 **Canonical code references:**
 
@@ -420,7 +422,7 @@ When this protocol is implemented, the following must hold:
 
 1. `_run_rp()` detects runtime protocol support via `--aiwf-protocol-version`.
 2. Protocol-aware requests use the JSON envelope; legacy runtimes receive raw text — no behavioral change.
-3. A mock RP runtime implementing protocol v1 passes the full implement→review flow with structured error recovery.
+3. A reference/mock RP runtime implementing protocol v1 passes the full implement→review flow with structured error recovery.
 4. `AdapterError` raised from protocol errors carries the `error.code` for downstream structured diagnostics.
 5. Legacy text-mode RP runtimes continue to work identically — all existing RP adapter tests pass without modification.
 6. `doctor` reports detected protocol version when checking RP runtime availability.

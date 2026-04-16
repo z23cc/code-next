@@ -8,9 +8,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
-from aiwf.adapters.base import HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
+from aiwf.adapters.base import BridgeContract, HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
 from aiwf.exceptions import AdapterError, ErrorCode
-from aiwf.models import RunStatus, StageResult, TaskSpec
+from aiwf.models import RpBridgeRunConfig, RunStatus, StageResult, TaskSpec
 
 
 # Safety-net exclusions applied before `.gitignore` rules.
@@ -49,10 +49,21 @@ RP_NATIVE_RUNTIME = NativeRuntimeContract(
     enabled=True,
     command_candidates=("rp", "rp-cli"),
     install_hint=(
-        "Install a RepoPrompt runtime on PATH (for example `rp` or `rp-cli`) "
-        "to make RP native-ready; manual handoff remains supported."
+        "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) "
+        "to try RP experimental auto/native execution; manual handoff remains the stable supported path."
     ),
     protocol_version=_RP_PROTOCOL_VERSION,
+)
+
+RP_BRIDGE_CONTRACT = BridgeContract(
+    enabled=True,
+    default_mode="manual-assist",
+    supported_modes=("disabled", "manual-assist"),
+    command_candidates=("rp", "rp-cli"),
+    install_hint=(
+        "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) "
+        "to use the experimental RP bridge (manual-assist groundwork only); manual handoff remains the stable supported path."
+    ),
 )
 
 RP_MANUAL_CONTRACT = HostContract(
@@ -70,6 +81,7 @@ RP_MANUAL_CONTRACT = HostContract(
         linked_report_artifact_field="prompt_file",
     ),
     native_runtime=RP_NATIVE_RUNTIME,
+    bridge=RP_BRIDGE_CONTRACT,
 )
 
 RP_AUTO_CONTRACT = HostContract(
@@ -100,6 +112,7 @@ class RpAgentAdapter:
         auto: bool | None = None,
         host_contract: HostContract | None = None,
         rp_command: Sequence[str] | None = None,
+        bridge_config: RpBridgeRunConfig | None = None,
         max_snapshot_entries: int = 60,
         rp_timeout: int = 300,
     ) -> None:
@@ -115,6 +128,13 @@ class RpAgentAdapter:
         if self.host_contract.mode not in {"manual", "auto"}:
             raise ValueError("RpAgentAdapter only supports manual or auto host contracts")
         self.auto = self.host_contract.auto
+        if bridge_config is not None and self.auto:
+            raise ValueError("Bridge is currently only supported with RP manual mode")
+        if bridge_config is not None and not self.host_contract.bridge.enabled:
+            raise ValueError("RpAgentAdapter received bridge_config but host contract does not support bridge")
+        if bridge_config is not None and bridge_config.mode not in self.host_contract.bridge.supported_modes:
+            raise ValueError("RpAgentAdapter bridge_config mode is not supported by the host contract")
+        self.bridge_config = bridge_config
         self.rp_command = list(rp_command) if rp_command is not None else None
         self.rp_timeout = rp_timeout
         self._selected_rp_command: tuple[str, ...] | None = None
@@ -190,12 +210,16 @@ class RpAgentAdapter:
 
         prompt_path = run_dir / "rp-agent-implement-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
+        metadata: dict[str, object] = {"mode": "manual", "prompt_file": prompt_path.name}
+        bridge_metadata = self._bridge_metadata()
+        if bridge_metadata is not None:
+            metadata["bridge"] = bridge_metadata
         return StageResult(
             stage="implement",
             status=RunStatus.blocked,
             summary=f"RepoPrompt implementation handoff prompt written for {task.title}",
             outputs=[prompt_path.name],
-            metadata={"mode": "manual", "prompt_file": prompt_path.name},
+            metadata=metadata,
         )
 
     def review(self, task: TaskSpec, run_dir: Path) -> dict[str, object]:
@@ -222,7 +246,7 @@ class RpAgentAdapter:
 
         prompt_path = run_dir / "rp-agent-review-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
-        return {
+        review_report = {
             # Contract-required fields validated by the shared review contract.
             "summary": f"RepoPrompt review handoff prompt written for {task.title}",
             "issues": [],
@@ -235,6 +259,10 @@ class RpAgentAdapter:
             "evidence_files": evidence_files,
             "evidence_summary": evidence_summary,
         }
+        bridge_metadata = self._bridge_metadata()
+        if bridge_metadata is not None:
+            review_report["bridge"] = bridge_metadata
+        return review_report
 
     def _run_rp(
         self,
@@ -505,19 +533,19 @@ class RpAgentAdapter:
         )
 
     def _build_execute_prompt(self, task: TaskSpec, plan: str, run_dir: Path) -> str:
-        return "\n".join(
-            [
-                f"Task: {task.title}",
-                "",
-                f"Run directory: {run_dir}",
-                "Implement the approved plan in the repository.",
-                "Preserve the aiwf artifact/state contract and prepare the repo for deterministic gates.",
-                "Do not redesign the host abstraction; keep changes scoped to the task.",
-                "",
-                "Plan:",
-                plan,
-            ]
-        )
+        lines = [
+            f"Task: {task.title}",
+            "",
+            f"Run directory: {run_dir}",
+            *self._render_bridge_context_block(stage="implement"),
+            "Implement the approved plan in the repository.",
+            "Preserve the aiwf artifact/state contract and prepare the repo for deterministic gates.",
+            "Do not redesign the host abstraction; keep changes scoped to the task.",
+            "",
+            "Plan:",
+            plan,
+        ]
+        return "\n".join(lines)
 
     def _build_review_prompt(
         self,
@@ -533,6 +561,7 @@ class RpAgentAdapter:
             f"Task: {task.title}",
             "",
             f"Run directory: {run_dir}",
+            *self._render_bridge_context_block(stage="review"),
             "Review the current implementation results and existing run artifacts.",
             "Focus on correctness, missing validation, follow-up work, and any mismatch between artifacts and run state.",
             "",
@@ -580,6 +609,38 @@ class RpAgentAdapter:
             ]
         )
         return "\n".join(lines)
+
+    def _render_bridge_context_block(self, *, stage: str) -> list[str]:
+        bridge_config = self._active_bridge_config()
+        if bridge_config is None:
+            return []
+
+        stage_label = "implementation" if stage == "implement" else stage
+        return [
+            "",
+            f"## RepoPrompt Bridge Context ({bridge_config.mode})",
+            f"- workspace: {bridge_config.workspace or '(unset — pick one in RepoPrompt)'}",
+            f"- tab: {bridge_config.tab or '(unset)'}",
+            f"- context_id: {bridge_config.context_id or '(unset)'}",
+            f"- agent_role: {bridge_config.agent_role or '(unset)'}",
+            "",
+            f"Operator steps before completing the {stage_label} handoff:",
+            "- Bind your RepoPrompt session to the workspace/tab above or your active session.",
+            "- Add the current aiwf run artifacts to your RepoPrompt context.",
+            f"- Continue the {stage_label} handoff in RepoPrompt using this brief.",
+            "",
+        ]
+
+    def _active_bridge_config(self) -> RpBridgeRunConfig | None:
+        if self.bridge_config is None or self.bridge_config.mode == "disabled":
+            return None
+        return self.bridge_config
+
+    def _bridge_metadata(self) -> dict[str, object] | None:
+        bridge_config = self._active_bridge_config()
+        if bridge_config is None:
+            return None
+        return bridge_config.model_dump(mode="json", exclude_none=True)
 
     def _snapshot_repo(self) -> list[str]:
         entries: list[str] = []

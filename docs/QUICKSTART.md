@@ -41,7 +41,9 @@ uv run aiwf resume <run_id>
 
 如果 gates 通过，run 会停在 `needs_review`；如果 gates 失败，修复后同样使用 `resume` 继续。
 
-`--auto` 仅在宿主契约声明支持自动执行时生效；当前 `claude` 与 `rp` 支持。RP 的 `--auto` 还要求 PATH 上有可用的 `rp` 或 `rp-cli`。
+`--auto` 仅在宿主契约声明支持自动执行时生效；当前 `claude` 可稳定使用 auto。`rp` 保留实验性 `--auto` 路径，但只应在已验证实现 `aiwf-rp-native/v1` 的真实 RepoPrompt app / MCP CLI runtime 上尝试；默认请使用 manual handoff + `resume`。
+
+`rp` 的 manual 模式还支持实验性的 `--bridge` groundwork 选项。当前它只会增强 manual handoff prompt、写入 `rp_bridge` run metadata，并让后续 `resume` / `run review` 自动恢复这份配置；**不会自动调用 rp-cli MCP/tools**。
 
 ## 5. 复核阶段
 

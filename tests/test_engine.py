@@ -13,7 +13,7 @@ from aiwf.adapters.rp_agent import RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AdapterError, ErrorCode, StateError
-from aiwf.models import RunStatus
+from aiwf.models import RpBridgeRunConfig, RunStatus
 from aiwf.state import RunStateManager
 
 
@@ -537,6 +537,72 @@ def test_manual_rp_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: P
     assert finalized_meta.status is RunStatus.passed
     assert finalized_meta.last_completed_stage == "review"
     assert receipt["status"] == "passed"
+
+
+def test_manual_rp_bridge_persists_and_restores_adapter_metadata(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(
+        mode="manual-assist",
+        workspace="workspace-alpha",
+        tab="implement-tab",
+        context_id="ctx-123",
+        agent_role="implementer",
+        timeout_seconds=900,
+        export_transcript=True,
+    )
+    engine = WorkflowEngine(
+        RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        bridge_config=bridge_config,
+    )
+
+    run_id = engine.run_implement(task_path)
+    run_dir = ai_root / "runs" / run_id
+    state_manager = RunStateManager(ai_root)
+    blocked_meta = state_manager.load_run(run_id)
+
+    assert blocked_meta.status is RunStatus.blocked
+    assert blocked_meta.last_completed_stage == "implement"
+    assert blocked_meta.data["rp_bridge"] == bridge_config.model_dump(mode="json")
+    assert "RepoPrompt Bridge Context" in (run_dir / "rp-agent-implement-prompt.md").read_text(encoding="utf-8")
+
+    resumed_engine = WorkflowEngine(
+        StubRunnerAdapter(),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        adapter_resolver=lambda contract, run_data: build_adapter_from_contract(contract, repo_root, run_data=run_data),
+    )
+
+    resumed_run_id = resumed_engine.resume(run_id)
+    needs_review_meta = state_manager.load_run(run_id)
+
+    assert resumed_run_id == run_id
+    assert needs_review_meta.status is RunStatus.needs_review
+    assert needs_review_meta.last_completed_stage == "gates"
+    assert needs_review_meta.data["rp_bridge"] == bridge_config.model_dump(mode="json")
+    assert isinstance(resumed_engine.adapter, RpAgentAdapter)
+    assert resumed_engine.bridge_config == bridge_config
+    assert resumed_engine.adapter.bridge_config == bridge_config
+
+    reviewed_run_id = resumed_engine.run_review(run_id)
+    reviewed_meta = state_manager.load_run(reviewed_run_id)
+    review_report = json.loads((run_dir / "review-report.json").read_text(encoding="utf-8"))
+
+    assert reviewed_run_id == run_id
+    assert reviewed_meta.status is RunStatus.blocked
+    assert reviewed_meta.last_completed_stage == "review"
+    assert review_report["bridge"] == bridge_config.model_dump(mode="json", exclude_none=True)
+    assert "RepoPrompt Bridge Context" in (run_dir / "rp-agent-review-prompt.md").read_text(encoding="utf-8")
+    assert not (run_dir / "work-receipt.json").exists()
+
+    finalized_run_id = resumed_engine.resume(run_id)
+    finalized_meta = state_manager.load_run(finalized_run_id)
+
+    assert finalized_run_id == run_id
+    assert finalized_meta.status is RunStatus.passed
+    assert finalized_meta.last_completed_stage == "review"
+    assert finalized_meta.data["rp_bridge"] == bridge_config.model_dump(mode="json")
 
 
 def test_manual_codex_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: Path) -> None:

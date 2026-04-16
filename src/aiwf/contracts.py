@@ -6,7 +6,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from aiwf.adapters.base import AdapterSpec, HostContract, NativeRuntimeContract, ReviewArtifactContract
+from aiwf.adapters.base import AdapterSpec, BridgeContract, HostContract, NativeRuntimeContract, ReviewArtifactContract
 
 
 @dataclass(frozen=True)
@@ -114,6 +114,7 @@ def lint_host_contract(contract: HostContract, *, subject: str = "host contract"
     review = contract.review
     issues.extend(_lint_review_contract(review, contract=contract))
     issues.extend(_lint_native_runtime_contract(contract.native_runtime))
+    issues.extend(_lint_bridge_contract(contract.bridge))
     return ContractLintResult(subject=subject, issues=tuple(issues))
 
 
@@ -289,6 +290,55 @@ def _lint_native_runtime_contract(native_runtime: NativeRuntimeContract) -> list
             ContractLintIssue(
                 code="disabled-native-runtime-has-command-candidates",
                 message="disabled native runtime contracts must not declare command candidates",
+            )
+        )
+    return issues
+
+
+def _lint_bridge_contract(bridge: BridgeContract) -> list[ContractLintIssue]:
+    issues: list[ContractLintIssue] = []
+    mode_duplicates = _find_duplicates(bridge.supported_modes)
+    if mode_duplicates:
+        issues.append(
+            ContractLintIssue(
+                code="duplicate-bridge-supported-modes",
+                message=f"bridge supported_modes contains duplicates: {', '.join(mode_duplicates)}",
+            )
+        )
+
+    command_duplicates = _find_duplicates(bridge.command_candidates)
+    if command_duplicates:
+        issues.append(
+            ContractLintIssue(
+                code="duplicate-bridge-command-candidates",
+                message=f"bridge command_candidates contains duplicates: {', '.join(command_duplicates)}",
+            )
+        )
+
+    if bridge.enabled and not bridge.command_candidates:
+        issues.append(
+            ContractLintIssue(
+                code="missing-bridge-command-candidates",
+                message="enabled bridge contracts must declare at least one command candidate",
+            )
+        )
+    if bridge.enabled and bridge.default_mode not in bridge.supported_modes:
+        issues.append(
+            ContractLintIssue(
+                code="bridge-default-mode-not-supported",
+                message="enabled bridge contracts must include default_mode in supported_modes",
+            )
+        )
+    if not bridge.enabled and (
+        bridge.default_mode != "disabled"
+        or bridge.supported_modes != ("disabled",)
+        or bridge.command_candidates
+        or bridge.install_hint is not None
+    ):
+        issues.append(
+            ContractLintIssue(
+                code="disabled-bridge-has-config",
+                message="disabled bridge contracts must use the default disabled configuration",
             )
         )
     return issues

@@ -5,8 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from aiwf.adapters.base import (
     AdapterSpec,
+    BridgeContract,
+    BridgeMode,
     HostCapabilities,
     HostContract,
     NativeRuntimeContract,
@@ -17,23 +21,42 @@ from aiwf.adapters.claude_code import ClaudeCodeAdapter
 from aiwf.adapters.codex import CodexAdapter
 from aiwf.adapters.rp_agent import RP_AUTO_CONTRACT, RP_MANUAL_CONTRACT, RpAgentAdapter
 from aiwf.adapters.stub import StubRunnerAdapter
+from aiwf.models import RpBridgeRunConfig
 
 
-def _build_claude_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
+def _build_claude_adapter(
+    repo_root: Path,
+    contract: HostContract,
+    run_data: Mapping[str, object] | None = None,
+) -> RunnerAdapter:
+    del run_data
     return ClaudeCodeAdapter(repo_root=repo_root, auto=contract.auto)
 
 
-def _build_rp_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
-    return RpAgentAdapter(repo_root=repo_root, host_contract=contract)
+def _build_rp_adapter(
+    repo_root: Path,
+    contract: HostContract,
+    run_data: Mapping[str, object] | None = None,
+) -> RunnerAdapter:
+    bridge_config = restore_rp_bridge_config(run_data) if run_data is not None else None
+    return RpAgentAdapter(repo_root=repo_root, host_contract=contract, bridge_config=bridge_config)
 
 
-def _build_codex_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
-    del contract
+def _build_codex_adapter(
+    repo_root: Path,
+    contract: HostContract,
+    run_data: Mapping[str, object] | None = None,
+) -> RunnerAdapter:
+    del contract, run_data
     return CodexAdapter(repo_root=repo_root)
 
 
-def _build_stub_adapter(repo_root: Path, contract: HostContract) -> RunnerAdapter:
-    del repo_root, contract
+def _build_stub_adapter(
+    repo_root: Path,
+    contract: HostContract,
+    run_data: Mapping[str, object] | None = None,
+) -> RunnerAdapter:
+    del repo_root, contract, run_data
     return StubRunnerAdapter()
 
 
@@ -135,19 +158,35 @@ def resolve_adapter_contract(adapter_name: str, *, auto: bool = False) -> HostCo
     return spec.resolve_contract(auto=auto)
 
 
-def build_adapter(adapter_name: str, repo_root: str | Path, *, auto: bool = False) -> tuple[RunnerAdapter, HostContract]:
+def build_adapter(
+    adapter_name: str,
+    repo_root: str | Path,
+    *,
+    auto: bool = False,
+    bridge_config: RpBridgeRunConfig | None = None,
+) -> tuple[RunnerAdapter, HostContract]:
     """Build an adapter instance and its resolved host contract."""
+    if bridge_config is not None and adapter_name != "rp":
+        raise ValueError("Bridge is currently only supported with the rp adapter")
+    if bridge_config is not None and auto:
+        raise ValueError("Bridge is currently only supported with RP manual mode")
     contract = resolve_adapter_contract(adapter_name, auto=auto)
-    adapter = build_adapter_from_contract(contract, repo_root)
+    run_data = {"rp_bridge": bridge_config.model_dump(mode="json")} if bridge_config is not None else None
+    adapter = build_adapter_from_contract(contract, repo_root, run_data=run_data)
     return adapter, contract
 
 
-def build_adapter_from_contract(contract: HostContract, repo_root: str | Path) -> RunnerAdapter:
+def build_adapter_from_contract(
+    contract: HostContract,
+    repo_root: str | Path,
+    *,
+    run_data: Mapping[str, object] | None = None,
+) -> RunnerAdapter:
     """Build an adapter instance from an explicit stored host contract."""
     spec = ADAPTER_SPECS.get(contract.adapter)
     if spec is None:
         raise ValueError(f"Unknown adapter in stored host contract: {contract.adapter}")
-    adapter = spec.factory(Path(repo_root), contract)
+    adapter = spec.factory(Path(repo_root), contract, run_data)
     if adapter.host_contract != contract:
         raise ValueError(f"Stored host contract is not supported by adapter {contract.adapter}")
     return adapter
@@ -173,6 +212,8 @@ def restore_host_contract(data: Mapping[str, object]) -> HostContract:
                 contract_data["review"] = default_contract.review.to_metadata()
             if "native_runtime" not in contract_data:
                 contract_data["native_runtime"] = default_contract.native_runtime.to_metadata()
+            if "bridge" not in contract_data:
+                contract_data["bridge"] = default_contract.bridge.to_metadata()
         return HostContract.from_metadata(contract_data)
 
     adapter_name = data.get("adapter")
@@ -184,10 +225,26 @@ def restore_host_contract(data: Mapping[str, object]) -> HostContract:
     return resolve_adapter_contract(adapter_name.strip(), auto=auto)
 
 
+def restore_rp_bridge_config(data: Mapping[str, object]) -> RpBridgeRunConfig | None:
+    """Restore validated per-run RP bridge configuration from persisted run metadata."""
+
+    raw_bridge = data.get("rp_bridge")
+    if raw_bridge is None:
+        return None
+    if not isinstance(raw_bridge, Mapping):
+        raise ValueError("stored rp_bridge must be an object")
+    try:
+        return RpBridgeRunConfig.model_validate(raw_bridge)
+    except ValidationError as exc:
+        raise ValueError("stored rp_bridge is invalid") from exc
+
+
 __all__ = [
     "ADAPTER_NAMES",
     "ADAPTER_SPECS",
     "AdapterSpec",
+    "BridgeContract",
+    "BridgeMode",
     "HostCapabilities",
     "HostContract",
     "NativeRuntimeContract",
@@ -201,4 +258,5 @@ __all__ = [
     "build_adapter_from_contract",
     "resolve_adapter_contract",
     "restore_host_contract",
+    "restore_rp_bridge_config",
 ]

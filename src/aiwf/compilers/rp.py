@@ -34,6 +34,7 @@ def _build_compiled_markdown(context: CompileContext) -> str:
     auto_contract = RP_COMPILER_SPEC.variants["auto"]
     install_surface = build_install_surface_document(spec=RP_COMPILER_SPEC, output_dir=context.output_dir)
     native_runtime = auto_contract.native_runtime
+    bridge_contract = manual_contract.bridge
     sections: list[str] = [
         "# RepoPrompt Workflow Bundle",
         "",
@@ -46,10 +47,19 @@ def _build_compiled_markdown(context: CompileContext) -> str:
         "## RepoPrompt Host Contract",
         f"- stored_runtime_key: `{RP_COMPILER_SPEC.stored_runtime_key}`",
         f"- default_variant: `{RP_COMPILER_SPEC.variant_namespace}/{RP_COMPILER_SPEC.default_variant}`",
-        "- supported_variants: `rp/manual`, `rp/auto`",
-        f"- native_runtime_candidates: `{', '.join(native_runtime.command_candidates)}`",
+        "- supported_variants: `rp/manual` (stable), `rp/auto` (experimental)",
+        "- official_runtime_target: real RepoPrompt app / MCP CLI runtime",
         (
-            f"- native_protocol: `aiwf-rp-native/v{native_runtime.protocol_version}`"
+            f"- native_runtime_candidates: `{', '.join(native_runtime.command_candidates)}` "
+            "(must resolve to the real RepoPrompt runtime; `rp-cli-stub` is test-only)"
+        ),
+        (
+            f"- bridge_capability: `{bridge_contract.default_mode} "
+            "(groundwork only — does not invoke RepoPrompt MCP/tools yet)`"
+        ),
+        (
+            f"- native_protocol: `aiwf-rp-native/v{native_runtime.protocol_version}` "
+            "(experimental auto/native surface; verify against the real RepoPrompt runtime)"
             if native_runtime.protocol_version is not None
             else "- native_protocol: `_legacy text fallback only_`"
         ),
@@ -70,8 +80,9 @@ def _build_compiled_markdown(context: CompileContext) -> str:
         RP_COMMANDS["resume"],
         "```",
         "",
-        "Native variant note:",
-        "- Use `--auto` with the plan/implement command when a RepoPrompt runtime is available on PATH.",
+        "Experimental auto variant note:",
+        "- Use `--auto` only when PATH resolves to the real RepoPrompt app / MCP CLI runtime.",
+        "- `rp-cli-stub` is an internal/reference harness and not an official RP product target.",
         "",
         *render_install_surface_markdown(install_surface),
         "## Projection Traceability Index",
@@ -173,7 +184,10 @@ def _build_projection(
                 "entrypoint": RP_COMMANDS["implement"],
                 "manual_handoff_artifact": "rp-agent-implement-prompt.md",
                 "auto_stage_output_artifact": "rp-agent-implement-response.md",
-                "resume_boundary": "Use `uv run aiwf resume <run_id>` after manual RepoPrompt implement handoff.",
+                "resume_boundary": (
+                    "Use `uv run aiwf resume <run_id>` after manual RepoPrompt implement handoff. "
+                    "This manual handoff flow is the stable/default RP path."
+                ),
                 "auto_entrypoint": f"{RP_COMMANDS['implement']} --auto",
             },
             "review": {
@@ -220,7 +234,7 @@ RP_COMPILER_SPEC = CompilerSpec(
     projection_name="rp-host-projection",
     variant_namespace="rp",
     compiler_name="aiwf.compile.rp",
-    projection_contract="rp-host-projection-v2",
+    projection_contract="rp-host-projection-v3",
     host_name="repoprompt",
     host_display_name="RepoPrompt",
     stored_runtime_key="host_contract",

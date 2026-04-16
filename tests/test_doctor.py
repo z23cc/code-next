@@ -99,11 +99,33 @@ def test_run_doctor_reports_rp_manual_only_when_runtime_missing(tmp_path: Path, 
 
     rp_check = next(check for check in report.checks if check.name == "rp")
     assert rp_check.status == "warn"
-    assert "manual-only fallback active" in rp_check.detail
+    assert "stable manual handoff path active" in rp_check.detail
     assert "rp, rp-cli" in rp_check.detail
+    assert "experimental auto/native" in rp_check.detail
     assert "protocol v1" in rp_check.detail
     assert rp_check.protocol_supported is False
     assert rp_check.protocol_version is None
+
+
+def test_run_doctor_reports_rp_bridge_groundwork_when_candidate_missing(tmp_path: Path, monkeypatch) -> None:
+    repo_root, ai_root = _create_workspace(tmp_path, gate_command='python -c "print(\'ok\')"')
+    _mock_which(
+        monkeypatch,
+        {
+            "python": "/usr/bin/python",
+            "uv": "/usr/bin/uv",
+            "git": "/usr/bin/git",
+        },
+    )
+
+    report = run_doctor(ai_root=ai_root, repo_root=repo_root)
+
+    bridge_check = next(check for check in report.checks if check.name == "rp-bridge")
+    assert bridge_check.status == "warn"
+    assert "groundwork-only" in bridge_check.detail
+    assert "stable manual handoff path remains active" in bridge_check.detail
+    assert bridge_check.protocol_supported is None
+    assert bridge_check.protocol_version is None
 
 
 def test_run_doctor_reports_rp_native_ready_when_runtime_found(tmp_path: Path, monkeypatch) -> None:
@@ -124,14 +146,40 @@ def test_run_doctor_reports_rp_native_ready_when_runtime_found(tmp_path: Path, m
     rp_check = next(check for check in report.checks if check.name == "rp")
     assert rp_check.status == "ok"
     assert rp_check.path == "/usr/local/bin/rp-cli"
-    assert "native-ready via rp-cli" in rp_check.detail
+    assert "experimental RP auto runtime detected via rp-cli" in rp_check.detail
     assert "protocol aiwf-rp-native v1 detected" in rp_check.detail
+    assert "real RepoPrompt app / MCP CLI runtime" in rp_check.detail
     assert rp_check.protocol_supported is True
     assert rp_check.protocol_version == 1
     payload = report.to_json()
     rp_payload = next(check for check in payload["checks"] if check["name"] == "rp")
     assert rp_payload["protocol_supported"] is True
     assert rp_payload["protocol_version"] == 1
+
+
+def test_run_doctor_reports_rp_bridge_candidate_when_runtime_found(tmp_path: Path, monkeypatch) -> None:
+    repo_root, ai_root = _create_workspace(tmp_path, gate_command="python -c \"print('ok')\"")
+    _mock_which(
+        monkeypatch,
+        {
+            "python": "/usr/bin/python",
+            "uv": "/usr/bin/uv",
+            "git": "/usr/bin/git",
+            "rp-cli": "/usr/local/bin/rp-cli",
+        },
+    )
+    _mock_protocol_probe(monkeypatch, {"/usr/local/bin/rp-cli": 1})
+
+    report = run_doctor(ai_root=ai_root, repo_root=repo_root)
+
+    bridge_check = next(check for check in report.checks if check.name == "rp-bridge")
+    assert bridge_check.status == "ok"
+    assert bridge_check.path == "/usr/local/bin/rp-cli"
+    assert "experimental RP bridge candidate detected via rp-cli" in bridge_check.detail
+    assert "manual-assist groundwork only" in bridge_check.detail
+    assert "stable supported path" in bridge_check.detail
+    assert bridge_check.protocol_supported is None
+    assert bridge_check.protocol_version is None
 
 
 def test_run_doctor_warns_when_rp_runtime_lacks_protocol_support(tmp_path: Path, monkeypatch) -> None:
@@ -152,6 +200,7 @@ def test_run_doctor_warns_when_rp_runtime_lacks_protocol_support(tmp_path: Path,
     rp_check = next(check for check in report.checks if check.name == "rp")
     assert rp_check.status == "warn"
     assert "protocol negotiation support was not detected" in rp_check.detail
+    assert "treat RP auto/native as unavailable" in rp_check.detail
     assert "protocol v1" in rp_check.detail
     assert rp_check.protocol_supported is False
     assert rp_check.protocol_version is None
@@ -176,6 +225,7 @@ def test_run_doctor_warns_when_rp_runtime_protocol_version_mismatches(tmp_path: 
     assert rp_check.status == "warn"
     assert "aiwf-rp-native v2" in rp_check.detail
     assert "advertises v1" in rp_check.detail
+    assert "real RepoPrompt app / MCP CLI runtime" in rp_check.detail
     assert rp_check.protocol_supported is True
     assert rp_check.protocol_version == 2
 

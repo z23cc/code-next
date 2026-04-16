@@ -7,7 +7,14 @@
 - RepoPrompt（`rp`）
 - Claude Code（`claude`）
 
+> **当前产品口径：** `aiwf` 的唯一官方 RP target 是真实 RepoPrompt app / MCP CLI runtime。当前稳定、推荐的 RP 使用方式仍是 manual handoff + `resume`；仓库内的 `rp-cli-stub` 仅用于参考协议/CI 测试，不等于真实 RepoPrompt 运行时就绪。
+
 如果你只想知道兼容性边界，请看 `docs/compatibility-policy.md`。如果你想从零跑一个任务，请先看 `docs/QUICKSTART.md`。
+
+如果你想理解为什么真实 RepoPrompt CLI 目前更适合作为宿主能力入口、而不是直接当作 `aiwf-rp-native/v1` provider，请看：
+
+- `docs/RP_PROVIDER_GAP_ANALYSIS.md`
+- `docs/RP_BRIDGE_DESIGN.md`
 
 ## 1. 先理解当前“install”语义
 
@@ -103,19 +110,19 @@ manifest=.rp/compiled/manifest.json drift=initial
 - `workflow_contract.review.report_contract.auto`
 - `workflow_contract.resume.restores_run_metadata = ["host_contract"]`
 
-当前 RP 不是“只有 manual-first”。更准确地说：
+当前 `rp-projection.json` 仍暴露 `manual` 与 `auto` 两个 variant，因为实现层还保留了兼容性与实验性 native path。但产品口径应按下面理解：
 
-- RP 支持 `manual` 与 `auto` 两个 variant
-- RP 的 native runtime contract 当前是启用的
-- command candidates 当前是：`rp`, `rp-cli`
-- 如果 PATH 上有可用 RP runtime，可以走 `--auto`
+- 稳定、默认、推荐路径：RP manual handoff + `resume`
+- 唯一官方 RP target：真实 RepoPrompt app / MCP CLI runtime
+- `rp-cli-stub` 只是 reference test harness，用于 CI / conformance 演练，不等于真实 RepoPrompt runtime readiness
+- `--auto` 仅应在你已验证真实 RepoPrompt runtime 实现了 `aiwf-rp-native/v1` 时尝试
 - 即使 native runtime 不可用，manual handoff 仍然是支持路径
 
 ### 3.4 RP 的实际消费方式
 
-#### 手动 handoff 路径
+#### 稳定 manual handoff 路径（推荐）
 
-如果你当前只是把 compile 输出交给 RepoPrompt 操作流使用，最稳妥的方式是：
+如果你当前是在真实项目/产品上下文里把 compile 输出交给 RepoPrompt 使用，这应该是默认路径：
 
 ```bash
 uv run aiwf run plan --task .ai/tasks/<task>.md --adapter rp
@@ -130,9 +137,13 @@ uv run aiwf resume <run_id>
 - `rp-agent-implement-prompt.md`
 - `rp-agent-review-prompt.md`
 
-#### Native-ready auto 路径
+还可以在 RP manual 模式下显式加 `--bridge`（以及可选的 `--bridge-workspace` / `--bridge-tab` / `--bridge-context-id` / `--bridge-agent-role` 等参数）启用**实验性的 manual-assist groundwork**。在当前 slice 中，这只会为 manual prompt artifact 增加 bridge context 并持久化 `rp_bridge` metadata；**不会调用 rp-cli MCP/tools**，也不会改变稳定的 manual artifact 名称或 review contract。
 
-如果机器上已经有 `rp` 或 `rp-cli`，可以按 projection 中声明的 auto entrypoint 使用：
+#### 实验性 auto 路径（仅限已验证的真实 RepoPrompt runtime）
+
+> **Experimental status:** 只有当机器上的 `rp` 或 `rp-cli` 确认就是实现了 `aiwf-rp-native/v1` 的真实 RepoPrompt app / MCP CLI runtime 时，才应尝试这条路径。仓库内的 `rp-cli-stub` 仅用于协议测试；CI 中的 stub conformance 也不代表真实运行时 readiness。
+
+如果你明确要验证上述真实运行时，可以按 projection 中声明的 auto entrypoint 使用：
 
 ```bash
 uv run aiwf run plan --task .ai/tasks/<task>.md --adapter rp --auto
@@ -147,7 +158,7 @@ uv run aiwf run review --run-id <run_id>
 
 review contract 也会从 manual 的 `prompt_file` 切换到 auto 的 `response_file`。
 
-> **Protocol note:** The structured I/O protocol between `aiwf` and the RP native runtime is specified in `docs/RP_NATIVE_PROTOCOL.md`. Legacy text-mode runtimes remain fully supported.
+> **Protocol note:** `aiwf` 与 RP native runtime 的结构化 I/O 协议定义见 `docs/RP_NATIVE_PROTOCOL.md`。该文档的 reference stub 仅用于测试协议面；产品层面的官方目标仍是真实 RepoPrompt app / MCP CLI runtime。
 
 ### 3.5 RP bundle 给谁看
 

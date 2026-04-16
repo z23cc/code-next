@@ -1,6 +1,8 @@
-# rp-cli-stub
+# rp-cli-stub (internal reference test harness)
 
-Reference standalone `rp-cli` stub for validating `aiwf-rp-native/v1` process integration.
+Internal reference `rp-cli` stub for validating `aiwf-rp-native/v1` process integration.
+
+> This tool is for local/CI protocol testing only. It is **not** a production RepoPrompt runtime and must not be used as evidence that `aiwf` is ready for the real RepoPrompt app / MCP CLI runtime.
 
 ## Install
 

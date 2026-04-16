@@ -11,6 +11,9 @@ from aiwf.models import StageResult, TaskSpec
 
 
 HostMode = Literal["manual", "auto"]
+BridgeMode = Literal["disabled", "manual-assist"]
+
+_ALLOWED_BRIDGE_MODES = {"disabled", "manual-assist"}
 
 
 @dataclass(frozen=True)
@@ -154,6 +157,84 @@ class NativeRuntimeContract:
 
 
 @dataclass(frozen=True)
+class BridgeContract:
+    """Optional contract scaffolding for an additive RepoPrompt bridge surface."""
+
+    enabled: bool = False
+    default_mode: BridgeMode = "disabled"
+    supported_modes: tuple[BridgeMode, ...] = ("disabled",)
+    command_candidates: tuple[str, ...] = ()
+    install_hint: str | None = None
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "default_mode": self.default_mode,
+            "supported_modes": list(self.supported_modes),
+            "command_candidates": list(self.command_candidates),
+            "install_hint": self.install_hint,
+        }
+
+    @classmethod
+    def from_metadata(cls, data: Mapping[str, object]) -> BridgeContract:
+        enabled = data.get("enabled", False)
+        default_mode = data.get("default_mode", "disabled")
+        supported_modes = cls._read_supported_modes(data, "supported_modes")
+        command_candidates = cls._read_string_sequence(data, "command_candidates")
+        install_hint = data.get("install_hint")
+
+        if not isinstance(enabled, bool):
+            raise ValueError("bridge contract enabled must be a boolean")
+        if default_mode not in _ALLOWED_BRIDGE_MODES:
+            raise ValueError("bridge contract default_mode must be 'disabled' or 'manual-assist'")
+        if install_hint is not None and (not isinstance(install_hint, str) or not install_hint.strip()):
+            raise ValueError("bridge contract install_hint must be a non-empty string or null")
+
+        normalized_default_mode = cast(BridgeMode, default_mode)
+        if enabled and normalized_default_mode not in supported_modes:
+            raise ValueError("enabled bridge contracts must include default_mode in supported_modes")
+        if not enabled and (
+            normalized_default_mode != "disabled"
+            or supported_modes != ("disabled",)
+            or command_candidates
+            or install_hint is not None
+        ):
+            raise ValueError("disabled bridge contracts must use the default disabled configuration")
+
+        return cls(
+            enabled=enabled,
+            default_mode=normalized_default_mode,
+            supported_modes=supported_modes,
+            command_candidates=command_candidates,
+            install_hint=install_hint.strip() if isinstance(install_hint, str) else None,
+        )
+
+    @staticmethod
+    def _read_supported_modes(data: Mapping[str, object], key: str) -> tuple[BridgeMode, ...]:
+        raw_value = data.get(key, ["disabled"])
+        if not isinstance(raw_value, list):
+            raise ValueError(f"bridge contract {key} must be a list")
+        modes: list[BridgeMode] = []
+        for item in raw_value:
+            if item not in _ALLOWED_BRIDGE_MODES:
+                raise ValueError(f"bridge contract {key} entries must be 'disabled' or 'manual-assist'")
+            modes.append(cast(BridgeMode, item))
+        return tuple(modes)
+
+    @staticmethod
+    def _read_string_sequence(data: Mapping[str, object], key: str) -> tuple[str, ...]:
+        raw_value = data.get(key, [])
+        if not isinstance(raw_value, list):
+            raise ValueError(f"bridge contract {key} must be a list")
+        values: list[str] = []
+        for item in raw_value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(f"bridge contract {key} entries must be non-empty strings")
+            values.append(item.strip())
+        return tuple(values)
+
+
+@dataclass(frozen=True)
 class HostContract:
     """Explicit contract persisted with each run and exposed by adapters."""
 
@@ -162,6 +243,7 @@ class HostContract:
     capabilities: HostCapabilities = HostCapabilities()
     review: ReviewArtifactContract = field(default_factory=ReviewArtifactContract)
     native_runtime: NativeRuntimeContract = field(default_factory=NativeRuntimeContract)
+    bridge: BridgeContract = field(default_factory=BridgeContract)
 
     @property
     def auto(self) -> bool:
@@ -174,6 +256,7 @@ class HostContract:
             "capabilities": self.capabilities.to_metadata(),
             "review": self.review.to_metadata(),
             "native_runtime": self.native_runtime.to_metadata(),
+            "bridge": self.bridge.to_metadata(),
         }
 
     @classmethod
@@ -183,6 +266,7 @@ class HostContract:
         capabilities = data.get("capabilities")
         review = data.get("review")
         native_runtime = data.get("native_runtime")
+        bridge = data.get("bridge")
         if not isinstance(adapter, str) or not adapter.strip():
             raise ValueError("host contract adapter must be a non-empty string")
         if mode not in {"manual", "auto"}:
@@ -197,6 +281,10 @@ class HostContract:
             native_runtime = {}
         if not isinstance(native_runtime, Mapping):
             raise ValueError("host contract native_runtime must be an object")
+        if bridge is None:
+            bridge = {}
+        if not isinstance(bridge, Mapping):
+            raise ValueError("host contract bridge must be an object")
         normalized_mode = cast(HostMode, mode)
         return cls(
             adapter=adapter.strip(),
@@ -204,6 +292,7 @@ class HostContract:
             capabilities=HostCapabilities.from_metadata(capabilities),
             review=ReviewArtifactContract.from_metadata(review),
             native_runtime=NativeRuntimeContract.from_metadata(native_runtime),
+            bridge=BridgeContract.from_metadata(bridge),
         )
 
 
@@ -225,7 +314,7 @@ class RunnerAdapter(Protocol):
         """Return review report content."""
 
 
-AdapterFactory = Callable[[Path, HostContract], RunnerAdapter]
+AdapterFactory = Callable[[Path, HostContract, Mapping[str, object] | None], RunnerAdapter]
 
 
 @dataclass(frozen=True)

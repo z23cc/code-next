@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from aiwf.models import GateSet, RunMeta, RunStatus, RunbookSpec, TaskSpec
+from aiwf.models import GateSet, RpBridgeRunConfig, RunMeta, RunStatus, RunbookSpec, TaskSpec
 
 
 def test_task_spec_populates_slug_and_defaults() -> None:
@@ -65,6 +65,36 @@ def test_runbook_stage_strategy_fields_default_backward_compatibly() -> None:
     assert runbook.stages[0].required is True
     assert runbook.stages[0].retry_limit == 0
     assert runbook.stages[0].pause_on == []
+
+
+def test_rp_bridge_run_config_round_trips() -> None:
+    config = RpBridgeRunConfig(
+        mode="manual-assist",
+        workspace="workspace-alpha",
+        tab="implement-tab",
+        context_id="ctx-123",
+        agent_role="implementer",
+        timeout_seconds=900,
+        export_transcript=True,
+    )
+
+    assert config.model_dump(mode="json") == {
+        "mode": "manual-assist",
+        "workspace": "workspace-alpha",
+        "tab": "implement-tab",
+        "context_id": "ctx-123",
+        "agent_role": "implementer",
+        "timeout_seconds": 900,
+        "export_transcript": True,
+    }
+
+
+def test_rp_bridge_run_config_rejects_invalid_values() -> None:
+    with pytest.raises(ValidationError, match="non-empty string"):
+        RpBridgeRunConfig(mode="manual-assist", workspace="   ")
+
+    with pytest.raises(ValidationError, match="timeout_seconds"):
+        RpBridgeRunConfig(mode="manual-assist", timeout_seconds=0)
 
 
 def test_runbook_stage_strategy_fields_reject_invalid_values() -> None:

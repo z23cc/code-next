@@ -14,7 +14,13 @@ import typer
 from rich.console import Console
 
 from aiwf import __version__
-from aiwf.adapters import ADAPTER_SPECS, build_adapter, build_adapter_from_contract, restore_host_contract
+from aiwf.adapters import (
+    ADAPTER_SPECS,
+    build_adapter,
+    build_adapter_from_contract,
+    restore_host_contract,
+    restore_rp_bridge_config,
+)
 from aiwf.adapters.base import HostContract
 from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
@@ -25,7 +31,7 @@ from aiwf.contracts import assess_review_boundary, assess_review_evidence, lint_
 from aiwf.doctor import render_doctor_report, run_doctor
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import AiwfError
-from aiwf.models import RunMeta, RunStatus
+from aiwf.models import RpBridgeRunConfig, RunMeta, RunStatus
 from aiwf.state import RunStateManager
 
 app = typer.Typer(
@@ -35,7 +41,9 @@ app = typer.Typer(
 run_app = typer.Typer(help="Run workflow stages with the configured adapter.")
 compile_app = typer.Typer(help="Compile workflow inputs for host-specific outputs.")
 contracts_app = typer.Typer(help="Lint and inspect built-in host contracts.")
-conformance_app = typer.Typer(help="Run executable provider conformance checks.")
+conformance_app = typer.Typer(
+    help="Run RP executable protocol checks; the official product target is the real RepoPrompt app / MCP CLI runtime."
+)
 app.add_typer(run_app, name="run")
 app.add_typer(compile_app, name="compile")
 app.add_typer(contracts_app, name="contracts")
@@ -44,6 +52,15 @@ console = Console()
 
 
 AdapterName = Literal["claude", "rp", "codex", "stub"]
+_ADAPTER_OPTION_HELP = "Host adapter to use (`stub` is internal/test-only)."
+_AUTO_OPTION_HELP = (
+    "Use adapter auto mode when supported by the selected host contract. For RP, auto is experimental "
+    "and intended for a verified real RepoPrompt app / MCP CLI runtime; manual handoff remains the stable path."
+)
+_BRIDGE_OPTION_HELP = (
+    "Enable the experimental RepoPrompt bridge groundwork for RP manual mode. This enriches manual handoff "
+    "prompts and metadata only; it does not invoke RepoPrompt MCP/tools yet, and the stable manual path remains supported."
+)
 _INTERNAL_RUN_FILES = {"run.json", "events.ndjson", "run-diagnostics.json", "run-provenance.json"}
 _DIFF_FIELDS = ("workflow", "status", "last_completed_stage", "error_code", "error", "adapter", "mode")
 
@@ -76,31 +93,100 @@ def _build_engine(
     adapter_name: AdapterName | None = None,
     auto: bool = False,
     host_contract: HostContract | None = None,
+    bridge_config: RpBridgeRunConfig | None = None,
 ) -> WorkflowEngine:
     try:
         if host_contract is None:
             if adapter_name is None:
                 raise AiwfError("Adapter name is required when no stored host contract is provided")
-            adapter, host_contract = build_adapter(adapter_name, repo_root, auto=auto)
+            adapter, host_contract = build_adapter(adapter_name, repo_root, auto=auto, bridge_config=bridge_config)
         else:
-            adapter = build_adapter_from_contract(host_contract, repo_root)
+            run_data = {"rp_bridge": bridge_config.model_dump(mode="json")} if bridge_config is not None else None
+            adapter = build_adapter_from_contract(host_contract, repo_root, run_data=run_data)
         return WorkflowEngine(
             adapter,
             ai_root=ai_root,
             repo_root=repo_root,
             host_contract=host_contract,
-            adapter_resolver=lambda contract: build_adapter_from_contract(contract, repo_root),
+            adapter_resolver=lambda contract, run_data: build_adapter_from_contract(contract, repo_root, run_data=run_data),
+            bridge_config=bridge_config,
         )
     except ValueError as exc:
         raise AiwfError(str(exc)) from exc
 
 
-def _resolve_run_execution(ai_root: Path, run_id: str) -> HostContract:
+def _resolve_run_execution_payload(ai_root: Path, run_id: str) -> tuple[HostContract, RpBridgeRunConfig | None]:
     meta = RunStateManager(ai_root).load_run(run_id)
     try:
-        return restore_host_contract(meta.data)
+        host_contract = restore_host_contract(meta.data)
     except ValueError as exc:
         raise AiwfError(f"Run {run_id} does not include a valid stored host contract") from exc
+    try:
+        bridge_config = restore_rp_bridge_config(meta.data)
+    except ValueError as exc:
+        raise AiwfError(f"Run {run_id} does not include valid stored RP bridge metadata") from exc
+    return host_contract, bridge_config
+
+
+def _resolve_run_execution(ai_root: Path, run_id: str) -> HostContract:
+    host_contract, _ = _resolve_run_execution_payload(ai_root, run_id)
+    return host_contract
+
+
+def _build_engine_from_stored_run(ai_root: Path, repo_root: Path, run_id: str) -> WorkflowEngine:
+    host_contract, bridge_config = _resolve_run_execution_payload(ai_root, run_id)
+    return _build_engine(ai_root, repo_root, host_contract=host_contract, bridge_config=bridge_config)
+
+
+def _resolve_bridge_config(
+    adapter_name: AdapterName,
+    auto: bool,
+    *,
+    bridge: bool,
+    bridge_mode: str | None,
+    bridge_workspace: str | None,
+    bridge_tab: str | None,
+    bridge_context_id: str | None,
+    bridge_agent_role: str | None,
+    bridge_timeout: int | None,
+    bridge_export_transcript: bool,
+) -> RpBridgeRunConfig | None:
+    any_bridge_option = any(
+        [
+            bridge,
+            bridge_mode is not None,
+            bridge_workspace is not None,
+            bridge_tab is not None,
+            bridge_context_id is not None,
+            bridge_agent_role is not None,
+            bridge_timeout is not None,
+            bridge_export_transcript,
+        ]
+    )
+    if not any_bridge_option:
+        return None
+    if adapter_name != "rp":
+        raise AiwfError("Bridge is currently only supported with --adapter rp")
+    if auto:
+        raise AiwfError("Bridge is currently only supported with RP manual mode")
+
+    bridge_contract = ADAPTER_SPECS["rp"].variants["manual"].bridge
+    resolved_mode = bridge_mode or bridge_contract.default_mode
+    if resolved_mode not in bridge_contract.supported_modes or resolved_mode != "manual-assist":
+        raise AiwfError(f"Bridge mode '{resolved_mode}' is not supported in this slice")
+
+    try:
+        return RpBridgeRunConfig(
+            mode=resolved_mode,
+            workspace=bridge_workspace,
+            tab=bridge_tab,
+            context_id=bridge_context_id,
+            agent_role=bridge_agent_role,
+            timeout_seconds=bridge_timeout,
+            export_transcript=bridge_export_transcript,
+        )
+    except Exception as exc:
+        raise AiwfError(f"Invalid bridge configuration: {exc}") from exc
 
 
 def _build_engine_or_exit(action: str, builder: Callable[[], WorkflowEngine]) -> WorkflowEngine:
@@ -511,6 +597,7 @@ def _build_run_to_run_diff(ai_root: Path, run_id: str, other_run_id: str, proven
 
 
 def _build_inspection_payload(ai_root: Path, run_id: str, *, diff: bool = False, diff_run: str | None = None) -> dict[str, Any]:
+    meta = RunStateManager(ai_root).load_run(run_id)
     diagnostics = _load_run_surface(ai_root, run_id, "run-diagnostics.json")
     provenance = _load_optional_run_surface(ai_root, run_id, "run-provenance.json")
     review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
@@ -521,6 +608,7 @@ def _build_inspection_payload(ai_root: Path, run_id: str, *, diff: bool = False,
         "diagnostics": diagnostics,
         "provenance": provenance,
         "review_report": review_report,
+        "rp_bridge": meta.data.get("rp_bridge") if "rp_bridge" in meta.data else None,
         "artifacts": {
             "diagnostics": str(_artifact_path(ai_root, run_id, "run-diagnostics.json")),
             "provenance": str(_artifact_path(ai_root, run_id, "run-provenance.json")),
@@ -730,6 +818,17 @@ def _print_inspection(
                 f"requires_explicit_review_handoff={explicit_review}"
             )
 
+    rp_bridge = payload.get("rp_bridge")
+    if isinstance(rp_bridge, Mapping):
+        console.print(
+            "bridge="
+            f"mode={rp_bridge.get('mode') or '-'} "
+            f"workspace={rp_bridge.get('workspace') or '-'} "
+            f"tab={rp_bridge.get('tab') or '-'} "
+            f"context_id={rp_bridge.get('context_id') or '-'} "
+            f"agent_role={rp_bridge.get('agent_role') or '-'}"
+        )
+
     _print_inspection_diff(payload)
 
     next_actions = diagnostics.get("next_actions")
@@ -791,13 +890,39 @@ def run_plan(
     task: Annotated[Path, typer.Option("--task", exists=True, dir_okay=False, readable=True)],
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
-    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "claude",
-    auto: Annotated[
-        bool, typer.Option("--auto", help="Use adapter auto mode when supported by the selected host contract.")
-    ] = False,
+    adapter: Annotated[AdapterName, typer.Option("--adapter", help=_ADAPTER_OPTION_HELP)] = "claude",
+    auto: Annotated[bool, typer.Option("--auto", help=_AUTO_OPTION_HELP)] = False,
+    bridge: Annotated[bool, typer.Option("--bridge", help=_BRIDGE_OPTION_HELP)] = False,
+    bridge_mode: Annotated[str | None, typer.Option("--bridge-mode", help="Experimental RP bridge mode override. Only manual-assist is supported in this slice.")] = None,
+    bridge_workspace: Annotated[str | None, typer.Option("--bridge-workspace", help="RepoPrompt workspace identifier for bridge groundwork.")] = None,
+    bridge_tab: Annotated[str | None, typer.Option("--bridge-tab", help="RepoPrompt tab/window identifier for bridge groundwork.")] = None,
+    bridge_context_id: Annotated[str | None, typer.Option("--bridge-context-id", help="Pre-bound RepoPrompt context id for bridge groundwork.")] = None,
+    bridge_agent_role: Annotated[str | None, typer.Option("--bridge-agent-role", help="Operator-defined RepoPrompt agent role label.")] = None,
+    bridge_timeout: Annotated[int | None, typer.Option("--bridge-timeout", help="Reserved bridge timeout hint for future slices.")] = None,
+    bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Reserved bridge transcript-export hint for future slices.")] = False,
 ) -> None:
     """Run the plan workflow."""
-    engine = _build_engine_or_exit("plan", lambda: _build_engine(ai_root, repo_root, adapter_name=adapter, auto=auto))
+    engine = _build_engine_or_exit(
+        "plan",
+        lambda: _build_engine(
+            ai_root,
+            repo_root,
+            adapter_name=adapter,
+            auto=auto,
+            bridge_config=_resolve_bridge_config(
+                adapter,
+                auto,
+                bridge=bridge,
+                bridge_mode=bridge_mode,
+                bridge_workspace=bridge_workspace,
+                bridge_tab=bridge_tab,
+                bridge_context_id=bridge_context_id,
+                bridge_agent_role=bridge_agent_role,
+                bridge_timeout=bridge_timeout,
+                bridge_export_transcript=bridge_export_transcript,
+            ),
+        ),
+    )
     _execute_command("plan", ai_root, lambda: engine.run_plan(task))
 
 
@@ -806,15 +931,38 @@ def run_implement(
     task: Annotated[Path, typer.Option("--task", exists=True, dir_okay=False, readable=True)],
     ai_root: Annotated[Path, typer.Option("--ai-root")] = Path(".ai"),
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
-    adapter: Annotated[AdapterName, typer.Option("--adapter")] = "claude",
-    auto: Annotated[
-        bool, typer.Option("--auto", help="Use adapter auto mode when supported by the selected host contract.")
-    ] = False,
+    adapter: Annotated[AdapterName, typer.Option("--adapter", help=_ADAPTER_OPTION_HELP)] = "claude",
+    auto: Annotated[bool, typer.Option("--auto", help=_AUTO_OPTION_HELP)] = False,
+    bridge: Annotated[bool, typer.Option("--bridge", help=_BRIDGE_OPTION_HELP)] = False,
+    bridge_mode: Annotated[str | None, typer.Option("--bridge-mode", help="Experimental RP bridge mode override. Only manual-assist is supported in this slice.")] = None,
+    bridge_workspace: Annotated[str | None, typer.Option("--bridge-workspace", help="RepoPrompt workspace identifier for bridge groundwork.")] = None,
+    bridge_tab: Annotated[str | None, typer.Option("--bridge-tab", help="RepoPrompt tab/window identifier for bridge groundwork.")] = None,
+    bridge_context_id: Annotated[str | None, typer.Option("--bridge-context-id", help="Pre-bound RepoPrompt context id for bridge groundwork.")] = None,
+    bridge_agent_role: Annotated[str | None, typer.Option("--bridge-agent-role", help="Operator-defined RepoPrompt agent role label.")] = None,
+    bridge_timeout: Annotated[int | None, typer.Option("--bridge-timeout", help="Reserved bridge timeout hint for future slices.")] = None,
+    bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Reserved bridge transcript-export hint for future slices.")] = False,
 ) -> None:
     """Run the implement workflow."""
     engine = _build_engine_or_exit(
         "implement",
-        lambda: _build_engine(ai_root, repo_root, adapter_name=adapter, auto=auto),
+        lambda: _build_engine(
+            ai_root,
+            repo_root,
+            adapter_name=adapter,
+            auto=auto,
+            bridge_config=_resolve_bridge_config(
+                adapter,
+                auto,
+                bridge=bridge,
+                bridge_mode=bridge_mode,
+                bridge_workspace=bridge_workspace,
+                bridge_tab=bridge_tab,
+                bridge_context_id=bridge_context_id,
+                bridge_agent_role=bridge_agent_role,
+                bridge_timeout=bridge_timeout,
+                bridge_export_transcript=bridge_export_transcript,
+            ),
+        ),
     )
     _execute_command("implement", ai_root, lambda: engine.run_implement(task))
 
@@ -828,7 +976,7 @@ def run_review(
     """Run review against an existing run using its stored host contract."""
     engine = _build_engine_or_exit(
         "review",
-        lambda: _build_engine(ai_root, repo_root, host_contract=_resolve_run_execution(ai_root, run_id)),
+        lambda: _build_engine_from_stored_run(ai_root, repo_root, run_id),
     )
     _execute_command("review", ai_root, lambda: engine.run_review(run_id))
 
@@ -842,7 +990,7 @@ def resume(
     """Resume a failed, blocked, or needs-review workflow run with its stored host contract."""
     engine = _build_engine_or_exit(
         "resume",
-        lambda: _build_engine(ai_root, repo_root, host_contract=_resolve_run_execution(ai_root, run_id)),
+        lambda: _build_engine_from_stored_run(ai_root, repo_root, run_id),
     )
     _execute_command("resume", ai_root, lambda: engine.resume(run_id))
 
@@ -1018,7 +1166,16 @@ def contract_lint() -> None:
 
 @conformance_app.command("rp")
 def conformance_rp_command(
-    rp_command: Annotated[str, typer.Option("--rp-command", help="RP provider executable to validate.")],
+    rp_command: Annotated[
+        str,
+        typer.Option(
+            "--rp-command",
+            help=(
+                "Executable to validate as an RP runtime. The official target is the real RepoPrompt app / MCP CLI "
+                "runtime; `rp-cli-stub` is reference/test-only."
+            ),
+        ),
+    ],
     rp_arg: Annotated[
         list[str] | None,
         typer.Option("--rp-arg", help="Additional arguments passed to the RP provider command."),
@@ -1026,7 +1183,7 @@ def conformance_rp_command(
     repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
     json_output: Annotated[bool, typer.Option("--json", help="Render the conformance report as JSON.")] = False,
 ) -> None:
-    """Run RP native provider conformance checks against an executable command."""
+    """Run RP native protocol conformance checks against a specific runtime command."""
     report = run_rp_conformance([rp_command, *(rp_arg or [])], repo_root=repo_root)
     if json_output:
         typer.echo(json.dumps(report, indent=2, ensure_ascii=False))

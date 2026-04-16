@@ -57,8 +57,20 @@ The stable shape is currently:
 - `data.host_contract.native_runtime.enabled`
 - `data.host_contract.native_runtime.command_candidates`
 - `data.host_contract.native_runtime.install_hint`
+- `data.host_contract.bridge.enabled`
+- `data.host_contract.bridge.default_mode`
+- `data.host_contract.bridge.supported_modes`
+- `data.host_contract.bridge.command_candidates`
+- `data.host_contract.bridge.install_hint`
+- `data.rp_bridge.mode`
+- `data.rp_bridge.workspace`
+- `data.rp_bridge.tab`
+- `data.rp_bridge.context_id`
+- `data.rp_bridge.agent_role`
+- `data.rp_bridge.timeout_seconds`
+- `data.rp_bridge.export_transcript`
 
-This shape is defined by `HostContract`, `HostCapabilities`, `ReviewArtifactContract`, and `NativeRuntimeContract` in `src/aiwf/adapters/base.py`.
+This shape is defined by `HostContract`, `HostCapabilities`, `ReviewArtifactContract`, `NativeRuntimeContract`, and `BridgeContract` in `src/aiwf/adapters/base.py`, plus `RpBridgeRunConfig` in `src/aiwf/models.py`. `data.rp_bridge` is written only when the experimental RP bridge groundwork is active for a run.
 
 ### 1.2 Read-path compatibility rules
 
@@ -69,6 +81,8 @@ It must continue to accept all currently protected legacy shapes:
 1. Legacy `data.adapter` + `data.auto` metadata with no explicit `host_contract`
 2. Explicit `data.host_contract` objects that omit `review`
 3. Explicit `data.host_contract` objects that omit `native_runtime`
+4. Explicit `data.host_contract` objects that omit `bridge`
+5. Run metadata that omits `data.rp_bridge` entirely (meaning bridge is inactive for that run)
 
 The current fixtures intentionally cover those cases:
 
@@ -78,7 +92,7 @@ The current fixtures intentionally cover those cases:
 
 ### 1.3 Backfill rule
 
-When stored run metadata includes `host_contract.adapter` and `host_contract.mode` but omits `review` and/or `native_runtime`, `restore_host_contract()` backfills the missing sections from the current built-in default contract for that adapter/mode.
+When stored run metadata includes `host_contract.adapter` and `host_contract.mode` but omits `review`, `native_runtime`, and/or `bridge`, `restore_host_contract()` backfills the missing sections from the current built-in default contract for that adapter/mode.
 
 That backfill behavior is part of the compatibility policy, not an incidental implementation detail.
 
@@ -188,6 +202,7 @@ Unless explicit compatibility work is added, the following are breaking:
 - changing `required_report_string_fields` or `required_report_list_fields`
 - changing `expected_report_mode`
 - changing `linked_report_artifact_field`
+- removing `bridge` from RP variants or removing accepted-on-read support for missing `bridge` / `rp_bridge`
 - removing a supported host variant or changing `host.default_variant`
 - renaming projection keys currently frozen by the compat fixtures
 - renaming generated asset roles or changing compiler ownership semantics
@@ -222,7 +237,7 @@ Current version anchors are:
 - install-surface document `schema_version = 1`
 - Claude `projection_contract = "claude-host-projection-v3"`
 - Codex `projection_contract = "codex-host-projection-v2"`
-- RP `projection_contract = "rp-host-projection-v1"`
+- RP `projection_contract = "rp-host-projection-v3"`
 - stored runtime key = `host_contract`
 
 ### 4.2 Shared schema bumps

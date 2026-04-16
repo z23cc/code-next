@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from inspect import Parameter, signature
 from pathlib import Path
 
-from aiwf.adapters import restore_host_contract
+from aiwf.adapters import restore_host_contract, restore_rp_bridge_config
 from aiwf.adapters.base import HostContract, RunnerAdapter
 from aiwf.artifacts import ArtifactStore
 from aiwf.exceptions import AiwfError, ArtifactError, ErrorCode, StateError
@@ -14,6 +15,7 @@ from aiwf.loader import load_gate_set, load_policy, load_runbook, load_task
 from aiwf.models import (
     EventRecord,
     GateSet,
+    RpBridgeRunConfig,
     RunArtifactRef,
     RunDiagnostics,
     RunGateEvidence,
@@ -48,13 +50,18 @@ class WorkflowEngine:
         repo_root: str | Path | None = None,
         state_manager: RunStateManager | None = None,
         host_contract: HostContract | None = None,
-        adapter_resolver: Callable[[HostContract], RunnerAdapter] | None = None,
+        adapter_resolver: Callable[..., RunnerAdapter] | None = None,
+        bridge_config: RpBridgeRunConfig | None = None,
     ) -> None:
         self.adapter = adapter
         self.ai_root = Path(ai_root)
         self.repo_root = Path(repo_root) if repo_root is not None else self.ai_root.parent
         self.state_manager = state_manager or RunStateManager(self.ai_root)
         self.host_contract = host_contract or adapter.host_contract
+        adapter_bridge_config = getattr(adapter, "bridge_config", None)
+        if bridge_config is not None and bridge_config != adapter_bridge_config:
+            raise ValueError("Configured adapter bridge_config does not match the provided bridge_config")
+        self.bridge_config = adapter_bridge_config if bridge_config is None else bridge_config
         self.adapter_resolver = adapter_resolver
         self._active_runbook: RunbookSpec | None = None
         if self.adapter.host_contract != self.host_contract:
@@ -435,29 +442,62 @@ class WorkflowEngine:
             pass
 
     def _workflow_data(self, workflow: str) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "workflow": workflow,
             "host_contract": self.host_contract.to_metadata(),
         }
+        if self.bridge_config is not None:
+            data["rp_bridge"] = self.bridge_config.model_dump(mode="json")
+        return data
 
     def _restore_execution_metadata(self, meta: RunMeta, *, stage: str) -> None:
         try:
             contract = restore_host_contract(meta.data)
         except ValueError as exc:
             raise StateError("Run does not include a valid stored host contract", path=meta.run_dir, stage=stage) from exc
+        try:
+            bridge_config = restore_rp_bridge_config(meta.data)
+        except ValueError as exc:
+            raise StateError("Run does not include valid stored RP bridge metadata", path=meta.run_dir, stage=stage) from exc
 
         self.host_contract = contract
-        if self.adapter.host_contract == contract:
+        current_bridge_config = getattr(self.adapter, "bridge_config", None)
+        if self.adapter.host_contract == contract and current_bridge_config == bridge_config:
+            self.bridge_config = bridge_config
             return
         if self.adapter_resolver is None:
             raise StateError("WorkflowEngine adapter does not match stored host contract", path=meta.run_dir, stage=stage)
         try:
-            restored_adapter = self.adapter_resolver(contract)
+            restored_adapter = self._resolve_adapter(contract, meta.data)
         except Exception as exc:
             raise StateError("Failed to restore adapter from stored host contract", path=meta.run_dir, stage=stage) from exc
         if restored_adapter.host_contract != contract:
             raise StateError("Restored adapter does not honor stored host contract", path=meta.run_dir, stage=stage)
+        if getattr(restored_adapter, "bridge_config", None) != bridge_config:
+            raise StateError("Restored adapter does not honor stored RP bridge metadata", path=meta.run_dir, stage=stage)
         self.adapter = restored_adapter
+        self.bridge_config = bridge_config
+
+    def _resolve_adapter(self, contract: HostContract, run_data: Mapping[str, object]) -> RunnerAdapter:
+        if self.adapter_resolver is None:
+            raise StateError("WorkflowEngine adapter does not match stored host contract")
+
+        accepts_varargs = False
+        positional_params = 0
+        try:
+            resolver_signature = signature(self.adapter_resolver)
+        except (TypeError, ValueError):
+            resolver_signature = None
+        if resolver_signature is not None:
+            for parameter in resolver_signature.parameters.values():
+                if parameter.kind is Parameter.VAR_POSITIONAL:
+                    accepts_varargs = True
+                if parameter.kind in {Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD}:
+                    positional_params += 1
+
+        if accepts_varargs or positional_params >= 2:
+            return self.adapter_resolver(contract, run_data)
+        return self.adapter_resolver(contract)
 
     def _require_review_artifacts(self, store: ArtifactStore) -> None:
         for artifact_name in self.host_contract.review.required_run_artifacts:

@@ -66,23 +66,28 @@ jobs:
       - name: Sync dependencies
         run: uv sync --extra dev
 
-      - name: Install rp-cli stub for smoke
+      - name: Install rp-cli-stub reference harness for smoke
         shell: bash
         run: |
           set -euo pipefail
+          # Reference harness only: this does not install or verify a production RepoPrompt runtime.
           uv pip install --python .venv/bin/python ./tools/rp-cli-stub
+          # Keep the rp-cli symlink so doctor/conformance can exercise the RP protocol path in CI.
           ln -sf "$(pwd)/.venv/bin/rp-cli-stub" .venv/bin/rp-cli
 
-      - name: RP conformance smoke
+      - name: RP conformance smoke (reference stub only)
         shell: bash
         run: |
           set -euo pipefail
+          # This validates aiwf's RP protocol envelope handling against rp-cli-stub only.
+          # It must not be read as certification of the real RepoPrompt app / MCP CLI runtime.
           uv run aiwf conformance rp --rp-command rp-cli-stub --json | tee rp-conformance-report.json
 
       - name: Doctor JSON gate
         shell: bash
         run: |
           set -euo pipefail
+          # This doctor assertion is exercised against the reference stub installed above.
           uv run aiwf doctor --json > doctor-report.json
           uv run python -c "import json; report=json.load(open('doctor-report.json', encoding='utf-8')); rp=next(c for c in report['checks'] if c.get('category')=='tool' and c.get('name')=='rp'); assert rp.get('protocol_supported') is True, rp; assert rp.get('protocol_version')==1, rp"
 
