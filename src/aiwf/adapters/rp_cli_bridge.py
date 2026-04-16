@@ -446,7 +446,7 @@ class RpCliBridgeClient:
     ) -> RpAgentRunStartResult:
         if not prompt.strip():
             raise ValueError("agent_run_start requires a non-empty prompt")
-        payload: dict[str, Any] = {"action": "start", "prompt": prompt}
+        payload: dict[str, Any] = {"op": "start", "message": prompt}
         if workspace is not None:
             payload["workspace"] = workspace
         if tab is not None:
@@ -521,7 +521,7 @@ class RpCliBridgeClient:
         normalized_session_id = session_id.strip()
         if not normalized_session_id:
             raise ValueError("agent_run_wait requires a non-empty session_id")
-        payload: dict[str, Any] = {"action": "wait", "session_id": normalized_session_id}
+        payload: dict[str, Any] = {"op": "wait", "session_id": normalized_session_id}
         if workspace is not None:
             payload["workspace"] = workspace
         if tab is not None:
@@ -596,7 +596,7 @@ class RpCliBridgeClient:
         normalized_session_id = session_id.strip()
         if not normalized_session_id:
             raise ValueError("agent_log requires a non-empty session_id")
-        payload: dict[str, Any] = {"action": "get_log", "session_id": normalized_session_id}
+        payload: dict[str, Any] = {"op": "get_log", "session_id": normalized_session_id}
         if workspace is not None:
             payload["workspace"] = workspace
         if tab is not None:
