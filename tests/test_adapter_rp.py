@@ -230,6 +230,25 @@ def test_rp_agent_adapter_managed_agent_execute_waiting_for_input_blocks_with_re
     assert (run_dir / "rp-agent-implement-response.md").exists() is False
 
 
+def test_rp_agent_adapter_managed_agent_execute_running_snapshot_blocks_with_resume_cursor(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(mode="managed-agent", workspace="workspace-alpha", context_id="ctx-123")
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="managed-running")
+    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)])
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+
+    agent_log = json.loads((run_dir / "rp-bridge-agent-log.json").read_text(encoding="utf-8"))
+    assert result.status is RunStatus.blocked
+    assert result.metadata["blocked_resume_stage"] == "plan"
+    assert result.metadata["bridge_agent"]["status"] == "waiting_for_input"
+    assert "waiting for operator input" in result.summary.lower()
+    assert agent_log["sessions"][-1]["status"] == "waiting_for_input"
+    assert (run_dir / "rp-agent-implement-response.md").exists() is False
+
+
 def test_rp_agent_adapter_managed_agent_transport_unavailable_maps_to_adapter_unavailable(tmp_path: Path) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
     bridge_config = RpBridgeRunConfig(mode="managed-agent", workspace="workspace-alpha", context_id="ctx-123")
@@ -684,6 +703,9 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        if MODE == 'managed-waiting':\n"
             "            status = 'waiting_for_input'\n"
             "            output = None\n"
+            "        elif MODE == 'managed-running':\n"
+            "            status = 'running'\n"
+            "            output = None\n"
             "        elif MODE == 'managed-failed':\n"
             "            status = 'failed'\n"
             "            output = None\n"
@@ -704,6 +726,9 @@ def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    session_id = payload.get('session_id')\n"
             "    if MODE == 'managed-waiting':\n"
             "        status = 'waiting_for_input'\n"
+            "        output = None\n"
+            "    elif MODE == 'managed-running':\n"
+            "        status = 'running'\n"
             "        output = None\n"
             "    elif MODE == 'managed-failed':\n"
             "        status = 'failed'\n"

@@ -1078,7 +1078,12 @@ class RpAgentAdapter:
             self._append_bridge_agent_log_artifact(run_dir, record)
             return record, response_text
 
-        if terminal_status == "waiting_for_input":
+        if terminal_status in {"waiting_for_input", "running"}:
+            summary = (
+                "RepoPrompt managed-agent session is waiting for operator input."
+                if terminal_status == "waiting_for_input"
+                else "RepoPrompt managed-agent session is still running; resume after it reaches a wait/completion checkpoint."
+            )
             record = RpBridgeManagedAgentRecord(
                 stage=stage,
                 session_id=session_id,
@@ -1088,7 +1093,7 @@ class RpAgentAdapter:
                 context_id=wait_result.context_id or resolved_context_id,
                 agent_role=agent_role,
                 prompt_artifact=prompt_artifact,
-                summary="RepoPrompt managed-agent session is waiting for operator input.",
+                summary=summary,
                 log=log_payload or (wait_result.raw_payload or {}),
                 calls=calls,
             )
