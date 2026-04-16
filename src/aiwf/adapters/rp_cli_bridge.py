@@ -44,6 +44,51 @@ class RpToolListResult:
 
 
 @dataclass(frozen=True)
+class RpWorkspaceInfo:
+    """A single workspace entry discovered via `manage_workspaces`."""
+
+    workspace_id: str | None = None
+    name: str | None = None
+    repo_paths: tuple[str, ...] = ()
+    window_ids: tuple[int, ...] = ()
+    is_hidden: bool | None = None
+    raw_payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RpWorkspaceListResult:
+    """Typed result of `manage_workspaces action=list`."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    workspaces: tuple[RpWorkspaceInfo, ...] = ()
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpWorkspaceResolveResult:
+    """Typed result of resolving a workspace hint against RepoPrompt inventory."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    workspace: str | None = None
+    workspace_id: str | None = None
+    repo_paths: tuple[str, ...] = ()
+    window_ids: tuple[int, ...] = ()
+    is_hidden: bool | None = None
+    matched_by: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
 class RpWorkspaceContextResult:
     """Typed result of a workspace-context snapshot."""
 
@@ -86,6 +131,27 @@ class RpReadFileResult:
     workspace: str | None = None
     context_id: str | None = None
     error: RpBridgeError | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpBindContextResult:
+    """Typed result of binding or inspecting RepoPrompt routing context."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    workspace: str | None = None
+    workspace_id: str | None = None
+    window_id: int | None = None
+    tab: str | None = None
+    tab_id: str | None = None
+    context_id: str | None = None
+    working_dirs: tuple[str, ...] = ()
+    windows: tuple[dict[str, Any], ...] = ()
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
     raw_stdout: str | None = None
     raw_stderr: str | None = None
 
@@ -141,6 +207,101 @@ class RpAgentLogResult:
     workspace: str | None = None
     tab: str | None = None
     context_id: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpAgentRunCancelResult:
+    """Typed result of cancelling a managed-agent session."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    session_id: str
+    status: str | None = None
+    workspace: str | None = None
+    tab: str | None = None
+    context_id: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpAgentSessionInfo:
+    """A single session discovered via `agent_manage op=list_sessions`."""
+
+    session_id: str | None = None
+    session_name: str | None = None
+    status: str | None = None
+    model_id: str | None = None
+    raw_payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RpAgentSessionListResult:
+    """Typed result of browsing managed-agent sessions."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    sessions: tuple[RpAgentSessionInfo, ...] = ()
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | list[Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpAgentSessionResumeResult:
+    """Typed result of `agent_manage op=resume_session`."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    session_id: str | None = None
+    status: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpAgentTranscriptResult:
+    """Typed result of fetching managed-agent transcript/log content."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    session_id: str
+    status: str | None = None
+    transcript: str | None = None
+    events: tuple[dict[str, Any], ...] = ()
+    handoff_summary: str | None = None
+    source_operation: str | None = None
+    error: RpBridgeError | None = None
+    raw_payload: dict[str, Any] | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpAgentHandoffResult:
+    """Typed result of exporting a managed-agent handoff."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    session_id: str
+    status: str | None = None
+    handoff_xml: str | None = None
+    handoff_summary: str | None = None
+    output_path: str | None = None
     error: RpBridgeError | None = None
     raw_payload: dict[str, Any] | None = None
     raw_stdout: str | None = None
@@ -259,7 +420,125 @@ class RpCliBridgeClient:
             tools=self._detected_tools or _REPOPROMPT_MCP_TOOL_MANIFEST,
         )
 
+    def manage_workspaces_list(self, *, include_hidden: bool = False) -> RpWorkspaceListResult:
+        capability_error = self._capability_error("manage_workspaces", operation="list")
+        if capability_error is not None:
+            return RpWorkspaceListResult(ok=False, command=self.command, path=self.command[0], error=capability_error)
+        payload: dict[str, Any] = {"action": "list"}
+        if include_hidden:
+            payload["include_hidden"] = True
+        invocation = self._invoke_tool("manage_workspaces", payload, context="manage_workspaces_list")
+        if not invocation.ok:
+            return RpWorkspaceListResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="manage_workspaces_list")
+        workspaces = self._extract_workspaces(response)
+        return RpWorkspaceListResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            workspaces=workspaces,
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def manage_workspaces_resolve(self, workspace: str, *, include_hidden: bool = True) -> RpWorkspaceResolveResult:
+        normalized_workspace = workspace.strip()
+        if not normalized_workspace:
+            raise ValueError("manage_workspaces_resolve requires a non-empty workspace")
+        listed = self.manage_workspaces_list(include_hidden=include_hidden)
+        if not listed.ok:
+            return RpWorkspaceResolveResult(
+                ok=False,
+                command=listed.command,
+                path=listed.path,
+                workspace=normalized_workspace,
+                error=listed.error,
+                raw_payload=listed.raw_payload,
+                raw_stdout=listed.raw_stdout,
+                raw_stderr=listed.raw_stderr,
+            )
+        lowered = normalized_workspace.casefold()
+        for matcher, matched_by in (
+            (lambda item: item.workspace_id and item.workspace_id.casefold() == lowered, "workspace_id"),
+            (lambda item: item.name and item.name.casefold() == lowered, "name"),
+        ):
+            for item in listed.workspaces:
+                if matcher(item):
+                    return RpWorkspaceResolveResult(
+                        ok=True,
+                        command=listed.command,
+                        path=listed.path,
+                        workspace=item.name or normalized_workspace,
+                        workspace_id=item.workspace_id,
+                        repo_paths=item.repo_paths,
+                        window_ids=item.window_ids,
+                        is_hidden=item.is_hidden,
+                        matched_by=matched_by,
+                        raw_payload=listed.raw_payload,
+                        raw_stdout=listed.raw_stdout,
+                        raw_stderr=listed.raw_stderr,
+                    )
+        return RpWorkspaceResolveResult(
+            ok=False,
+            command=listed.command,
+            path=listed.path,
+            workspace=normalized_workspace,
+            error=RpBridgeError(
+                code="WORKSPACE_NOT_FOUND",
+                message=f"RepoPrompt workspace {normalized_workspace!r} was not found",
+                retriable=False,
+            ),
+            raw_payload=listed.raw_payload,
+            raw_stdout=listed.raw_stdout,
+            raw_stderr=listed.raw_stderr,
+        )
+
+    def bind_context_status(self) -> RpBindContextResult:
+        return self._bind_context({"op": "status"}, context="bind_context_status")
+
+    def bind_context_list(self, *, window_id: int | None = None) -> RpBindContextResult:
+        payload: dict[str, Any] = {"op": "list"}
+        if window_id is not None:
+            payload["window_id"] = window_id
+        return self._bind_context(payload, context="bind_context_list")
+
+    def bind_context_bind(
+        self,
+        *,
+        working_dirs: Sequence[str] | None = None,
+        context_id: str | None = None,
+        window_id: int | None = None,
+        create_if_missing: bool = False,
+        tab_name: str | None = None,
+    ) -> RpBindContextResult:
+        payload: dict[str, Any] = {"op": "bind"}
+        normalized_dirs = [str(value).strip() for value in (working_dirs or ()) if str(value).strip()]
+        if normalized_dirs:
+            payload["working_dirs"] = ",".join(normalized_dirs) if len(normalized_dirs) > 1 else normalized_dirs[0]
+        if context_id is not None:
+            payload["context_id"] = context_id
+        if window_id is not None:
+            payload["window_id"] = window_id
+        if create_if_missing:
+            payload["create_if_missing"] = True
+        if tab_name is not None:
+            payload["tab_name"] = tab_name
+        if set(payload) == {"op"}:
+            raise ValueError("bind_context_bind requires working_dirs, context_id, or window_id")
+        return self._bind_context(payload, context="bind_context_bind")
+
     def workspace_context(self, workspace: str | None = None) -> RpWorkspaceContextResult:
+        capability_error = self._capability_error("workspace_context")
+        if capability_error is not None:
+            return RpWorkspaceContextResult(ok=False, command=self.command, path=self.command[0], error=capability_error)
         payload: dict[str, Any] = {}
         if workspace is not None:
             payload["workspace"] = workspace
@@ -311,6 +590,9 @@ class RpCliBridgeClient:
         context_id: str | None = None,
         mode: str = "full",
     ) -> RpManageSelectionResult:
+        capability_error = self._capability_error("manage_selection")
+        if capability_error is not None:
+            return RpManageSelectionResult(ok=False, command=self.command, path=self.command[0], error=capability_error)
         normalized_paths = tuple(str(path).strip() for path in paths if str(path).strip())
         if not normalized_paths:
             raise ValueError("manage_selection_add requires at least one path")
@@ -370,6 +652,9 @@ class RpCliBridgeClient:
         tab: str | None = None,
         context_id: str | None = None,
     ) -> RpReadFileResult:
+        capability_error = self._capability_error("read_file")
+        if capability_error is not None:
+            return RpReadFileResult(ok=False, command=self.command, path=self.command[0], source=source.strip(), error=capability_error)
         normalized_source = source.strip()
         if not normalized_source:
             raise ValueError("read_file requires a non-empty source")
@@ -444,6 +729,9 @@ class RpCliBridgeClient:
         agent_role: str | None = None,
         stage: str | None = None,
     ) -> RpAgentRunStartResult:
+        capability_error = self._capability_error("agent_run", operation="start")
+        if capability_error is not None:
+            return RpAgentRunStartResult(ok=False, command=self.command, path=self.command[0], error=capability_error)
         if not prompt.strip():
             raise ValueError("agent_run_start requires a non-empty prompt")
         payload: dict[str, Any] = {"op": "start", "message": prompt, "detach": True}
@@ -510,6 +798,89 @@ class RpCliBridgeClient:
             raw_stderr=invocation.stderr,
         )
 
+    def agent_run_poll(
+        self,
+        session_id: str,
+        *,
+        workspace: str | None = None,
+        tab: str | None = None,
+        context_id: str | None = None,
+    ) -> RpAgentRunWaitResult:
+        capability_error = self._capability_error("agent_run", operation="poll")
+        normalized_session_id = session_id.strip()
+        if capability_error is not None:
+            return RpAgentRunWaitResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                session_id=normalized_session_id,
+                error=capability_error,
+            )
+        if not normalized_session_id:
+            raise ValueError("agent_run_poll requires a non-empty session_id")
+        payload: dict[str, Any] = {"op": "poll", "session_id": normalized_session_id}
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if tab is not None:
+            payload["tab"] = tab
+        if context_id is not None:
+            payload["context_id"] = context_id
+        invocation = self._invoke_tool("agent_run", payload, context="agent_run_poll")
+        if not invocation.ok:
+            return RpAgentRunWaitResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="agent_run_poll")
+        if not isinstance(response, dict):
+            return RpAgentRunWaitResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_run_poll",
+                    message="agent_run_poll did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        status = self._optional_string(response.get("status"))
+        if status is None:
+            return RpAgentRunWaitResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_run_poll",
+                    message="agent_run_poll did not include a non-empty status",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpAgentRunWaitResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            session_id=normalized_session_id,
+            status=status,
+            output=self._extract_output_text(response),
+            workspace=self._optional_string(response.get("workspace")) or workspace,
+            tab=self._optional_string(response.get("tab")) or tab,
+            context_id=self._optional_string(response.get("context_id")) or context_id,
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
     def agent_run_wait(
         self,
         session_id: str,
@@ -518,7 +889,16 @@ class RpCliBridgeClient:
         tab: str | None = None,
         context_id: str | None = None,
     ) -> RpAgentRunWaitResult:
+        capability_error = self._capability_error("agent_run", operation="wait")
         normalized_session_id = session_id.strip()
+        if capability_error is not None:
+            return RpAgentRunWaitResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                session_id=normalized_session_id,
+                error=capability_error,
+            )
         if not normalized_session_id:
             raise ValueError("agent_run_wait requires a non-empty session_id")
         wait_timeout_seconds = max(1, self.timeout_seconds - 1)
@@ -590,6 +970,74 @@ class RpCliBridgeClient:
             raw_stderr=invocation.stderr,
         )
 
+    def agent_run_cancel(
+        self,
+        session_id: str,
+        *,
+        workspace: str | None = None,
+        tab: str | None = None,
+        context_id: str | None = None,
+    ) -> RpAgentRunCancelResult:
+        capability_error = self._capability_error("agent_run", operation="cancel")
+        normalized_session_id = session_id.strip()
+        if capability_error is not None:
+            return RpAgentRunCancelResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                session_id=normalized_session_id,
+                error=capability_error,
+            )
+        if not normalized_session_id:
+            raise ValueError("agent_run_cancel requires a non-empty session_id")
+        payload: dict[str, Any] = {"op": "cancel", "session_id": normalized_session_id}
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if tab is not None:
+            payload["tab"] = tab
+        if context_id is not None:
+            payload["context_id"] = context_id
+        invocation = self._invoke_tool("agent_run", payload, context="agent_run_cancel")
+        if not invocation.ok:
+            return RpAgentRunCancelResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="agent_run_cancel")
+        if response is not None and not isinstance(response, dict):
+            return RpAgentRunCancelResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_run_cancel",
+                    message="agent_run_cancel did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        mapping = response if isinstance(response, dict) else {}
+        return RpAgentRunCancelResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            session_id=normalized_session_id,
+            status=self._optional_string(mapping.get("status")) or "cancelled",
+            workspace=self._optional_string(mapping.get("workspace")) or workspace,
+            tab=self._optional_string(mapping.get("tab")) or tab,
+            context_id=self._optional_string(mapping.get("context_id")) or context_id,
+            raw_payload=mapping or None,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
     def agent_log(
         self,
         session_id: str,
@@ -598,7 +1046,16 @@ class RpCliBridgeClient:
         tab: str | None = None,
         context_id: str | None = None,
     ) -> RpAgentLogResult:
+        capability_error = self._capability_error("agent_manage", operation="get_log")
         normalized_session_id = session_id.strip()
+        if capability_error is not None:
+            return RpAgentLogResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                session_id=normalized_session_id,
+                error=capability_error,
+            )
         if not normalized_session_id:
             raise ValueError("agent_log requires a non-empty session_id")
         payload: dict[str, Any] = {"op": "get_log", "session_id": normalized_session_id}
@@ -621,17 +1078,37 @@ class RpCliBridgeClient:
                 raw_stderr=invocation.stderr,
             )
         response = self._load_json_payload(invocation, context="agent_log")
-        if not isinstance(response, dict):
+        if response is None:
+            transcript = (invocation.stdout or "").strip() or None
             return RpAgentLogResult(
-                ok=False,
+                ok=True,
                 command=invocation.command,
                 path=invocation.path,
                 session_id=normalized_session_id,
-                error=self._malformed_response_error(
-                    invocation,
-                    context="agent_log",
-                    message="agent_log did not return a JSON object",
-                ),
+                status=None,
+                output=transcript,
+                log={"transcript": transcript} if transcript is not None else {},
+                workspace=workspace,
+                tab=tab,
+                context_id=context_id,
+                raw_payload=None,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        if not isinstance(response, dict):
+            transcript = (invocation.stdout or "").strip() or None
+            return RpAgentLogResult(
+                ok=True,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                status=None,
+                output=transcript,
+                log={"transcript": transcript} if transcript is not None else {},
+                workspace=workspace,
+                tab=tab,
+                context_id=context_id,
+                raw_payload=None,
                 raw_stdout=invocation.stdout,
                 raw_stderr=invocation.stderr,
             )
@@ -651,6 +1128,392 @@ class RpCliBridgeClient:
             raw_stdout=invocation.stdout,
             raw_stderr=invocation.stderr,
         )
+
+    def agent_manage_list_sessions(
+        self,
+        *,
+        limit: int | None = None,
+        state: str | None = None,
+        name: str | None = None,
+    ) -> RpAgentSessionListResult:
+        capability_error = self._capability_error("agent_manage", operation="list_sessions")
+        if capability_error is not None:
+            return RpAgentSessionListResult(ok=False, command=self.command, path=self.command[0], error=capability_error)
+        payload: dict[str, Any] = {"op": "list_sessions"}
+        if limit is not None:
+            payload["limit"] = limit
+        if state is not None:
+            payload["state"] = state
+        if name is not None:
+            payload["name"] = name
+        invocation = self._invoke_tool("agent_manage", payload, context="agent_manage_list_sessions")
+        if not invocation.ok:
+            return RpAgentSessionListResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="agent_manage_list_sessions")
+        sessions = self._extract_agent_sessions(response)
+        return RpAgentSessionListResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            sessions=sessions,
+            raw_payload=response,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def agent_manage_resume_session(self, session_id: str, *, model_id: str | None = None) -> RpAgentSessionResumeResult:
+        capability_error = self._capability_error("agent_manage", operation="resume_session")
+        normalized_session_id = session_id.strip()
+        if capability_error is not None:
+            return RpAgentSessionResumeResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                session_id=normalized_session_id,
+                error=capability_error,
+            )
+        if not normalized_session_id:
+            raise ValueError("agent_manage_resume_session requires a non-empty session_id")
+        payload: dict[str, Any] = {"op": "resume_session", "session_id": normalized_session_id}
+        if model_id is not None:
+            payload["model_id"] = model_id
+        invocation = self._invoke_tool("agent_manage", payload, context="agent_manage_resume_session")
+        if not invocation.ok:
+            return RpAgentSessionResumeResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="agent_manage_resume_session")
+        if response is not None and not isinstance(response, dict):
+            return RpAgentSessionResumeResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_manage_resume_session",
+                    message="agent_manage_resume_session did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        mapping = response if isinstance(response, dict) else {}
+        return RpAgentSessionResumeResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            session_id=self._optional_string(mapping.get("session_id")) or normalized_session_id,
+            status=self._optional_string(mapping.get("status")),
+            raw_payload=mapping or None,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def agent_manage_transcript(
+        self,
+        session_id: str,
+        *,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> RpAgentTranscriptResult:
+        normalized_session_id = session_id.strip()
+        if not normalized_session_id:
+            raise ValueError("agent_manage_transcript requires a non-empty session_id")
+
+        if self._tool_supports_operation("agent_manage", "get_transcript"):
+            payload: dict[str, Any] = {"op": "get_transcript", "session_id": normalized_session_id}
+            if offset is not None:
+                payload["offset"] = offset
+            if limit is not None:
+                payload["limit"] = limit
+            invocation = self._invoke_tool("agent_manage", payload, context="agent_manage_transcript")
+            if not invocation.ok:
+                return RpAgentTranscriptResult(
+                    ok=False,
+                    command=invocation.command,
+                    path=invocation.path,
+                    session_id=normalized_session_id,
+                    error=invocation.error,
+                    raw_stdout=invocation.stdout,
+                    raw_stderr=invocation.stderr,
+                )
+            response = self._load_json_payload(invocation, context="agent_manage_transcript")
+            if not isinstance(response, dict):
+                return RpAgentTranscriptResult(
+                    ok=False,
+                    command=invocation.command,
+                    path=invocation.path,
+                    session_id=normalized_session_id,
+                    error=self._malformed_response_error(
+                        invocation,
+                        context="agent_manage_transcript",
+                        message="agent_manage_transcript did not return a JSON object",
+                    ),
+                    raw_stdout=invocation.stdout,
+                    raw_stderr=invocation.stderr,
+                )
+            raw_events = response.get("events")
+            events = tuple(item for item in raw_events if isinstance(item, dict)) if isinstance(raw_events, list) else ()
+            return RpAgentTranscriptResult(
+                ok=True,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                status=self._optional_string(response.get("status")),
+                transcript=self._optional_string(response.get("transcript")) or self._extract_output_text(response),
+                events=events,
+                handoff_summary=self._optional_string(response.get("handoff_summary"))
+                or self._optional_string(response.get("summary")),
+                source_operation="get_transcript",
+                raw_payload=response,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+
+        log_result = self.agent_log(normalized_session_id)
+        if not log_result.ok:
+            return RpAgentTranscriptResult(
+                ok=False,
+                command=log_result.command,
+                path=log_result.path,
+                session_id=log_result.session_id,
+                error=log_result.error,
+                raw_payload=log_result.raw_payload,
+                raw_stdout=log_result.raw_stdout,
+                raw_stderr=log_result.raw_stderr,
+            )
+        transcript = log_result.output
+        events = ()
+        raw_payload = log_result.raw_payload
+        if isinstance(raw_payload, dict):
+            raw_events = raw_payload.get("events")
+            if isinstance(raw_events, list):
+                events = tuple(item for item in raw_events if isinstance(item, dict))
+        return RpAgentTranscriptResult(
+            ok=True,
+            command=log_result.command,
+            path=log_result.path,
+            session_id=log_result.session_id,
+            status=log_result.status,
+            transcript=transcript,
+            events=events,
+            source_operation="get_log",
+            raw_payload=raw_payload,
+            raw_stdout=log_result.raw_stdout,
+            raw_stderr=log_result.raw_stderr,
+        )
+
+    def agent_manage_extract_handoff(
+        self,
+        session_id: str,
+        *,
+        output_path: str | None = None,
+        inline: bool | None = None,
+    ) -> RpAgentHandoffResult:
+        capability_error = self._capability_error("agent_manage", operation="extract_handoff")
+        normalized_session_id = session_id.strip()
+        if capability_error is not None:
+            return RpAgentHandoffResult(
+                ok=False,
+                command=self.command,
+                path=self.command[0],
+                session_id=normalized_session_id,
+                error=capability_error,
+            )
+        if not normalized_session_id:
+            raise ValueError("agent_manage_extract_handoff requires a non-empty session_id")
+        payload: dict[str, Any] = {"op": "extract_handoff", "session_id": normalized_session_id}
+        if output_path is not None:
+            payload["output_path"] = output_path
+        if inline is not None:
+            payload["inline"] = inline
+        invocation = self._invoke_tool("agent_manage", payload, context="agent_manage_extract_handoff")
+        if not invocation.ok:
+            return RpAgentHandoffResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="agent_manage_extract_handoff")
+        handoff_xml = (invocation.stdout or "").strip() or None
+        resolved_output_path = output_path
+        raw_payload: dict[str, Any] | None = None
+        if isinstance(response, dict):
+            raw_payload = response
+            handoff_xml = self._optional_string(response.get("handoff_xml")) or self._extract_output_text(response) or handoff_xml
+            resolved_output_path = self._optional_string(response.get("output_path")) or output_path
+        elif response is not None:
+            return RpAgentHandoffResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                session_id=normalized_session_id,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="agent_manage_extract_handoff",
+                    message="agent_manage_extract_handoff did not return valid JSON or XML",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpAgentHandoffResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            session_id=normalized_session_id,
+            status=self._optional_string(raw_payload.get("status")) if isinstance(raw_payload, dict) else None,
+            handoff_xml=handoff_xml,
+            handoff_summary=(
+                self._optional_string(raw_payload.get("handoff_summary"))
+                or self._optional_string(raw_payload.get("summary"))
+                if isinstance(raw_payload, dict)
+                else None
+            ),
+            output_path=resolved_output_path,
+            raw_payload=raw_payload,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def _bind_context(self, payload: Mapping[str, Any], *, context: str) -> RpBindContextResult:
+        capability_error = self._capability_error("bind_context", operation=str(payload.get("op", "")).strip() or None)
+        if capability_error is not None:
+            return RpBindContextResult(ok=False, command=self.command, path=self.command[0], error=capability_error)
+        invocation = self._invoke_tool("bind_context", payload, context=context)
+        if not invocation.ok:
+            return RpBindContextResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context=context)
+        if response is not None and not isinstance(response, dict):
+            return RpBindContextResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=self._malformed_response_error(
+                    invocation,
+                    context=context,
+                    message=f"{context} did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        mapping = response if isinstance(response, dict) else {}
+        return RpBindContextResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            workspace=self._optional_string(self._resolve_nested_value(mapping, ("workspace", "name")))
+            or self._optional_string(mapping.get("workspace"))
+            or self._optional_string(self._resolve_nested_value(mapping, ("current_workspace", "name"))),
+            workspace_id=self._optional_string(self._resolve_nested_value(mapping, ("workspace", "id")))
+            or self._optional_string(self._resolve_nested_value(mapping, ("current_workspace", "id")))
+            or self._optional_string(mapping.get("workspace_id")),
+            window_id=self._optional_int(mapping.get("window_id"))
+            or self._optional_int(self._resolve_nested_value(mapping, ("binding", "window_id")))
+            or self._optional_int(self._resolve_nested_value(mapping, ("current_binding", "window_id"))),
+            tab=self._optional_string(self._resolve_nested_value(mapping, ("tab", "name")))
+            or self._optional_string(mapping.get("tab"))
+            or self._optional_string(self._resolve_nested_value(mapping, ("binding", "tab_name"))),
+            tab_id=self._optional_string(self._resolve_nested_value(mapping, ("tab", "id")))
+            or self._optional_string(mapping.get("tab_id"))
+            or self._optional_string(self._resolve_nested_value(mapping, ("binding", "tab_id"))),
+            context_id=self._optional_string(mapping.get("context_id"))
+            or self._optional_string(self._resolve_nested_value(mapping, ("tab", "context_id")))
+            or self._optional_string(self._resolve_nested_value(mapping, ("binding", "context_id")))
+            or self._optional_string(self._resolve_nested_value(mapping, ("current_binding", "context_id"))),
+            working_dirs=self._extract_string_list(mapping, keys=("working_dirs", "repo_paths", "repoPaths")),
+            windows=tuple(window for window in self._extract_windows(mapping) if isinstance(window, dict)),
+            raw_payload=mapping or None,
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def _capability_error(self, tool: str, *, operation: str | None = None) -> RpBridgeError | None:
+        mode = self._detect_invocation_mode()
+        if mode is _ToolInvocationMode.UNAVAILABLE:
+            return self._invocation_detection_error or RpBridgeError(
+                code="BRIDGE_TOOL_INVOCATION_UNSUPPORTED",
+                message="RP bridge does not expose a supported MCP tool invocation surface",
+                retriable=False,
+            )
+        tool_info = self._tool_info(tool)
+        if tool_info is None:
+            return RpBridgeError(
+                code="TOOL_UNAVAILABLE",
+                message=f"RP bridge tool {tool!r} is not available in this runtime",
+                retriable=False,
+                detail={"tool": tool},
+            )
+        if operation is None:
+            return None
+        supported_operations = self._tool_operations(tool_info)
+        if supported_operations and operation not in supported_operations:
+            return RpBridgeError(
+                code="TOOL_UNAVAILABLE",
+                message=f"RP bridge tool {tool!r} does not support operation {operation!r}",
+                retriable=False,
+                detail={"tool": tool, "operation": operation},
+            )
+        return None
+
+    def _tool_info(self, tool: str) -> RpToolInfo | None:
+        self._detect_invocation_mode()
+        tools = self._detected_tools or ()
+        for item in tools:
+            if item.name == tool:
+                return item
+        return None
+
+    def _tool_supports_operation(self, tool: str, operation: str) -> bool:
+        tool_info = self._tool_info(tool)
+        if tool_info is None:
+            return False
+        operations = self._tool_operations(tool_info)
+        return operation in operations
+
+    def _tool_operations(self, tool: RpToolInfo) -> set[str]:
+        metadata = tool.metadata or {}
+        input_schema = metadata.get("inputSchema")
+        if not isinstance(input_schema, dict):
+            return set()
+        properties = input_schema.get("properties")
+        if not isinstance(properties, dict):
+            return set()
+        operations: set[str] = set()
+        for key in ("op", "action"):
+            raw_property = properties.get(key)
+            if not isinstance(raw_property, dict):
+                continue
+            raw_enum = raw_property.get("enum")
+            if not isinstance(raw_enum, list):
+                continue
+            for value in raw_enum:
+                if isinstance(value, str) and value.strip():
+                    operations.add(value.strip())
+        return operations
 
     def _detect_invocation_mode(self) -> _ToolInvocationMode:
         if self._invocation_mode is not None:
@@ -982,6 +1845,89 @@ class RpCliBridgeClient:
             )
         return tuple(tools)
 
+    def _extract_workspaces(self, payload: dict[str, Any] | list[Any] | None) -> tuple[RpWorkspaceInfo, ...]:
+        if payload is None:
+            return ()
+        raw_items: list[Any]
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            for key in ("workspaces", "items", "results"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    raw_items = value
+                    break
+            else:
+                raw_items = [payload] if any(key in payload for key in ("workspace", "id", "name", "repo_paths", "repoPaths")) else []
+        else:
+            raw_items = []
+        items: list[RpWorkspaceInfo] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            workspace_mapping = raw_item.get("workspace") if isinstance(raw_item.get("workspace"), dict) else raw_item
+            if not isinstance(workspace_mapping, dict):
+                continue
+            repo_paths = self._extract_string_list(workspace_mapping, keys=("repo_paths", "repoPaths", "paths", "folders"))
+            window_ids = self._extract_int_list(workspace_mapping, keys=("window_ids", "windowIds", "showing_window_ids"))
+            items.append(
+                RpWorkspaceInfo(
+                    workspace_id=self._optional_string(workspace_mapping.get("id"))
+                    or self._optional_string(workspace_mapping.get("workspace_id")),
+                    name=self._optional_string(workspace_mapping.get("name"))
+                    or self._optional_string(workspace_mapping.get("workspace")),
+                    repo_paths=repo_paths,
+                    window_ids=window_ids,
+                    is_hidden=self._optional_bool(workspace_mapping.get("is_hidden"))
+                    if self._optional_bool(workspace_mapping.get("is_hidden")) is not None
+                    else self._optional_bool(workspace_mapping.get("hidden")),
+                    raw_payload=dict(raw_item),
+                )
+            )
+        return tuple(items)
+
+    def _extract_windows(self, payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+        for key in ("windows", "items", "results"):
+            raw_windows = payload.get(key)
+            if isinstance(raw_windows, list):
+                return tuple(item for item in raw_windows if isinstance(item, dict))
+        current_window = payload.get("window")
+        if isinstance(current_window, dict):
+            return (current_window,)
+        return ()
+
+    def _extract_agent_sessions(self, payload: dict[str, Any] | list[Any] | None) -> tuple[RpAgentSessionInfo, ...]:
+        if payload is None:
+            return ()
+        raw_items: list[Any]
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            for key in ("sessions", "items", "results"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    raw_items = value
+                    break
+            else:
+                raw_items = [payload] if any(key in payload for key in ("session_id", "status", "session_name")) else []
+        else:
+            raw_items = []
+        sessions: list[RpAgentSessionInfo] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            sessions.append(
+                RpAgentSessionInfo(
+                    session_id=self._optional_string(raw_item.get("session_id")) or self._optional_string(raw_item.get("id")),
+                    session_name=self._optional_string(raw_item.get("session_name"))
+                    or self._optional_string(raw_item.get("name")),
+                    status=self._optional_string(raw_item.get("status")) or self._optional_string(raw_item.get("state")),
+                    model_id=self._optional_string(raw_item.get("model_id")),
+                    raw_payload=dict(raw_item),
+                )
+            )
+        return tuple(sessions)
+
     def _extract_selected_paths(self, payload: dict[str, Any]) -> tuple[str, ...]:
         raw_paths = payload.get("selected_paths")
         if raw_paths is None:
@@ -1002,12 +1948,30 @@ class RpCliBridgeClient:
                 return tuple(values)
         return ()
 
+    def _extract_int_list(self, payload: dict[str, Any], *, keys: Sequence[str]) -> tuple[int, ...]:
+        for key in keys:
+            raw = payload.get(key)
+            if not isinstance(raw, list):
+                continue
+            values = [value for value in raw if isinstance(value, int)]
+            if values:
+                return tuple(values)
+        return ()
+
     def _extract_output_text(self, payload: dict[str, Any]) -> str | None:
         for key in ("output", "content", "response"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value
         return None
+
+    def _resolve_nested_value(self, payload: Mapping[str, Any], path: Sequence[str]) -> object | None:
+        current: object = payload
+        for key in path:
+            if not isinstance(current, Mapping):
+                return None
+            current = current.get(key)
+        return current
 
     def _malformed_response_error(
         self,
@@ -1026,11 +1990,23 @@ class RpCliBridgeClient:
     def _optional_string(self, value: object) -> str | None:
         return value.strip() if isinstance(value, str) and value.strip() else None
 
+    def _optional_int(self, value: object) -> int | None:
+        return value if isinstance(value, int) else None
+
+    def _optional_bool(self, value: object) -> bool | None:
+        return value if isinstance(value, bool) else None
+
 
 __all__ = [
     "RpAgentLogResult",
+    "RpAgentHandoffResult",
+    "RpAgentRunCancelResult",
+    "RpAgentSessionListResult",
+    "RpAgentSessionResumeResult",
     "RpAgentRunStartResult",
     "RpAgentRunWaitResult",
+    "RpAgentTranscriptResult",
+    "RpBindContextResult",
     "RpBridgeError",
     "RpBridgeProbeResult",
     "RpCliBridgeClient",
@@ -1038,5 +2014,8 @@ __all__ = [
     "RpReadFileResult",
     "RpToolInfo",
     "RpToolListResult",
+    "RpWorkspaceInfo",
+    "RpWorkspaceListResult",
+    "RpWorkspaceResolveResult",
     "RpWorkspaceContextResult",
 ]

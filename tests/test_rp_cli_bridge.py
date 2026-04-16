@@ -47,6 +47,26 @@ def test_rp_cli_bridge_workspace_context_success(tmp_path: Path) -> None:
     assert result.selected_paths == ("src/example.py", ".ai/runs/sample/context-pack.md")
 
 
+def test_rp_cli_bridge_manage_workspaces_and_bind_context_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="workspace-bind-ok")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    list_result = client.manage_workspaces_list(include_hidden=True)
+    resolve_result = client.manage_workspaces_resolve("workspace-alpha")
+    bind_result = client.bind_context_bind(window_id=11)
+
+    assert list_result.ok is True
+    assert [workspace.name for workspace in list_result.workspaces] == ["workspace-alpha", "workspace-beta"]
+    assert resolve_result.ok is True
+    assert resolve_result.workspace_id == "workspace-1"
+    assert resolve_result.window_ids == (11,)
+    assert bind_result.ok is True
+    assert bind_result.workspace == "workspace-alpha"
+    assert bind_result.window_id == 11
+    assert bind_result.tab == "implement-tab"
+    assert bind_result.context_id == "ctx-456"
+
+
 def test_rp_cli_bridge_manage_selection_success(tmp_path: Path) -> None:
     script_path = _write_fake_rp_bridge_cli(tmp_path, mode="ok")
     client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
@@ -113,6 +133,33 @@ def test_rp_cli_bridge_agent_run_surfaces_success(tmp_path: Path) -> None:
     assert log.log["events"][0]["kind"] == "agent_wait"
 
 
+def test_rp_cli_bridge_agent_recovery_surfaces_success(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="agent-recovery")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    poll = client.agent_run_poll("agent-session-123")
+    cancel = client.agent_run_cancel("agent-session-123")
+    sessions = client.agent_manage_list_sessions(limit=5, state="waiting_for_input")
+    resume = client.agent_manage_resume_session("agent-session-123")
+    transcript = client.agent_manage_transcript("agent-session-123")
+    handoff = client.agent_manage_extract_handoff("agent-session-123", output_path=str(tmp_path / "handoff.xml"), inline=False)
+
+    assert poll.ok is True
+    assert poll.status == "running"
+    assert cancel.ok is True
+    assert cancel.status == "cancelled"
+    assert sessions.ok is True
+    assert sessions.sessions[0].session_id == "agent-session-123"
+    assert sessions.sessions[0].status == "waiting_for_input"
+    assert resume.ok is True
+    assert resume.session_id == "agent-session-123"
+    assert transcript.ok is True
+    assert transcript.transcript == "<transcript><item>hello</item></transcript>"
+    assert transcript.source_operation == "get_log"
+    assert handoff.ok is True
+    assert handoff.output_path == str(tmp_path / "handoff.xml")
+
+
 def test_rp_cli_bridge_agent_run_wait_reports_malformed_payload(tmp_path: Path) -> None:
     script_path = _write_fake_rp_bridge_cli(tmp_path, mode="agent-malformed")
     client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
@@ -122,6 +169,21 @@ def test_rp_cli_bridge_agent_run_wait_reports_malformed_payload(tmp_path: Path) 
     assert result.ok is False
     assert result.error is not None
     assert result.error.code == "MALFORMED_RESPONSE"
+
+
+def test_rp_cli_bridge_agent_transcript_uses_get_transcript_when_available(tmp_path: Path) -> None:
+    script_path = _write_fake_rp_bridge_cli(tmp_path, mode="agent-transcript-op")
+    client = RpCliBridgeClient((str(script_path),), timeout_seconds=2)
+
+    result = client.agent_manage_transcript("agent-session-123", offset=2, limit=10)
+
+    assert result.ok is True
+    assert result.source_operation == "get_transcript"
+    assert result.status == "completed"
+    assert result.transcript == "# transcript from op"
+    assert result.handoff_summary == "handoff summary"
+    payload = json.loads(result.command[result.command.index("-j") + 1])
+    assert payload == {"op": "get_transcript", "session_id": "agent-session-123", "offset": 2, "limit": 10}
 
 
 def test_rp_cli_bridge_reports_missing_binary() -> None:
@@ -225,8 +287,12 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "import json\n"
             "import sys\n"
             "import time\n"
+            "from pathlib import Path\n"
             "\n"
             f"MODE = {mode!r}\n"
+            "agent_manage_ops = ['get_log', 'list_sessions', 'resume_session', 'extract_handoff']\n"
+            "if MODE == 'agent-transcript-op':\n"
+            "    agent_manage_ops.append('get_transcript')\n"
             "\n"
             "def _tool_and_payload(argv):\n"
             "    if '-c' not in argv:\n"
@@ -256,7 +322,7 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    if MODE == 'malformed':\n"
             "        sys.stdout.write('not-json\\n')\n"
             "        raise SystemExit(0)\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces'}, {'name': 'bind_context'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run'}, {'name': 'agent_manage'}, {'name': 'read_file'}, {'name': 'file_search', 'description': 'Search files'}]}))\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'manage_workspaces', 'inputSchema': {'properties': {'action': {'enum': ['list', 'list_tabs', 'select_tab']}}}}, {'name': 'bind_context', 'inputSchema': {'properties': {'op': {'enum': ['list', 'status', 'bind']}}}}, {'name': 'manage_selection'}, {'name': 'workspace_context'}, {'name': 'context_builder'}, {'name': 'ask_oracle'}, {'name': 'agent_run', 'inputSchema': {'properties': {'op': {'enum': ['start', 'poll', 'wait', 'cancel']}}}}, {'name': 'agent_manage', 'inputSchema': {'properties': {'op': {'enum': agent_manage_ops}}}}, {'name': 'read_file'}, {'name': 'file_search', 'description': 'Search files'}]}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"
@@ -264,6 +330,24 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "if tool is None:\n"
             "    sys.stderr.write('unsupported invocation\\n')\n"
             "    raise SystemExit(2)\n"
+            "\n"
+            "if tool == 'manage_workspaces':\n"
+            "    if MODE == 'workspace-bind-ok' and payload.get('action') == 'list':\n"
+            "        sys.stdout.write(json.dumps({'workspaces': [{'id': 'workspace-1', 'name': 'workspace-alpha', 'repo_paths': ['/tmp/repo-alpha'], 'window_ids': [11], 'is_hidden': False}, {'id': 'workspace-2', 'name': 'workspace-beta', 'repo_paths': ['/tmp/repo-beta'], 'window_ids': [12], 'is_hidden': True}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    sys.stdout.write(json.dumps({'workspaces': []}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if tool == 'bind_context':\n"
+            "    if MODE == 'workspace-bind-ok':\n"
+            "        sys.stdout.write(json.dumps({'workspace': 'workspace-alpha', 'workspace_id': 'workspace-1', 'window_id': payload.get('window_id', 11), 'tab': 'implement-tab', 'tab_id': 'tab-1', 'context_id': 'ctx-456', 'windows': [{'window_id': 11, 'tabs': [{'id': 'tab-1', 'name': 'implement-tab', 'context_id': 'ctx-456'}]}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    sys.stdout.write(json.dumps({'context_id': 'ctx-123'}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
             "\n"
             "if tool == 'file_search':\n"
             "    sys.stdout.write(json.dumps({'count': 0, 'matches': []}))\n"
@@ -307,6 +391,10 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        sys.stdout.write(json.dumps({'session_id': 'agent-session-123', 'status': 'started', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
             "        sys.stdout.write('\\n')\n"
             "        raise SystemExit(0)\n"
+            "    if op == 'poll':\n"
+            "        sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'status': 'running', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "    if op == 'wait':\n"
             "        if MODE == 'agent-malformed':\n"
             "            sys.stdout.write(json.dumps({'session_id': payload.get('session_id')}))\n"
@@ -315,8 +403,33 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "        sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'status': 'completed', 'output': '# Managed agent output\\n', 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
             "        sys.stdout.write('\\n')\n"
             "        raise SystemExit(0)\n"
+            "    if op == 'cancel':\n"
+            "        sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'status': 'cancelled'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "\n"
             "if tool == 'agent_manage':\n"
+            "    if MODE == 'agent-recovery' and payload.get('op') == 'list_sessions':\n"
+            "        sys.stdout.write(json.dumps({'sessions': [{'session_id': 'agent-session-123', 'status': 'waiting_for_input', 'session_name': 'Auth work'}]}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if MODE == 'agent-recovery' and payload.get('op') == 'resume_session':\n"
+            "        sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'status': 'waiting_for_input'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if MODE == 'agent-recovery' and payload.get('op') == 'extract_handoff':\n"
+            "        output_path = payload.get('output_path')\n"
+            "        Path(output_path).write_text('<forked_session />\\n', encoding='utf-8')\n"
+            "        sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'output_path': output_path}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if MODE == 'agent-recovery' and payload.get('op') == 'get_log':\n"
+            "        sys.stdout.write('<transcript><item>hello</item></transcript>\\n')\n"
+            "        raise SystemExit(0)\n"
+            "    if MODE == 'agent-transcript-op' and payload.get('op') == 'get_transcript':\n"
+            "        sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'status': 'completed', 'transcript': '# transcript from op\\n', 'events': [{'kind': 'agent_log'}], 'handoff_summary': 'handoff summary'}))\n"
+            "        sys.stdout.write('\\n')\n"
+            "        raise SystemExit(0)\n"
             "    sys.stdout.write(json.dumps({'session_id': payload.get('session_id'), 'status': 'completed', 'output': '# Managed agent output\\n', 'events': [{'kind': 'agent_wait'}], 'workspace': payload.get('workspace'), 'tab': payload.get('tab'), 'context_id': payload.get('context_id')}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"

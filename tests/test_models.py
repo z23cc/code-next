@@ -5,6 +5,8 @@ from pydantic import ValidationError
 
 from aiwf.models import (
     GateSet,
+    RpBridgeAgentTranscriptArtifactContent,
+    RpBridgeResolvedIdentity,
     RpBridgeRunConfig,
     RpBridgeSeedingArtifactContent,
     RunMeta,
@@ -94,6 +96,7 @@ def test_rp_bridge_run_config_round_trips() -> None:
         "agent_role": "implementer",
         "timeout_seconds": 900,
         "export_transcript": True,
+        "resolved": None,
     }
 
 
@@ -103,6 +106,41 @@ def test_rp_bridge_run_config_rejects_invalid_values() -> None:
 
     with pytest.raises(ValidationError, match="timeout_seconds"):
         RpBridgeRunConfig(mode="manual-assist", timeout_seconds=0)
+
+
+def test_rp_bridge_run_config_supports_resolved_identity() -> None:
+    config = RpBridgeRunConfig(
+        mode="managed-agent",
+        workspace="workspace-alpha",
+        resolved=RpBridgeResolvedIdentity(
+            resolved_workspace_id="workspace-1",
+            resolved_workspace_name="workspace-alpha",
+            resolved_window_id=7,
+            resolved_tab_id="tab-22",
+            resolved_tab_name="implement-tab",
+            resolved_context_id="ctx-999",
+        ),
+    )
+
+    payload = config.model_dump(mode="json")
+    assert payload["resolved"]["resolved_workspace_id"] == "workspace-1"
+    assert payload["resolved"]["resolved_context_id"] == "ctx-999"
+
+
+def test_rp_bridge_agent_transcript_artifact_content_validates() -> None:
+    payload = RpBridgeAgentTranscriptArtifactContent.model_validate(
+        {
+            "version": 1,
+            "session_id": "agent-session-1",
+            "transcript": "# transcript",
+            "events": [{"kind": "agent_wait", "status": "completed"}],
+            "handoff_summary": "ready for review",
+            "captured_at": "2026-04-17T01:00:00Z",
+        }
+    )
+
+    assert payload.session_id == "agent-session-1"
+    assert payload.handoff_summary == "ready for review"
 
 
 def test_rp_bridge_seeding_artifact_content_validates() -> None:
