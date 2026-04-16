@@ -521,7 +521,12 @@ class RpCliBridgeClient:
         normalized_session_id = session_id.strip()
         if not normalized_session_id:
             raise ValueError("agent_run_wait requires a non-empty session_id")
-        payload: dict[str, Any] = {"op": "wait", "session_id": normalized_session_id}
+        wait_timeout_seconds = max(1, self.timeout_seconds - 1)
+        payload: dict[str, Any] = {
+            "op": "wait",
+            "session_id": normalized_session_id,
+            "timeout": wait_timeout_seconds,
+        }
         if workspace is not None:
             payload["workspace"] = workspace
         if tab is not None:

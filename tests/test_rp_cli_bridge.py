@@ -100,6 +100,10 @@ def test_rp_cli_bridge_agent_run_surfaces_success(tmp_path: Path) -> None:
     assert start_payload["message"] == "Implement the change"
     assert start_payload["detach"] is True
     assert wait.ok is True
+    wait_payload = json.loads(wait.command[wait.command.index("-j") + 1])
+    assert wait_payload["op"] == "wait"
+    assert wait_payload["session_id"] == "agent-session-123"
+    assert wait_payload["timeout"] == 1
     assert wait.status == "completed"
     assert wait.output == "# Managed agent output\n"
     assert log.ok is True
