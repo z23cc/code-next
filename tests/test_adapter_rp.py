@@ -95,12 +95,7 @@ def test_rp_agent_adapter_auto_mode_uses_subprocess_output(tmp_path: Path) -> No
 
 def test_rp_agent_adapter_auto_mode_uses_protocol_envelopes_when_supported(tmp_path: Path) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
-    runtime_script = _write_fake_rp_runtime(tmp_path)
-    adapter = RpAgentAdapter(
-        repo_root=repo_root,
-        auto=True,
-        rp_command=[sys.executable, str(runtime_script), "protocol-success"],
-    )
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="protocol-success")
 
     context = adapter.discover(task, run_dir)
     plan = adapter.plan(task, context)
@@ -120,12 +115,7 @@ def test_rp_agent_adapter_auto_mode_uses_protocol_envelopes_when_supported(tmp_p
 
 def test_rp_agent_adapter_auto_mode_maps_partial_protocol_response(tmp_path: Path) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
-    runtime_script = _write_fake_rp_runtime(tmp_path)
-    adapter = RpAgentAdapter(
-        repo_root=repo_root,
-        auto=True,
-        rp_command=[sys.executable, str(runtime_script), "protocol-partial"],
-    )
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="protocol-partial")
 
     with pytest.raises(AdapterError) as exc_info:
         adapter.execute(task, "# plan", run_dir)
@@ -136,14 +126,82 @@ def test_rp_agent_adapter_auto_mode_maps_partial_protocol_response(tmp_path: Pat
     assert "stage=implement" in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_error_code", "expected_fragment"),
+    [
+        ("protocol-error-prompt-too-large", ErrorCode.ADAPTER_FAILURE, "[PROMPT_TOO_LARGE]"),
+        ("protocol-error-runtime-error", ErrorCode.ADAPTER_FAILURE, "[RUNTIME_ERROR]"),
+        ("protocol-error-invalid-request", ErrorCode.ADAPTER_FAILURE, "[INVALID_REQUEST]"),
+        ("protocol-error-timeout", ErrorCode.ADAPTER_TIMEOUT, "[EXECUTION_TIMEOUT]"),
+        ("protocol-error-unknown", ErrorCode.ADAPTER_FAILURE, "[UNKNOWN]"),
+    ],
+)
+def test_rp_agent_adapter_auto_mode_maps_protocol_errors(
+    tmp_path: Path,
+    mode: str,
+    expected_error_code: ErrorCode,
+    expected_fragment: str,
+) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode=mode)
+
+    with pytest.raises(AdapterError) as exc_info:
+        adapter.execute(task, "# plan", run_dir)
+
+    assert exc_info.value.error_code is expected_error_code
+    assert expected_fragment in str(exc_info.value)
+    assert "stage=implement" in str(exc_info.value)
+
+
+def test_rp_agent_adapter_auto_mode_handles_unicode_protocol_content(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="protocol-success-unicode")
+
+    context = adapter.discover(task, run_dir)
+
+    assert adapter.plan(task, context) == "协议✅:计划🚀"
+
+
+def test_rp_agent_adapter_auto_mode_handles_large_protocol_content(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="protocol-success-large")
+
+    context = adapter.discover(task, run_dir)
+    content = adapter.plan(task, context)
+
+    assert len(content) == 524288
+    assert content == ("L" * 524288)
+
+
+def test_rp_agent_adapter_auto_mode_rejects_invalid_protocol_status(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="protocol-invalid-status")
+
+    context = adapter.discover(task, run_dir)
+
+    with pytest.raises(AdapterError) as exc_info:
+        adapter.plan(task, context)
+
+    assert exc_info.value.error_code is ErrorCode.ADAPTER_FAILURE
+    assert "invalid protocol status" in str(exc_info.value)
+
+
+def test_rp_agent_adapter_auto_mode_rejects_invalid_ok_protocol_payload(tmp_path: Path) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="protocol-invalid-ok-content")
+
+    context = adapter.discover(task, run_dir)
+
+    with pytest.raises(AdapterError) as exc_info:
+        adapter.plan(task, context)
+
+    assert exc_info.value.error_code is ErrorCode.ADAPTER_FAILURE
+    assert "invalid protocol response" in str(exc_info.value)
+
+
 def test_rp_agent_adapter_auto_mode_falls_back_to_legacy_when_probe_fails(tmp_path: Path) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
-    runtime_script = _write_fake_rp_runtime(tmp_path)
-    adapter = RpAgentAdapter(
-        repo_root=repo_root,
-        auto=True,
-        rp_command=[sys.executable, str(runtime_script), "legacy"],
-    )
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="legacy")
 
     context = adapter.discover(task, run_dir)
     plan = adapter.plan(task, context)
@@ -158,12 +216,7 @@ def test_rp_agent_adapter_auto_mode_falls_back_to_legacy_when_probe_fails(tmp_pa
 
 def test_rp_agent_adapter_auto_mode_falls_back_to_legacy_on_unsupported_version(tmp_path: Path) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
-    runtime_script = _write_fake_rp_runtime(tmp_path)
-    adapter = RpAgentAdapter(
-        repo_root=repo_root,
-        auto=True,
-        rp_command=[sys.executable, str(runtime_script), "protocol-version-fallback"],
-    )
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="protocol-version-fallback")
 
     context = adapter.discover(task, run_dir)
     plan = adapter.plan(task, context)
@@ -174,6 +227,34 @@ def test_rp_agent_adapter_auto_mode_falls_back_to_legacy_on_unsupported_version(
     assert result.status is RunStatus.passed
     assert (run_dir / "rp-agent-implement-response.md").read_text(encoding="utf-8") == "legacy:raw"
     assert review["response_excerpt"] == "legacy:raw"
+
+
+def test_rp_agent_adapter_auto_mode_caches_protocol_resolution_across_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root, run_dir, task = _create_workspace(tmp_path)
+    adapter = _create_protocol_adapter(repo_root, tmp_path, mode="protocol-success")
+    probe_calls: list[tuple[str, ...]] = []
+    original_probe = adapter._probe_rp_protocol
+
+    def wrapped_probe(command: tuple[str, ...] | list[str]) -> tuple[bool, int | None]:
+        probe_calls.append(tuple(command))
+        return original_probe(command)
+
+    monkeypatch.setattr(adapter, "_probe_rp_protocol", wrapped_probe)
+
+    context = adapter.discover(task, run_dir)
+    plan = adapter.plan(task, context)
+    result = adapter.execute(task, plan, run_dir)
+    review = adapter.review(task, run_dir)
+
+    assert len(probe_calls) == 1
+    assert probe_calls[0][-1] == "protocol-success"
+    assert adapter._selected_protocol_version == 1
+    assert plan == "protocol:plan:plan:repoprompt-adapter-task:no-run"
+    assert result.status is RunStatus.passed
+    assert review["response_excerpt"] == "protocol:review:review:repoprompt-adapter-task:test-run"
 
 
 def test_rp_agent_adapter_auto_mode_raises_when_runtime_missing(tmp_path: Path) -> None:
@@ -190,7 +271,10 @@ def test_rp_agent_adapter_auto_mode_raises_when_runtime_missing(tmp_path: Path) 
     assert "stage=implement" in str(exc_info.value)
 
 
-def test_rp_agent_adapter_review_includes_compact_gate_and_change_evidence(tmp_path: Path, monkeypatch) -> None:
+def test_rp_agent_adapter_review_includes_compact_gate_and_change_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo_root, run_dir, task = _create_workspace(tmp_path)
     (run_dir / "verify-report.json").write_text(
         (
@@ -319,80 +403,182 @@ def _create_workspace(tmp_path: Path) -> tuple[Path, Path, TaskSpec]:
     return repo_root, run_dir, task
 
 
+def _create_protocol_adapter(repo_root: Path, tmp_path: Path, *, mode: str) -> RpAgentAdapter:
+    runtime_script = _write_fake_rp_runtime(tmp_path)
+    return RpAgentAdapter(
+        repo_root=repo_root,
+        auto=True,
+        rp_command=[sys.executable, str(runtime_script), mode],
+    )
+
+
 def _write_fake_rp_runtime(tmp_path: Path) -> Path:
     script_path = tmp_path / "fake_rp_runtime.py"
     script_path.write_text(
-        "\n".join(
-            [
-                "from __future__ import annotations",
-                "",
-                "import json",
-                "import sys",
-                "",
-                "mode = sys.argv[1]",
-                "",
-                "if '--aiwf-protocol-version' in sys.argv[2:]:",
-                "    if mode.startswith('protocol-'):",
-                "        print(json.dumps({'protocol': 'aiwf-rp-native', 'version': 1, 'capabilities': []}))",
-                "        raise SystemExit(0)",
-                "    print('legacy probe unsupported')",
-                "    raise SystemExit(1)",
-                "",
-                "raw = sys.stdin.read()",
-                "if mode == 'protocol-success':",
-                "    payload = json.loads(raw)",
-                "    context = payload.get('context', {})",
-                "    content = (",
-                "        f\"protocol:{payload.get('request_type')}:{payload.get('stage')}:\"",
-                "        f\"{context.get('task_slug', 'missing')}:{context.get('run_id', 'no-run')}\"",
-                "    )",
-                "    print(json.dumps({",
-                "        'protocol': 'aiwf-rp-native',",
-                "        'version': 1,",
-                "        'status': 'ok',",
-                "        'content': content,",
-                "        'metadata': {},",
-                "        'diagnostics': None,",
-                "    }))",
-                "elif mode == 'protocol-partial':",
-                "    print(json.dumps({",
-                "        'protocol': 'aiwf-rp-native',",
-                "        'version': 1,",
-                "        'status': 'partial',",
-                "        'content': 'partial implementation',",
-                "        'error': {",
-                "            'code': 'EXECUTION_INTERRUPTED',",
-                "            'message': 'Interrupted mid-run',",
-                "            'retriable': True,",
-                "            'detail': {},",
-                "        },",
-                "        'metadata': {},",
-                "        'diagnostics': None,",
-                "    }))",
-                "elif mode == 'protocol-version-fallback':",
-                "    if raw.lstrip().startswith('{'):",
-                "        print(json.dumps({",
-                "            'protocol': 'aiwf-rp-native',",
-                "            'version': 1,",
-                "            'status': 'error',",
-                "            'content': None,",
-                "            'error': {",
-                "                'code': 'UNSUPPORTED_VERSION',",
-                "                'message': 'Runtime requires a different protocol version.',",
-                "                'retriable': False,",
-                "                'detail': {'supported_version': 2},",
-                "            },",
-                "            'metadata': {},",
-                "            'diagnostics': None,",
-                "        }))",
-                "    else:",
-                "        print('legacy:raw')",
-                "else:",
-                "    prefix = 'json' if raw.lstrip().startswith('{') else 'raw'",
-                "    print(f'legacy:{prefix}')",
-                "",
-            ]
-        ),
+        """
+from __future__ import annotations
+
+import json
+import sys
+
+mode = sys.argv[1]
+PROTOCOL = "aiwf-rp-native"
+PROTOCOL_VERSION = 1
+
+
+def emit(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, ensure_ascii=False))
+
+
+def protocol_ok(payload: dict[str, object], content: str | None = None) -> dict[str, object]:
+    context = payload.get("context", {})
+    if not isinstance(context, dict):
+        context = {}
+    if content is None:
+        content = (
+            f"protocol:{payload.get('request_type')}:{payload.get('stage')}:"
+            f"{context.get('task_slug', 'missing')}:{context.get('run_id', 'no-run')}"
+        )
+    return {
+        "protocol": PROTOCOL,
+        "version": PROTOCOL_VERSION,
+        "status": "ok",
+        "content": content,
+        "metadata": {},
+        "diagnostics": None,
+    }
+
+
+def protocol_error(
+    code: str,
+    message: str,
+    *,
+    retriable: bool,
+    detail: dict[str, object] | None = None,
+    content: str | None = None,
+) -> dict[str, object]:
+    return {
+        "protocol": PROTOCOL,
+        "version": PROTOCOL_VERSION,
+        "status": "error",
+        "content": content,
+        "error": {
+            "code": code,
+            "message": message,
+            "retriable": retriable,
+            "detail": detail or {},
+        },
+        "metadata": {},
+        "diagnostics": None,
+    }
+
+
+if "--aiwf-protocol-version" in sys.argv[2:]:
+    if mode.startswith("protocol-"):
+        emit({"protocol": PROTOCOL, "version": PROTOCOL_VERSION, "capabilities": []})
+        raise SystemExit(0)
+    print("legacy probe unsupported")
+    raise SystemExit(1)
+
+raw = sys.stdin.read()
+is_json = raw.lstrip().startswith("{")
+payload = None
+if is_json:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = None
+
+if mode in {"protocol-success", "protocol-conformance"}:
+    if mode == "protocol-conformance" and not is_json:
+        print("legacy:raw")
+    elif payload is None:
+        emit(protocol_error("INVALID_REQUEST", "Request payload is not valid JSON.", retriable=False))
+    elif payload.get("version") != PROTOCOL_VERSION:
+        emit(
+            protocol_error(
+                "UNSUPPORTED_VERSION",
+                "Runtime requires a different protocol version.",
+                retriable=False,
+                detail={"supported_version": PROTOCOL_VERSION},
+            )
+        )
+    elif not isinstance(payload.get("prompt"), str) or not isinstance(payload.get("request_type"), str) or not isinstance(payload.get("stage"), str):
+        emit(protocol_error("INVALID_REQUEST", "Prompt, request_type, and stage are required.", retriable=False))
+    else:
+        emit(protocol_ok(payload))
+elif mode == "protocol-success-unicode":
+    emit(protocol_ok(payload or {}, content="协议✅:计划🚀"))
+elif mode == "protocol-success-large":
+    emit(protocol_ok(payload or {}, content=("L" * 524288)))
+elif mode == "protocol-partial":
+    emit(
+        {
+            "protocol": PROTOCOL,
+            "version": PROTOCOL_VERSION,
+            "status": "partial",
+            "content": "partial implementation",
+            "error": {
+                "code": "EXECUTION_INTERRUPTED",
+                "message": "Interrupted mid-run",
+                "retriable": True,
+                "detail": {},
+            },
+            "metadata": {},
+            "diagnostics": None,
+        }
+    )
+elif mode == "protocol-version-fallback":
+    if is_json:
+        emit(
+            protocol_error(
+                "UNSUPPORTED_VERSION",
+                "Runtime requires a different protocol version.",
+                retriable=False,
+                detail={"supported_version": 2},
+            )
+        )
+    else:
+        print("legacy:raw")
+elif mode == "protocol-error-prompt-too-large":
+    emit(protocol_error("PROMPT_TOO_LARGE", "Prompt exceeds provider size limit.", retriable=False))
+elif mode == "protocol-error-runtime-error":
+    emit(protocol_error("RUNTIME_ERROR", "Provider execution failed.", retriable=True))
+elif mode == "protocol-error-invalid-request":
+    emit(protocol_error("INVALID_REQUEST", "Malformed protocol request.", retriable=False))
+elif mode == "protocol-error-timeout":
+    emit(protocol_error("EXECUTION_TIMEOUT", "Provider exceeded its timeout budget.", retriable=True))
+elif mode == "protocol-error-unknown":
+    emit(protocol_error("UNKNOWN", "Provider returned an unknown failure.", retriable=False))
+elif mode == "protocol-invalid-status":
+    emit(
+        {
+            "protocol": PROTOCOL,
+            "version": PROTOCOL_VERSION,
+            "status": "mystery",
+            "content": "unexpected",
+            "metadata": {},
+            "diagnostics": None,
+        }
+    )
+elif mode == "protocol-invalid-ok-content":
+    emit(
+        {
+            "protocol": PROTOCOL,
+            "version": PROTOCOL_VERSION,
+            "status": "ok",
+            "content": None,
+            "metadata": {},
+            "diagnostics": None,
+        }
+    )
+elif mode == "legacy-error":
+    print("legacy runtime failed", file=sys.stderr)
+    raise SystemExit(9)
+else:
+    prefix = "json" if is_json else "raw"
+    print(f"legacy:{prefix}")
+""".lstrip(),
         encoding="utf-8",
     )
     return script_path

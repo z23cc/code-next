@@ -20,6 +20,7 @@ from aiwf.artifacts import ArtifactStore
 from aiwf.compilers.claude import compile_claude
 from aiwf.compilers.codex import compile_codex
 from aiwf.compilers.rp import compile_rp
+from aiwf.conformance import render_rp_conformance_report, run_rp_conformance
 from aiwf.contracts import assess_review_boundary, assess_review_evidence, lint_contract_registry, review_contract_fields
 from aiwf.doctor import render_doctor_report, run_doctor
 from aiwf.engine import WorkflowEngine
@@ -34,9 +35,11 @@ app = typer.Typer(
 run_app = typer.Typer(help="Run workflow stages with the configured adapter.")
 compile_app = typer.Typer(help="Compile workflow inputs for host-specific outputs.")
 contracts_app = typer.Typer(help="Lint and inspect built-in host contracts.")
+conformance_app = typer.Typer(help="Run executable provider conformance checks.")
 app.add_typer(run_app, name="run")
 app.add_typer(compile_app, name="compile")
 app.add_typer(contracts_app, name="contracts")
+app.add_typer(conformance_app, name="conformance")
 console = Console()
 
 
@@ -1011,6 +1014,26 @@ def contract_lint() -> None:
     if failed:
         raise typer.Exit(code=1)
     console.print(f"[green]contract lint completed[/green] contracts={len(results)} adapters={len(ADAPTER_SPECS)}")
+
+
+@conformance_app.command("rp")
+def conformance_rp_command(
+    rp_command: Annotated[str, typer.Option("--rp-command", help="RP provider executable to validate.")],
+    rp_arg: Annotated[
+        list[str] | None,
+        typer.Option("--rp-arg", help="Additional arguments passed to the RP provider command."),
+    ] = None,
+    repo_root: Annotated[Path, typer.Option("--repo-root")] = Path("."),
+    json_output: Annotated[bool, typer.Option("--json", help="Render the conformance report as JSON.")] = False,
+) -> None:
+    """Run RP native provider conformance checks against an executable command."""
+    report = run_rp_conformance([rp_command, *(rp_arg or [])], repo_root=repo_root)
+    if json_output:
+        typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        typer.echo(render_rp_conformance_report(report))
+    if not report["ok"]:
+        raise typer.Exit(code=1)
 
 
 @app.command("doctor")
