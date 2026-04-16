@@ -806,6 +806,23 @@ def _build_inspection_payload(
     bridge_seeding = _load_optional_run_surface(ai_root, run_id, "rp-bridge-seeding.json")
     bridge_capture = _load_optional_run_surface(ai_root, run_id, "rp-bridge-capture.json")
     bridge_agent_log = _load_optional_run_surface(ai_root, run_id, "rp-bridge-agent-log.json")
+    latest_agent_session: Mapping[str, Any] | None = None
+    bridge_agent_transcript: dict[str, Any] | None = None
+    bridge_agent_handoff_artifact: str | None = None
+    if isinstance(bridge_agent_log, Mapping):
+        raw_sessions = bridge_agent_log.get("sessions")
+        if isinstance(raw_sessions, list):
+            for raw_session in reversed(raw_sessions):
+                if isinstance(raw_session, Mapping):
+                    latest_agent_session = raw_session
+                    break
+    if isinstance(latest_agent_session, Mapping):
+        transcript_artifact = latest_agent_session.get("transcript_artifact")
+        if isinstance(transcript_artifact, str) and transcript_artifact.strip():
+            bridge_agent_transcript = _load_optional_run_surface(ai_root, run_id, transcript_artifact.strip())
+        handoff_artifact = latest_agent_session.get("handoff_artifact")
+        if isinstance(handoff_artifact, str) and handoff_artifact.strip():
+            bridge_agent_handoff_artifact = handoff_artifact.strip()
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -816,6 +833,7 @@ def _build_inspection_payload(
         "bridge_seeding": bridge_seeding,
         "bridge_capture": bridge_capture,
         "bridge_agent_log": bridge_agent_log,
+        "bridge_agent_transcript": bridge_agent_transcript,
         "rp_bridge": meta.data.get("rp_bridge") if "rp_bridge" in meta.data else None,
         "artifacts": {
             "diagnostics": str(_artifact_path(ai_root, run_id, "run-diagnostics.json")),
@@ -824,6 +842,14 @@ def _build_inspection_payload(
             "bridge_seeding": str(_artifact_path(ai_root, run_id, "rp-bridge-seeding.json")) if bridge_seeding is not None else None,
             "bridge_capture": str(_artifact_path(ai_root, run_id, "rp-bridge-capture.json")) if bridge_capture is not None else None,
             "bridge_agent_log": str(_artifact_path(ai_root, run_id, "rp-bridge-agent-log.json")) if bridge_agent_log is not None else None,
+            "bridge_agent_transcript": (
+                str(_artifact_path(ai_root, run_id, str(latest_agent_session.get("transcript_artifact"))))
+                if bridge_agent_transcript is not None and isinstance(latest_agent_session, Mapping)
+                else None
+            ),
+            "bridge_agent_handoff": (
+                str(_artifact_path(ai_root, run_id, bridge_agent_handoff_artifact)) if bridge_agent_handoff_artifact is not None else None
+            ),
         },
     }
 
@@ -1117,6 +1143,17 @@ def _print_inspection(
             f"context_id={rp_bridge.get('context_id') or '-'} "
             f"agent_role={rp_bridge.get('agent_role') or '-'}"
         )
+        resolved = rp_bridge.get("resolved")
+        if isinstance(resolved, Mapping):
+            console.print(
+                "bridge_resolved="
+                f"workspace_id={resolved.get('resolved_workspace_id') or '-'} "
+                f"workspace_name={resolved.get('resolved_workspace_name') or '-'} "
+                f"window_id={resolved.get('resolved_window_id') or '-'} "
+                f"tab_id={resolved.get('resolved_tab_id') or '-'} "
+                f"tab_name={resolved.get('resolved_tab_name') or '-'} "
+                f"context_id={resolved.get('resolved_context_id') or '-'}"
+            )
     diagnostics_bridge = diagnostics.get("bridge")
     if isinstance(diagnostics_bridge, Mapping):
         summary = str(diagnostics_bridge.get("summary", "")).strip()
@@ -1137,12 +1174,21 @@ def _print_inspection(
         agent_log_artifact = diagnostics_bridge.get("agent_log_artifact")
         agent_status = diagnostics_bridge.get("agent_status")
         agent_session_id = diagnostics_bridge.get("agent_session_id")
+        agent_transcript_artifact = diagnostics_bridge.get("agent_transcript_artifact")
+        agent_handoff_artifact = diagnostics_bridge.get("agent_handoff_artifact")
+        agent_recovery = diagnostics_bridge.get("agent_recovery")
         if isinstance(agent_log_artifact, str) and agent_log_artifact.strip():
             console.print(f"bridge_agent_log_artifact={agent_log_artifact}")
         if isinstance(agent_status, str) and agent_status.strip():
             console.print(f"bridge_agent_status={agent_status}")
         if isinstance(agent_session_id, str) and agent_session_id.strip():
             console.print(f"bridge_agent_session_id={agent_session_id}")
+        if isinstance(agent_transcript_artifact, str) and agent_transcript_artifact.strip():
+            console.print(f"bridge_agent_transcript_artifact={agent_transcript_artifact}")
+        if isinstance(agent_handoff_artifact, str) and agent_handoff_artifact.strip():
+            console.print(f"bridge_agent_handoff_artifact={agent_handoff_artifact}")
+        if isinstance(agent_recovery, str) and agent_recovery.strip():
+            console.print(f"bridge_agent_recovery={agent_recovery}")
     bridge_probe_payload = payload.get("bridge_probe")
     if isinstance(bridge_probe_payload, Mapping):
         if bridge_probe_payload.get("available"):
@@ -1237,6 +1283,10 @@ def _print_inspection(
         console.print(f"bridge_capture={artifacts['bridge_capture']}")
     if artifacts.get("bridge_agent_log"):
         console.print(f"bridge_agent_log={artifacts['bridge_agent_log']}")
+    if artifacts.get("bridge_agent_transcript"):
+        console.print(f"bridge_agent_transcript={artifacts['bridge_agent_transcript']}")
+    if artifacts.get("bridge_agent_handoff"):
+        console.print(f"bridge_agent_handoff={artifacts['bridge_agent_handoff']}")
 
 
 @run_app.command("plan")
@@ -1253,7 +1303,7 @@ def run_plan(
     bridge_context_id: Annotated[str | None, typer.Option("--bridge-context-id", help="Pre-bound RepoPrompt context id for bridge groundwork.")] = None,
     bridge_agent_role: Annotated[str | None, typer.Option("--bridge-agent-role", help="Operator-defined RepoPrompt agent role label.")] = None,
     bridge_timeout: Annotated[int | None, typer.Option("--bridge-timeout", help="Reserved bridge timeout hint for future slices.")] = None,
-    bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Reserved bridge transcript-export hint for future slices.")] = False,
+    bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Export managed-agent transcript/handoff provenance when the RP bridge exposes those surfaces.")] = False,
 ) -> None:
     """Run the plan workflow."""
     engine = _build_engine_or_exit(
@@ -1294,7 +1344,7 @@ def run_implement(
     bridge_context_id: Annotated[str | None, typer.Option("--bridge-context-id", help="Pre-bound RepoPrompt context id for bridge groundwork.")] = None,
     bridge_agent_role: Annotated[str | None, typer.Option("--bridge-agent-role", help="Operator-defined RepoPrompt agent role label.")] = None,
     bridge_timeout: Annotated[int | None, typer.Option("--bridge-timeout", help="Reserved bridge timeout hint for future slices.")] = None,
-    bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Reserved bridge transcript-export hint for future slices.")] = False,
+    bridge_export_transcript: Annotated[bool, typer.Option("--bridge-export-transcript", help="Export managed-agent transcript/handoff provenance when the RP bridge exposes those surfaces.")] = False,
 ) -> None:
     """Run the implement workflow."""
     engine = _build_engine_or_exit(

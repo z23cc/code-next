@@ -184,6 +184,7 @@ class RpBridgeRunConfig(ModelBase):
     agent_role: StrictStr | None = None
     timeout_seconds: StrictInt | None = None
     export_transcript: StrictBool = False
+    resolved: RpBridgeResolvedIdentity | None = None
 
     @field_validator("workspace", "tab", "context_id", "agent_role")
     @classmethod
@@ -201,6 +202,42 @@ class RpBridgeRunConfig(ModelBase):
             return None
         if value <= 0:
             raise ValueError("timeout_seconds must be greater than 0")
+        return value
+
+
+class RpBridgeResolvedIdentity(ModelBase):
+    """Adapter-resolved RepoPrompt workspace/tab/context identity."""
+
+    resolved_workspace_id: StrictStr | None = None
+    resolved_workspace_name: StrictStr | None = None
+    resolved_window_id: StrictInt | None = None
+    resolved_tab_id: StrictStr | None = None
+    resolved_tab_name: StrictStr | None = None
+    resolved_context_id: StrictStr | None = None
+    resolved_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator(
+        "resolved_workspace_id",
+        "resolved_workspace_name",
+        "resolved_tab_id",
+        "resolved_tab_name",
+        "resolved_context_id",
+    )
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+    @field_validator("resolved_window_id")
+    @classmethod
+    def validate_optional_window_id(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("resolved_window_id must be greater than 0")
         return value
 
 
@@ -268,6 +305,9 @@ class RpBridgeManagedAgentRecord(ModelBase):
     agent_role: str | None = None
     prompt_artifact: str | None = None
     response_artifact: str | None = None
+    transcript_artifact: str | None = None
+    handoff_artifact: str | None = None
+    recovery: Literal["initial", "resumed"] | None = None
     summary: str
     log: dict[str, Any] = Field(default_factory=dict)
     calls: list[RpBridgeToolCall] = Field(default_factory=list)
@@ -278,6 +318,17 @@ class RpBridgeAgentLogArtifact(ModelBase):
 
     version: int = 1
     sessions: list[RpBridgeManagedAgentRecord] = Field(default_factory=list)
+
+
+class RpBridgeAgentTranscriptArtifact(ModelBase):
+    """Typed transcript and handoff provenance for a managed-agent session."""
+
+    version: int = 1
+    session_id: str
+    transcript: str | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    handoff_summary: str | None = None
+    captured_at: datetime = Field(default_factory=utc_now)
 
 
 class WorkReceipt(ModelBase):
@@ -328,6 +379,7 @@ class RunBridgeDiagnostics(ModelBase):
     agent_role: str | None = None
     timeout_seconds: int | None = None
     export_transcript: bool = False
+    resolved: RpBridgeResolvedIdentity | None = None
     summary: str
     handoff_artifacts: list[str] = Field(default_factory=list)
     seeding_artifact: str | None = None
@@ -336,6 +388,9 @@ class RunBridgeDiagnostics(ModelBase):
     agent_log_artifact: str | None = None
     agent_status: Literal["completed", "failed", "waiting_for_input", "timeout", "cancelled"] | None = None
     agent_session_id: str | None = None
+    agent_transcript_artifact: str | None = None
+    agent_handoff_artifact: str | None = None
+    agent_recovery: Literal["initial", "resumed"] | None = None
 
 
 class RunDiagnostics(ModelBase):
@@ -652,6 +707,9 @@ class RpBridgeManagedAgentRecordContent(ArtifactSchemaBase):
     agent_role: StrictStr | None = None
     prompt_artifact: StrictStr | None = None
     response_artifact: StrictStr | None = None
+    transcript_artifact: StrictStr | None = None
+    handoff_artifact: StrictStr | None = None
+    recovery: Literal["initial", "resumed"] | None = None
     summary: StrictStr
     log: dict[str, Any] = Field(default_factory=dict)
     calls: list[RpBridgeToolCallContent] = Field(default_factory=list)
@@ -664,6 +722,8 @@ class RpBridgeManagedAgentRecordContent(ArtifactSchemaBase):
         "agent_role",
         "prompt_artifact",
         "response_artifact",
+        "transcript_artifact",
+        "handoff_artifact",
         "summary",
     )
     @classmethod
@@ -682,6 +742,28 @@ class RpBridgeAgentLogArtifactContent(ArtifactSchemaBase):
 
     version: StrictInt = 1
     sessions: list[RpBridgeManagedAgentRecordContent] = Field(default_factory=list)
+
+
+class RpBridgeAgentTranscriptArtifactContent(ArtifactSchemaBase):
+    """Strict artifact schema for `rp-bridge-agent-transcript.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    version: StrictInt = 1
+    session_id: StrictStr
+    transcript: StrictStr | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    handoff_summary: StrictStr | None = None
+    captured_at: datetime
+
+    @field_validator("session_id", "transcript", "handoff_summary")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
 
 
 class WorkReceiptContent(ArtifactSchemaBase):
