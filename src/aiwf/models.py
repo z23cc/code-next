@@ -204,6 +204,37 @@ class RpBridgeRunConfig(ModelBase):
         return value
 
 
+class RpBridgeToolCall(ModelBase):
+    """A single bridge client call recorded during context seeding."""
+
+    step: str
+    tool: str
+    ok: bool
+    command: list[str] = Field(default_factory=list)
+    summary: str
+    error_code: str | None = None
+    error_message: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class RpBridgeSeedingArtifact(ModelBase):
+    """Typed record of bridge-assisted context seeding for implement runs."""
+
+    version: int = 1
+    mode: str
+    status: Literal["seeded", "skipped", "failed"]
+    manual_handoff_required: bool = True
+    workspace: str | None = None
+    tab: str | None = None
+    context_id: str | None = None
+    agent_role: str | None = None
+    summary: str
+    selected_artifacts: list[str] = Field(default_factory=list)
+    selected_paths: list[str] = Field(default_factory=list)
+    attempted_tools: list[str] = Field(default_factory=list)
+    calls: list[RpBridgeToolCall] = Field(default_factory=list)
+
+
 class WorkReceipt(ModelBase):
     """Final run summary written at the end of workflow execution."""
 
@@ -254,6 +285,9 @@ class RunBridgeDiagnostics(ModelBase):
     export_transcript: bool = False
     summary: str
     handoff_artifacts: list[str] = Field(default_factory=list)
+    seeding_artifact: str | None = None
+    seeding_status: Literal["seeded", "skipped", "failed"] | None = None
+    seeding_summary: str | None = None
 
 
 class RunDiagnostics(ModelBase):
@@ -455,6 +489,59 @@ class ReviewReportContent(ArtifactSchemaBase):
     )
     @classmethod
     def validate_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeToolCallContent(ArtifactSchemaBase):
+    """Strict artifact schema for a recorded bridge seeding call."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    step: StrictStr
+    tool: StrictStr
+    ok: StrictBool
+    command: list[StrictStr] = Field(default_factory=list)
+    summary: StrictStr
+    error_code: StrictStr | None = None
+    error_message: StrictStr | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("step", "tool", "summary", "error_code", "error_message")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RpBridgeSeedingArtifactContent(ArtifactSchemaBase):
+    """Strict artifact schema for `rp-bridge-seeding.json`."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    version: StrictInt = 1
+    mode: StrictStr
+    status: Literal["seeded", "skipped", "failed"]
+    manual_handoff_required: StrictBool = True
+    workspace: StrictStr | None = None
+    tab: StrictStr | None = None
+    context_id: StrictStr | None = None
+    agent_role: StrictStr | None = None
+    summary: StrictStr
+    selected_artifacts: list[StrictStr] = Field(default_factory=list)
+    selected_paths: list[StrictStr] = Field(default_factory=list)
+    attempted_tools: list[StrictStr] = Field(default_factory=list)
+    calls: list[RpBridgeToolCallContent] = Field(default_factory=list)
+
+    @field_validator("mode", "workspace", "tab", "context_id", "agent_role", "summary")
+    @classmethod
+    def validate_optional_non_empty_string(cls, value: str | None) -> str | None:
         if value is None:
             return None
         if not value.strip():

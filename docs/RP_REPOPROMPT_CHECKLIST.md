@@ -99,16 +99,25 @@ Validation notes:
 
 目标：bridge 自动完成 RepoPrompt session 的上下文准备，但失败时必须安全回退。
 
-- [ ] 实现 bind_context / manage_selection / workspace_context 的 bridge 调用层
-- [ ] implement 阶段自动生成 `rp-bridge-seeding.json`
-- [ ] seeding 失败时仍保持 manual handoff 可用
-- [ ] provenance / inspect 中展示 seeding artifact
-- [ ] RP projection 增加 seeding artifact 合同字段并更新 compat fixture
+- [x] 实现基于 `manage_selection` / `workspace_context` 的 bridge seeding 调用层（当前 slice 不要求真实 `bind_context`）
+- [x] implement 阶段自动生成 `rp-bridge-seeding.json`
+- [x] seeding 失败时仍保持 manual handoff 可用
+- [x] provenance / inspect 中展示 seeding artifact
+- [x] RP projection 增加 seeding artifact 合同字段并更新 compat fixture
 
 Exit criteria:
 
-- [ ] `--bridge` 能自动准备 RepoPrompt 上下文
-- [ ] 即使失败，也不会破坏 manual fallback
+- [x] `--bridge` 能自动准备 RepoPrompt 上下文（当前 scope：为 implement 手动交接预置 aiwf run artifacts）
+- [x] 即使失败，也不会破坏 manual fallback
+
+Validation notes:
+
+- 日期：2026-04-16
+- P3 结论：bridge-enabled implement 现在会尝试用 RepoPrompt MCP/tool surface 预置 `context-pack.md` / `exec-plan.md`，并把全过程写入 typed artifact `rp-bridge-seeding.json`。无论 bridge candidate 缺失、tool list 不兼容、`manage_selection` 失败还是返回 malformed data，run 都会保持原有 manual handoff 路径，只把失败写入 seeding artifact、diagnostics、inspect 与 provenance。
+- 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_adapter_rp.py tests/test_engine.py tests/test_cli.py tests/test_compile.py tests/test_models.py tests/test_artifacts.py -q`
+- 已执行命令：`uv run aiwf contracts lint`
+- 已执行命令：`uv run pytest tests/test_rp_cli_bridge.py tests/test_adapter_rp.py tests/test_engine.py tests/test_cli.py tests/test_compile.py tests/test_models.py tests/test_artifacts.py tests/test_adapter_contracts.py tests/test_doctor.py -q`
+- 结果：focused pytest `141 passed`；final focused validation 中 `contracts lint` 通过，pytest `174 passed`
 
 ---
 
@@ -180,7 +189,7 @@ Exit criteria:
 - [x] P0 completed
 - [x] P1 completed
 - [x] P2 completed
-- [ ] P3 pending
+- [x] P3 completed
 - [ ] P4 pending
 - [ ] P5 pending
 - [ ] P6 pending

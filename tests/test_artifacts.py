@@ -9,6 +9,8 @@ from aiwf.artifacts import ArtifactStore
 from aiwf.exceptions import ArtifactError, ErrorCode
 from aiwf.models import (
     ReviewReportContent,
+    RpBridgeSeedingArtifact,
+    RpBridgeToolCall,
     RunDiagnostics,
     RunGateEvidence,
     RunHostDiagnostics,
@@ -231,3 +233,42 @@ def test_artifact_store_writes_and_reads_run_provenance(tmp_path: Path) -> None:
     assert provenance["artifact_index"][0]["stage"] == "gates"
     assert provenance["gate_evidence"]["passed"] is True
     assert provenance["review_evidence"]["required_run_artifacts"] == ["verify-report.json"]
+
+
+def test_artifact_store_validates_rp_bridge_seeding_artifact(tmp_path: Path) -> None:
+    manager = RunStateManager(tmp_path / ".ai")
+    run_id = manager.init_run(TaskSpec(title="Bridge seeding", body="Store seeding artifact."))
+    run_dir = tmp_path / ".ai" / "runs" / run_id
+    store = ArtifactStore(run_dir)
+
+    (run_dir / "rp-bridge-seeding.json").write_text(
+        json.dumps(
+            RpBridgeSeedingArtifact(
+                mode="manual-assist",
+                status="seeded",
+                workspace="workspace-alpha",
+                summary="Seeded aiwf artifacts into RepoPrompt context.",
+                selected_artifacts=["context-pack.md", "exec-plan.md"],
+                selected_paths=[".ai/runs/run-1/context-pack.md", ".ai/runs/run-1/exec-plan.md"],
+                attempted_tools=["manage_selection"],
+                calls=[
+                    RpBridgeToolCall(
+                        step="manage_selection_add",
+                        tool="manage_selection",
+                        ok=True,
+                        command=["rp", "--manage-selection"],
+                        summary="Seeded 2 aiwf artifact path(s) into RepoPrompt context",
+                    )
+                ],
+            ).model_dump(mode="json"),
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    artifact = store.read_validated_artifact("rp-bridge-seeding.json")
+
+    assert artifact.status == "seeded"
+    assert artifact.calls[0].tool == "manage_selection"

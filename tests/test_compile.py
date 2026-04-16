@@ -172,6 +172,7 @@ def test_compile_rp_writes_bundle_projection_install_surface_and_manifest(tmp_pa
         "uv run aiwf run plan --task .ai/tasks/<task>.md --adapter rp --auto"
     )
     assert projection["workflow_contract"]["implement"]["manual_handoff_artifact"] == "rp-agent-implement-prompt.md"
+    assert projection["workflow_contract"]["implement"]["bridge_seeding_artifact"] == "rp-bridge-seeding.json"
     assert projection["workflow_contract"]["implement"]["auto_stage_output_artifact"] == "rp-agent-implement-response.md"
     assert projection["workflow_contract"]["implement"]["auto_entrypoint"] == (
         "uv run aiwf run implement --task .ai/tasks/<task>.md --adapter rp --auto"
@@ -189,7 +190,7 @@ def test_compile_rp_writes_bundle_projection_install_surface_and_manifest(tmp_pa
     assert install_surface["default_output_dir"] == ".rp/compiled"
     assert install_surface["external_assets"] == []
 
-    assert manifest["compiler"]["projection_contract"] == "rp-host-projection-v3"
+    assert manifest["compiler"]["projection_contract"] == "rp-host-projection-v4"
     assert manifest["files"]["rp_bundle"] == "rp-bundle.md"
     assert manifest["files"]["install_surface"] == "install-surface.json"
     assert manifest["files"]["projection"] == "rp-projection.json"

@@ -12,6 +12,7 @@ from aiwf.exceptions import ArtifactError, ErrorCode
 from aiwf.models import (
     EventRecord,
     ReviewReportContent,
+    RpBridgeSeedingArtifactContent,
     VerifyReportContent,
     WorkReceiptContent,
 )
@@ -23,6 +24,7 @@ ArtifactModelT = TypeVar("ArtifactModelT", bound=BaseModel)
 _VALIDATED_ARTIFACT_SCHEMAS: dict[str, type[BaseModel]] = {
     "verify-report.json": VerifyReportContent,
     "review-report.json": ReviewReportContent,
+    "rp-bridge-seeding.json": RpBridgeSeedingArtifactContent,
     "work-receipt.json": WorkReceiptContent,
 }
 

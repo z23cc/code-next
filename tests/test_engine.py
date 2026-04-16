@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import sys
 from pathlib import Path
 
@@ -568,25 +569,23 @@ def test_manual_rp_bridge_persists_and_restores_adapter_metadata(tmp_path: Path)
     assert blocked_meta.last_completed_stage == "implement"
     assert blocked_meta.data["rp_bridge"] == bridge_config.model_dump(mode="json")
     assert "RepoPrompt Bridge Context" in (run_dir / "rp-agent-implement-prompt.md").read_text(encoding="utf-8")
-    assert blocked_diagnostics["bridge"] == {
-        "mode": "manual-assist",
-        "workspace": "workspace-alpha",
-        "tab": "implement-tab",
-        "context_id": "ctx-123",
-        "agent_role": "implementer",
-        "timeout_seconds": 900,
-        "export_transcript": True,
-        "summary": (
-            "RepoPrompt manual-assist is active for implement; complete the RepoPrompt-side handoff "
-            "using rp-agent-implement-prompt.md with the stored bridge hints, then resume."
-        ),
-        "handoff_artifacts": ["rp-agent-implement-prompt.md"],
-    }
+    assert blocked_diagnostics["bridge"]["mode"] == "manual-assist"
+    assert blocked_diagnostics["bridge"]["workspace"] == "workspace-alpha"
+    assert blocked_diagnostics["bridge"]["tab"] == "implement-tab"
+    assert blocked_diagnostics["bridge"]["context_id"] == "ctx-123"
+    assert blocked_diagnostics["bridge"]["agent_role"] == "implementer"
+    assert blocked_diagnostics["bridge"]["timeout_seconds"] == 900
+    assert blocked_diagnostics["bridge"]["export_transcript"] is True
+    assert blocked_diagnostics["bridge"]["handoff_artifacts"] == ["rp-agent-implement-prompt.md"]
+    assert blocked_diagnostics["bridge"]["seeding_artifact"] == "rp-bridge-seeding.json"
+    assert blocked_diagnostics["bridge"]["seeding_status"] in {"skipped", "failed"}
+    assert "manually add the aiwf run artifacts" in blocked_diagnostics["bridge"]["seeding_summary"]
     assert blocked_diagnostics["next_actions"] == [
         (
             "Open or reuse a RepoPrompt session with workspace=workspace-alpha, tab=implement-tab, "
-            "context_id=ctx-123, agent_role=implementer, then inspect rp-agent-implement-prompt.md to "
-            "complete the manual-assist implementation handoff."
+            "context_id=ctx-123, agent_role=implementer, manually add context-pack.md and exec-plan.md "
+            "(see rp-bridge-seeding.json), then inspect rp-agent-implement-prompt.md to complete the "
+            "manual-assist implementation handoff."
         ),
         f"Run `uv run aiwf resume {run_id}` when the implementation handoff is complete.",
     ]
@@ -712,6 +711,64 @@ def test_manual_rp_bridge_resume_rejects_unsupported_stored_bridge_mode(tmp_path
         engine.resume(run_id)
 
 
+def test_manual_rp_bridge_context_seeding_surfaces_in_diagnostics_and_provenance(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(
+        mode="manual-assist",
+        workspace="workspace-alpha",
+        tab="implement-tab",
+        context_id="ctx-123",
+        agent_role="implementer",
+    )
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="seed-ok")
+    engine = WorkflowEngine(
+        RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)]),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        bridge_config=bridge_config,
+    )
+
+    run_id = engine.run_implement(task_path)
+    run_dir = ai_root / "runs" / run_id
+    diagnostics = json.loads((run_dir / "run-diagnostics.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "run-provenance.json").read_text(encoding="utf-8"))
+    seeding = json.loads((run_dir / "rp-bridge-seeding.json").read_text(encoding="utf-8"))
+
+    assert seeding["status"] == "seeded"
+    assert diagnostics["bridge"]["seeding_artifact"] == "rp-bridge-seeding.json"
+    assert diagnostics["bridge"]["seeding_status"] == "seeded"
+    assert "Bridge context seeding prepared the aiwf run artifacts" in diagnostics["bridge"]["seeding_summary"]
+    assert "confirm the seeded aiwf artifacts recorded in rp-bridge-seeding.json" in diagnostics["next_actions"][0]
+    artifact_index = {artifact["name"]: artifact for artifact in provenance["artifact_index"]}
+    assert artifact_index["rp-bridge-seeding.json"]["category"] == "bridge_context"
+    assert artifact_index["rp-bridge-seeding.json"]["stage"] == "implement"
+
+
+
+def test_manual_rp_bridge_context_seeding_failure_preserves_manual_fallback(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    bridge_config = RpBridgeRunConfig(mode="manual-assist", workspace="workspace-alpha")
+    bridge_cli = _write_fake_bridge_cli(tmp_path, mode="seed-manage-fail")
+    engine = WorkflowEngine(
+        RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(bridge_cli)]),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        bridge_config=bridge_config,
+    )
+
+    run_id = engine.run_implement(task_path)
+    run_dir = ai_root / "runs" / run_id
+    diagnostics = json.loads((run_dir / "run-diagnostics.json").read_text(encoding="utf-8"))
+    seeding = json.loads((run_dir / "rp-bridge-seeding.json").read_text(encoding="utf-8"))
+
+    assert seeding["status"] == "failed"
+    assert diagnostics["status"] == "blocked"
+    assert diagnostics["bridge"]["seeding_status"] == "failed"
+    assert "manually add context-pack.md and exec-plan.md" in diagnostics["next_actions"][0]
+    assert (run_dir / "rp-agent-implement-prompt.md").exists()
+
+
+
 def test_manual_codex_adapter_blocks_for_handoffs_and_restores_metadata(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
     engine = WorkflowEngine(
@@ -822,6 +879,46 @@ def test_adapter_failure_writes_failed_receipt(tmp_path: Path) -> None:
     assert meta.status is RunStatus.failed
     assert receipt["status"] == "failed"
     assert "discover" in receipt["summary"]
+
+
+def _write_fake_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
+    script_path = tmp_path / f"fake_rp_bridge_{mode}"
+    script_path.write_text(
+        (
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import sys\n"
+            "\n"
+            f"MODE = {mode!r}\n"
+            "\n"
+            "if '--list-tools' in sys.argv:\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'file_search'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}]}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--workspace-context' in sys.argv:\n"
+            "    workspace = sys.argv[-1] if len(sys.argv) >= 3 else None\n"
+            "    sys.stdout.write(json.dumps({'workspace': workspace, 'context_id': 'ctx-123', 'selected_paths': ['src/example.py']}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--manage-selection' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    if MODE == 'seed-manage-fail':\n"
+            "        sys.stderr.write('manage selection failed\\n')\n"
+            "        raise SystemExit(7)\n"
+            "    paths = payload.get('paths', [])\n"
+            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'selected_paths': paths, 'added_paths': paths}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "sys.stderr.write('unsupported invocation\\n')\n"
+            "raise SystemExit(2)\n"
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
+    return script_path
 
 
 def _create_ai_workspace(

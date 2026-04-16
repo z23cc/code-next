@@ -9,8 +9,16 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from aiwf.adapters.base import BridgeContract, HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
+from aiwf.adapters.rp_cli_bridge import RpCliBridgeClient
 from aiwf.exceptions import AdapterError, ErrorCode
-from aiwf.models import RpBridgeRunConfig, RunStatus, StageResult, TaskSpec
+from aiwf.models import (
+    RpBridgeRunConfig,
+    RpBridgeSeedingArtifact,
+    RpBridgeToolCall,
+    RunStatus,
+    StageResult,
+    TaskSpec,
+)
 
 
 # Safety-net exclusions applied before `.gitignore` rules.
@@ -195,8 +203,8 @@ class RpAgentAdapter:
 
     def execute(self, task: TaskSpec, plan: str, run_dir: Path) -> StageResult:
         """Write a manual handoff brief or execute via a native RepoPrompt runtime."""
-        prompt = self._build_execute_prompt(task, plan, run_dir)
         if self.auto:
+            prompt = self._build_execute_prompt(task, plan, run_dir)
             response = self._run_rp(prompt, stage="implement", path=run_dir, task=task)
             response_path = run_dir / "rp-agent-implement-response.md"
             response_path.write_text(response, encoding="utf-8")
@@ -208,17 +216,24 @@ class RpAgentAdapter:
                 metadata={"mode": "auto", "response_file": response_path.name},
             )
 
+        bridge_seeding = self._seed_bridge_context(run_dir)
+        prompt = self._build_execute_prompt(task, plan, run_dir, bridge_seeding=bridge_seeding)
         prompt_path = run_dir / "rp-agent-implement-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
+        outputs = [prompt_path.name]
         metadata: dict[str, object] = {"mode": "manual", "prompt_file": prompt_path.name}
         bridge_metadata = self._bridge_metadata()
         if bridge_metadata is not None:
             metadata["bridge"] = bridge_metadata
+        if bridge_seeding is not None:
+            outputs.append("rp-bridge-seeding.json")
+            metadata["bridge_seeding_artifact"] = "rp-bridge-seeding.json"
+            metadata["bridge_seeding_status"] = bridge_seeding.status
         return StageResult(
             stage="implement",
             status=RunStatus.blocked,
             summary=f"RepoPrompt implementation handoff prompt written for {task.title}",
-            outputs=[prompt_path.name],
+            outputs=outputs,
             metadata=metadata,
         )
 
@@ -532,12 +547,19 @@ class RpAgentAdapter:
             ]
         )
 
-    def _build_execute_prompt(self, task: TaskSpec, plan: str, run_dir: Path) -> str:
+    def _build_execute_prompt(
+        self,
+        task: TaskSpec,
+        plan: str,
+        run_dir: Path,
+        *,
+        bridge_seeding: RpBridgeSeedingArtifact | None = None,
+    ) -> str:
         lines = [
             f"Task: {task.title}",
             "",
             f"Run directory: {run_dir}",
-            *self._render_bridge_context_block(stage="implement"),
+            *self._render_bridge_context_block(stage="implement", bridge_seeding=bridge_seeding),
             "Implement the approved plan in the repository.",
             "Preserve the aiwf artifact/state contract and prepare the repo for deterministic gates.",
             "Do not redesign the host abstraction; keep changes scoped to the task.",
@@ -610,26 +632,51 @@ class RpAgentAdapter:
         )
         return "\n".join(lines)
 
-    def _render_bridge_context_block(self, *, stage: str) -> list[str]:
+    def _render_bridge_context_block(
+        self,
+        *,
+        stage: str,
+        bridge_seeding: RpBridgeSeedingArtifact | None = None,
+    ) -> list[str]:
         bridge_config = self._active_bridge_config()
         if bridge_config is None:
             return []
 
         stage_label = "implementation" if stage == "implement" else stage
-        return [
+        lines = [
             "",
             f"## RepoPrompt Bridge Context ({bridge_config.mode})",
             f"- workspace: {bridge_config.workspace or '(unset — pick one in RepoPrompt)'}",
             f"- tab: {bridge_config.tab or '(unset)'}",
             f"- context_id: {bridge_config.context_id or '(unset)'}",
             f"- agent_role: {bridge_config.agent_role or '(unset)'}",
-            "",
-            f"Operator steps before completing the {stage_label} handoff:",
-            "- Bind your RepoPrompt session to the workspace/tab above or your active session.",
-            "- Add the current aiwf run artifacts to your RepoPrompt context.",
-            f"- Continue the {stage_label} handoff in RepoPrompt using this brief.",
-            "",
         ]
+        if stage == "implement" and bridge_seeding is not None:
+            lines.extend(
+                [
+                    f"- bridge_seeding_artifact: rp-bridge-seeding.json",
+                    f"- bridge_seeding_status: {bridge_seeding.status}",
+                    f"- bridge_seeding_summary: {bridge_seeding.summary}",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                f"Operator steps before completing the {stage_label} handoff:",
+                "- Bind your RepoPrompt session to the workspace/tab above or your active session.",
+            ]
+        )
+        if stage == "implement" and bridge_seeding is not None and bridge_seeding.status == "seeded":
+            lines.append("- Confirm the seeded aiwf artifacts are present in RepoPrompt context before implementing.")
+        else:
+            lines.append("- Add the current aiwf run artifacts to your RepoPrompt context.")
+        lines.extend(
+            [
+                f"- Continue the {stage_label} handoff in RepoPrompt using this brief.",
+                "",
+            ]
+        )
+        return lines
 
     def _active_bridge_config(self) -> RpBridgeRunConfig | None:
         if self.bridge_config is None or self.bridge_config.mode == "disabled":
@@ -641,6 +688,274 @@ class RpAgentAdapter:
         if bridge_config is None:
             return None
         return bridge_config.model_dump(mode="json", exclude_none=True)
+
+    def _seed_bridge_context(self, run_dir: Path) -> RpBridgeSeedingArtifact | None:
+        bridge_config = self._active_bridge_config()
+        if bridge_config is None:
+            return None
+
+        selected_artifacts = [name for name in ("context-pack.md", "exec-plan.md") if (run_dir / name).exists()]
+        seed_paths = self._bridge_seed_paths(run_dir, selected_artifacts)
+        calls: list[RpBridgeToolCall] = []
+        client = self._build_bridge_client(bridge_config)
+        if client is None:
+            artifact = RpBridgeSeedingArtifact(
+                mode=bridge_config.mode,
+                status="skipped",
+                workspace=bridge_config.workspace,
+                tab=bridge_config.tab,
+                context_id=bridge_config.context_id,
+                agent_role=bridge_config.agent_role,
+                summary=(
+                    "Bridge context seeding was skipped because no RP bridge command candidate was available; "
+                    "manually add the aiwf run artifacts before continuing the handoff."
+                ),
+                selected_artifacts=selected_artifacts,
+                selected_paths=seed_paths,
+                attempted_tools=[],
+                calls=[],
+            )
+            self._write_bridge_seeding_artifact(run_dir, artifact)
+            return artifact
+
+        try:
+            tool_result = client.list_tools()
+            tool_names = [tool.name for tool in tool_result.tools] if tool_result.ok else []
+            calls.append(
+                self._bridge_call(
+                    step="list_tools",
+                    tool="list_tools",
+                    ok=tool_result.ok,
+                    command=tool_result.command,
+                    summary=(
+                        f"Discovered tools: {', '.join(tool_names)}"
+                        if tool_result.ok
+                        else self._bridge_error_summary(tool_result.error, fallback="Bridge tool discovery failed")
+                    ),
+                    error=tool_result.error,
+                    detail={"tools": tool_names},
+                )
+            )
+            if not tool_result.ok:
+                artifact = RpBridgeSeedingArtifact(
+                    mode=bridge_config.mode,
+                    status="failed",
+                    workspace=bridge_config.workspace,
+                    tab=bridge_config.tab,
+                    context_id=bridge_config.context_id,
+                    agent_role=bridge_config.agent_role,
+                    summary=(
+                        "Bridge context seeding failed during tool discovery; manually add the aiwf run artifacts "
+                        "before continuing the handoff."
+                    ),
+                    selected_artifacts=selected_artifacts,
+                    selected_paths=seed_paths,
+                    attempted_tools=[],
+                    calls=calls,
+                )
+                self._write_bridge_seeding_artifact(run_dir, artifact)
+                return artifact
+
+            available_tools = sorted({tool.name for tool in tool_result.tools if tool.name})
+            if "manage_selection" not in available_tools:
+                artifact = RpBridgeSeedingArtifact(
+                    mode=bridge_config.mode,
+                    status="failed",
+                    workspace=bridge_config.workspace,
+                    tab=bridge_config.tab,
+                    context_id=bridge_config.context_id,
+                    agent_role=bridge_config.agent_role,
+                    summary=(
+                        "Bridge context seeding failed because the RepoPrompt bridge did not expose manage_selection; "
+                        "manually add the aiwf run artifacts before continuing the handoff."
+                    ),
+                    selected_artifacts=selected_artifacts,
+                    selected_paths=seed_paths,
+                    attempted_tools=available_tools,
+                    calls=calls,
+                )
+                self._write_bridge_seeding_artifact(run_dir, artifact)
+                return artifact
+
+            current_context_id = bridge_config.context_id
+            if "workspace_context" in available_tools:
+                context_result = client.workspace_context(bridge_config.workspace)
+                calls.append(
+                    self._bridge_call(
+                        step="workspace_context_before",
+                        tool="workspace_context",
+                        ok=context_result.ok,
+                        command=context_result.command,
+                        summary=(
+                            f"Loaded workspace context snapshot with {len(context_result.selected_paths)} selected path(s)"
+                            if context_result.ok
+                            else self._bridge_error_summary(context_result.error, fallback="Workspace context snapshot failed")
+                        ),
+                        error=context_result.error,
+                        detail={
+                            "workspace": context_result.workspace,
+                            "context_id": context_result.context_id,
+                            "selected_paths": list(context_result.selected_paths),
+                        },
+                    )
+                )
+                if context_result.ok and context_result.context_id:
+                    current_context_id = context_result.context_id
+
+            manage_result = client.manage_selection_add(
+                seed_paths,
+                workspace=bridge_config.workspace,
+                tab=bridge_config.tab,
+                context_id=current_context_id,
+            )
+            calls.append(
+                self._bridge_call(
+                    step="manage_selection_add",
+                    tool="manage_selection",
+                    ok=manage_result.ok,
+                    command=manage_result.command,
+                    summary=(
+                        f"Seeded {len(manage_result.added_paths or seed_paths)} aiwf artifact path(s) into RepoPrompt context"
+                        if manage_result.ok
+                        else self._bridge_error_summary(manage_result.error, fallback="manage_selection failed")
+                    ),
+                    error=manage_result.error,
+                    detail={
+                        "workspace": manage_result.workspace,
+                        "context_id": manage_result.context_id,
+                        "selected_paths": list(manage_result.selected_paths),
+                        "added_paths": list(manage_result.added_paths),
+                    },
+                )
+            )
+            if not manage_result.ok:
+                artifact = RpBridgeSeedingArtifact(
+                    mode=bridge_config.mode,
+                    status="failed",
+                    workspace=bridge_config.workspace,
+                    tab=bridge_config.tab,
+                    context_id=current_context_id,
+                    agent_role=bridge_config.agent_role,
+                    summary=(
+                        "Bridge context seeding failed while updating RepoPrompt selection; manually add the aiwf run "
+                        "artifacts before continuing the handoff."
+                    ),
+                    selected_artifacts=selected_artifacts,
+                    selected_paths=seed_paths,
+                    attempted_tools=available_tools,
+                    calls=calls,
+                )
+                self._write_bridge_seeding_artifact(run_dir, artifact)
+                return artifact
+
+            final_context_id = manage_result.context_id or current_context_id
+            final_selected_paths = list(manage_result.selected_paths or manage_result.added_paths or seed_paths)
+            artifact = RpBridgeSeedingArtifact(
+                mode=bridge_config.mode,
+                status="seeded",
+                workspace=manage_result.workspace or bridge_config.workspace,
+                tab=bridge_config.tab,
+                context_id=final_context_id,
+                agent_role=bridge_config.agent_role,
+                summary=(
+                    "Bridge context seeding prepared the aiwf run artifacts in RepoPrompt; manual handoff still "
+                    "requires reviewing the implementation brief."
+                ),
+                selected_artifacts=selected_artifacts,
+                selected_paths=final_selected_paths,
+                attempted_tools=available_tools,
+                calls=calls,
+            )
+            self._write_bridge_seeding_artifact(run_dir, artifact)
+            return artifact
+        except Exception as exc:
+            artifact = RpBridgeSeedingArtifact(
+                mode=bridge_config.mode,
+                status="failed",
+                workspace=bridge_config.workspace,
+                tab=bridge_config.tab,
+                context_id=bridge_config.context_id,
+                agent_role=bridge_config.agent_role,
+                summary=(
+                    "Bridge context seeding hit an unexpected error; manually add the aiwf run artifacts before "
+                    "continuing the handoff."
+                ),
+                selected_artifacts=selected_artifacts,
+                selected_paths=seed_paths,
+                attempted_tools=[],
+                calls=[
+                    *calls,
+                    RpBridgeToolCall(
+                        step="seed_bridge_context",
+                        tool="bridge_client",
+                        ok=False,
+                        command=[],
+                        summary=f"Unexpected bridge seeding failure: {exc}",
+                        error_code="UNEXPECTED_ERROR",
+                        error_message=str(exc),
+                        detail={},
+                    ),
+                ],
+            )
+            self._write_bridge_seeding_artifact(run_dir, artifact)
+            return artifact
+
+    def _build_bridge_client(self, bridge_config: RpBridgeRunConfig) -> RpCliBridgeClient | None:
+        if self.rp_command is not None:
+            return RpCliBridgeClient(tuple(self.rp_command), timeout_seconds=bridge_config.timeout_seconds or 5)
+        return RpCliBridgeClient.from_command_candidates(
+            self.host_contract.bridge.command_candidates,
+            timeout_seconds=bridge_config.timeout_seconds or 5,
+        )
+
+    def _bridge_seed_paths(self, run_dir: Path, artifact_names: list[str]) -> list[str]:
+        paths: list[str] = []
+        for artifact_name in artifact_names:
+            artifact_path = run_dir / artifact_name
+            try:
+                paths.append(artifact_path.relative_to(self.repo_root).as_posix())
+            except ValueError:
+                paths.append(str(artifact_path))
+        return paths
+
+    def _write_bridge_seeding_artifact(self, run_dir: Path, artifact: RpBridgeSeedingArtifact) -> None:
+        artifact_path = run_dir / "rp-bridge-seeding.json"
+        artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def _bridge_call(
+        self,
+        *,
+        step: str,
+        tool: str,
+        ok: bool,
+        command: Sequence[str],
+        summary: str,
+        error: object = None,
+        detail: dict[str, object] | None = None,
+    ) -> RpBridgeToolCall:
+        error_code = getattr(error, "code", None) if error is not None else None
+        error_message = getattr(error, "message", None) if error is not None else None
+        return RpBridgeToolCall(
+            step=step,
+            tool=tool,
+            ok=ok,
+            command=[str(part) for part in command],
+            summary=summary,
+            error_code=error_code,
+            error_message=error_message,
+            detail=detail or {},
+        )
+
+    def _bridge_error_summary(self, error: object, *, fallback: str) -> str:
+        if error is None:
+            return fallback
+        code = getattr(error, "code", None)
+        message = getattr(error, "message", None)
+        if isinstance(code, str) and code.strip() and isinstance(message, str) and message.strip():
+            return f"{code}: {message}"
+        if isinstance(message, str) and message.strip():
+            return message
+        return fallback
 
     def _snapshot_repo(self) -> list[str]:
         entries: list[str] = []
@@ -674,6 +989,7 @@ class RpAgentAdapter:
             "run-diagnostics.json",
             "run-provenance.json",
             "work-receipt.json",
+            "rp-bridge-seeding.json",
             "rp-agent-implement-prompt.md",
         ]
         return [name for name in preferred if (run_dir / name).exists()]

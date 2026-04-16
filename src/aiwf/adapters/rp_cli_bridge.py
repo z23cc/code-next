@@ -1,4 +1,4 @@
-"""Read-only bridge probing for RepoPrompt CLI surfaces."""
+"""RepoPrompt CLI bridge client for probing and scoped context seeding."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, Sequence
 
 @dataclass(frozen=True)
 class RpBridgeError:
-    """Structured bridge probe failure."""
+    """Structured bridge command failure."""
 
     code: str
     message: str
@@ -22,7 +22,7 @@ class RpBridgeError:
 
 @dataclass(frozen=True)
 class RpToolInfo:
-    """A single read-only-discovered RepoPrompt tool."""
+    """A single RepoPrompt tool discovered from the bridge CLI."""
 
     name: str
     description: str | None = None
@@ -31,7 +31,7 @@ class RpToolInfo:
 
 @dataclass(frozen=True)
 class RpToolListResult:
-    """Typed result of a read-only `--list-tools` probe."""
+    """Typed result of a `--list-tools` probe."""
 
     ok: bool
     command: tuple[str, ...]
@@ -44,7 +44,7 @@ class RpToolListResult:
 
 @dataclass(frozen=True)
 class RpWorkspaceContextResult:
-    """Typed result of a read-only workspace-context probe."""
+    """Typed result of a workspace-context snapshot."""
 
     ok: bool
     command: tuple[str, ...]
@@ -52,6 +52,22 @@ class RpWorkspaceContextResult:
     workspace: str | None = None
     context_id: str | None = None
     selected_paths: tuple[str, ...] = ()
+    error: RpBridgeError | None = None
+    raw_stdout: str | None = None
+    raw_stderr: str | None = None
+
+
+@dataclass(frozen=True)
+class RpManageSelectionResult:
+    """Typed result of a scoped `manage_selection` mutation."""
+
+    ok: bool
+    command: tuple[str, ...]
+    path: str
+    workspace: str | None = None
+    context_id: str | None = None
+    selected_paths: tuple[str, ...] = ()
+    added_paths: tuple[str, ...] = ()
     error: RpBridgeError | None = None
     raw_stdout: str | None = None
     raw_stderr: str | None = None
@@ -69,7 +85,7 @@ class RpBridgeProbeResult:
 
 
 @dataclass(frozen=True)
-class _RpReadOnlyInvocation:
+class _RpInvocation:
     command: tuple[str, ...]
     path: str
     ok: bool
@@ -91,7 +107,7 @@ def _resolve_candidate_path(candidate: str) -> str | None:
 
 
 class RpCliBridgeClient:
-    """Safe read-only client for probing RepoPrompt CLI surfaces."""
+    """Safe client for probing and scoped context seeding via RepoPrompt CLI surfaces."""
 
     def __init__(self, command: Sequence[str], *, timeout_seconds: int = 5) -> None:
         resolved_command = tuple(str(part).strip() for part in command if str(part).strip())
@@ -126,7 +142,7 @@ class RpCliBridgeClient:
         )
 
     def list_tools(self) -> RpToolListResult:
-        invocation = self._run_read_only("--list-tools")
+        invocation = self._run_command("--list-tools")
         if not invocation.ok:
             return RpToolListResult(
                 ok=False,
@@ -170,7 +186,7 @@ class RpCliBridgeClient:
         args = ["--workspace-context"]
         if workspace is not None:
             args.append(workspace)
-        invocation = self._run_read_only(*args)
+        invocation = self._run_command(*args)
         if not invocation.ok:
             return RpWorkspaceContextResult(
                 ok=False,
@@ -194,19 +210,78 @@ class RpCliBridgeClient:
                 raw_stdout=invocation.stdout,
                 raw_stderr=invocation.stderr,
             )
-        selected_paths = self._extract_selected_paths(payload)
         return RpWorkspaceContextResult(
             ok=True,
             command=invocation.command,
             path=invocation.path,
             workspace=self._optional_string(payload.get("workspace")),
             context_id=self._optional_string(payload.get("context_id")),
-            selected_paths=selected_paths,
+            selected_paths=self._extract_selected_paths(payload),
             raw_stdout=invocation.stdout,
             raw_stderr=invocation.stderr,
         )
 
-    def _run_read_only(self, *arguments: str) -> _RpReadOnlyInvocation:
+    def manage_selection_add(
+        self,
+        paths: Sequence[str],
+        *,
+        workspace: str | None = None,
+        tab: str | None = None,
+        context_id: str | None = None,
+        mode: str = "full",
+    ) -> RpManageSelectionResult:
+        normalized_paths = tuple(str(path).strip() for path in paths if str(path).strip())
+        if not normalized_paths:
+            raise ValueError("manage_selection_add requires at least one path")
+        payload: dict[str, Any] = {
+            "op": "add",
+            "mode": mode,
+            "paths": list(normalized_paths),
+        }
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if tab is not None:
+            payload["tab"] = tab
+        if context_id is not None:
+            payload["context_id"] = context_id
+
+        invocation = self._run_command("--manage-selection", json.dumps(payload, ensure_ascii=False))
+        if not invocation.ok:
+            return RpManageSelectionResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=invocation.error,
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        response = self._load_json_payload(invocation, context="manage_selection")
+        if not isinstance(response, dict):
+            return RpManageSelectionResult(
+                ok=False,
+                command=invocation.command,
+                path=invocation.path,
+                error=self._malformed_response_error(
+                    invocation,
+                    context="manage_selection",
+                    message="manage_selection did not return a JSON object",
+                ),
+                raw_stdout=invocation.stdout,
+                raw_stderr=invocation.stderr,
+            )
+        return RpManageSelectionResult(
+            ok=True,
+            command=invocation.command,
+            path=invocation.path,
+            workspace=self._optional_string(response.get("workspace")) or workspace,
+            context_id=self._optional_string(response.get("context_id")) or context_id,
+            selected_paths=self._extract_selected_paths(response),
+            added_paths=self._extract_string_list(response, keys=("added_paths", "paths", "resolved_paths")),
+            raw_stdout=invocation.stdout,
+            raw_stderr=invocation.stderr,
+        )
+
+    def _run_command(self, *arguments: str) -> _RpInvocation:
         command = (*self.command, *arguments)
         try:
             completed = subprocess.run(
@@ -217,7 +292,7 @@ class RpCliBridgeClient:
                 timeout=self.timeout_seconds,
             )
         except FileNotFoundError:
-            return _RpReadOnlyInvocation(
+            return _RpInvocation(
                 command=command,
                 path=self.command[0],
                 ok=False,
@@ -228,19 +303,19 @@ class RpCliBridgeClient:
                 ),
             )
         except subprocess.TimeoutExpired:
-            return _RpReadOnlyInvocation(
+            return _RpInvocation(
                 command=command,
                 path=self.command[0],
                 ok=False,
                 error=RpBridgeError(
                     code="TIMEOUT",
-                    message=f"RP bridge command {self.command[0]!r} exceeded the read-only probe timeout",
+                    message=f"RP bridge command {self.command[0]!r} exceeded the bridge timeout",
                     retriable=True,
                     detail={"timeout_seconds": self.timeout_seconds},
                 ),
             )
         except OSError as exc:
-            return _RpReadOnlyInvocation(
+            return _RpInvocation(
                 command=command,
                 path=self.command[0],
                 ok=False,
@@ -252,7 +327,7 @@ class RpCliBridgeClient:
             )
 
         if completed.returncode != 0:
-            return _RpReadOnlyInvocation(
+            return _RpInvocation(
                 command=command,
                 path=self.command[0],
                 ok=False,
@@ -266,7 +341,7 @@ class RpCliBridgeClient:
                 ),
             )
 
-        return _RpReadOnlyInvocation(
+        return _RpInvocation(
             command=command,
             path=self.command[0],
             ok=True,
@@ -276,10 +351,11 @@ class RpCliBridgeClient:
 
     def _load_json_payload(
         self,
-        invocation: _RpReadOnlyInvocation,
+        invocation: _RpInvocation,
         *,
         context: str,
     ) -> dict[str, Any] | list[Any] | None:
+        del context
         stdout = (invocation.stdout or "").strip()
         if not stdout:
             return None
@@ -329,23 +405,28 @@ class RpCliBridgeClient:
             raw_paths = payload.get("paths")
         if not isinstance(raw_paths, list):
             return ()
-        selected_paths = [
-            path.strip()
-            for path in raw_paths
-            if isinstance(path, str) and path.strip()
-        ]
-        return tuple(selected_paths)
+        return tuple(path.strip() for path in raw_paths if isinstance(path, str) and path.strip())
+
+    def _extract_string_list(self, payload: dict[str, Any], *, keys: Sequence[str]) -> tuple[str, ...]:
+        for key in keys:
+            raw = payload.get(key)
+            if not isinstance(raw, list):
+                continue
+            values = [value.strip() for value in raw if isinstance(value, str) and value.strip()]
+            if values:
+                return tuple(values)
+        return ()
 
     def _malformed_response_error(
         self,
-        invocation: _RpReadOnlyInvocation,
+        invocation: _RpInvocation,
         *,
         context: str,
         message: str | None = None,
     ) -> RpBridgeError:
         return RpBridgeError(
             code="MALFORMED_RESPONSE",
-            message=message or f"RP bridge {context} probe did not return valid JSON",
+            message=message or f"RP bridge {context} did not return valid JSON",
             retriable=False,
             detail={"stdout": (invocation.stdout or "").strip()[:400]},
         )
@@ -358,6 +439,7 @@ __all__ = [
     "RpBridgeError",
     "RpBridgeProbeResult",
     "RpCliBridgeClient",
+    "RpManageSelectionResult",
     "RpToolInfo",
     "RpToolListResult",
     "RpWorkspaceContextResult",

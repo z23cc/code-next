@@ -183,6 +183,7 @@ def _build_projection(
             "implement": {
                 "entrypoint": RP_COMMANDS["implement"],
                 "manual_handoff_artifact": "rp-agent-implement-prompt.md",
+                "bridge_seeding_artifact": "rp-bridge-seeding.json",
                 "auto_stage_output_artifact": "rp-agent-implement-response.md",
                 "resume_boundary": (
                     "Use `uv run aiwf resume <run_id>` after manual RepoPrompt implement handoff. "
@@ -234,7 +235,7 @@ RP_COMPILER_SPEC = CompilerSpec(
     projection_name="rp-host-projection",
     variant_namespace="rp",
     compiler_name="aiwf.compile.rp",
-    projection_contract="rp-host-projection-v3",
+    projection_contract="rp-host-projection-v4",
     host_name="repoprompt",
     host_display_name="RepoPrompt",
     stored_runtime_key="host_contract",

@@ -302,11 +302,39 @@ bridge 更现实，原因有三点：
 
 也就是说，P2 只是把“机器上有没有一个可读的 RepoPrompt bridge candidate，以及它大概暴露了什么只读 surface”这件事安全地说清楚。
 
-### Phase 3+
+### Phase 3 — context seeding via MCP tools（已落地）
+
+> **Status (2026-04-16): P3 completed.** bridge-enabled implement 现在会在写出 `rp-agent-implement-prompt.md` 之前，尝试通过 `RpCliBridgeClient` 调用 RepoPrompt 的 tool surface 来预置最小 implement 上下文。当前已落地的是：
+>
+> - `RpCliBridgeClient.manage_selection_add(...)`
+> - 可选 `workspace_context(...)` snapshot
+> - typed seeding artifact `rp-bridge-seeding.json`
+> - `run-diagnostics.json` / `run-provenance.json` / `inspect` 中的 seeding surface
+> - seeding 失败时的 safe fallback（仍然保持 manual handoff）
+
+当前 P3 的实际行为是：
+
+- 仅在 `rp/manual + --bridge` implement 阶段尝试 seeding
+- 当前 seeding scope 只预置 aiwf run artifacts：
+  - `context-pack.md`
+  - `exec-plan.md`
+- 成功时把 selected paths / attempted tools / 调用摘要写入 `rp-bridge-seeding.json`
+- 失败时不会让 run crash；而是：
+  - 继续生成 `rp-agent-implement-prompt.md`
+  - 在 `rp-bridge-seeding.json` 中记录失败
+  - 在 diagnostics / inspect next actions 中明确提示 operator 手工补齐上下文
+
+当前 P3 的明确边界仍然是：
+
+- 不会 capture RepoPrompt response / transcript 作为 implement/review 输出
+- 不会 normalize 回 `rp-agent-implement-response.md` / `review-report.json`
+- 不会启动 `managed-agent`
+- 不会做超出当前 aiwf run artifacts 的广泛 context seeding
+
+### Phase 4+
 
 再之后才考虑：
 
-- context seeding / selection automation
 - capture / transcript normalization
 - managed-agent bridge
 - 更深的 `inspect` / provenance / review contract 自动化

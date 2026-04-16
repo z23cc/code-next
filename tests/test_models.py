@@ -3,7 +3,15 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from aiwf.models import GateSet, RpBridgeRunConfig, RunMeta, RunStatus, RunbookSpec, TaskSpec
+from aiwf.models import (
+    GateSet,
+    RpBridgeRunConfig,
+    RpBridgeSeedingArtifactContent,
+    RunMeta,
+    RunStatus,
+    RunbookSpec,
+    TaskSpec,
+)
 
 
 def test_task_spec_populates_slug_and_defaults() -> None:
@@ -95,6 +103,35 @@ def test_rp_bridge_run_config_rejects_invalid_values() -> None:
 
     with pytest.raises(ValidationError, match="timeout_seconds"):
         RpBridgeRunConfig(mode="manual-assist", timeout_seconds=0)
+
+
+def test_rp_bridge_seeding_artifact_content_validates() -> None:
+    payload = RpBridgeSeedingArtifactContent.model_validate(
+        {
+            "version": 1,
+            "mode": "manual-assist",
+            "status": "seeded",
+            "manual_handoff_required": True,
+            "workspace": "workspace-alpha",
+            "summary": "Seeded aiwf artifacts into RepoPrompt context.",
+            "selected_artifacts": ["context-pack.md", "exec-plan.md"],
+            "selected_paths": [".ai/runs/run-1/context-pack.md", ".ai/runs/run-1/exec-plan.md"],
+            "attempted_tools": ["manage_selection", "workspace_context"],
+            "calls": [
+                {
+                    "step": "manage_selection_add",
+                    "tool": "manage_selection",
+                    "ok": True,
+                    "command": ["rp", "--manage-selection"],
+                    "summary": "Seeded 2 aiwf artifact path(s) into RepoPrompt context",
+                    "detail": {"selected_paths": [".ai/runs/run-1/context-pack.md"]},
+                }
+            ],
+        }
+    )
+
+    assert payload.status == "seeded"
+    assert payload.calls[0].tool == "manage_selection"
 
 
 def test_runbook_stage_strategy_fields_reject_invalid_values() -> None:

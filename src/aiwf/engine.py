@@ -25,6 +25,7 @@ from aiwf.models import (
     RunProvenance,
     RunProvenanceArtifact,
     ReviewReportContent,
+    RpBridgeSeedingArtifactContent,
     RunReviewEvidence,
     RunbookSpec,
     RunStatus,
@@ -691,6 +692,14 @@ class WorkflowEngine:
 
         implement_output_names = self._implement_output_artifact_names(events, artifact_refs)
         for artifact_name in implement_output_names:
+            if artifact_name == "rp-bridge-seeding.json":
+                add_artifact(
+                    artifact_name,
+                    stage="implement",
+                    category="bridge_context",
+                    related_artifacts=[name for name in ["context-pack.md", "exec-plan.md", "rp-agent-implement-prompt.md"] if name in artifact_refs],
+                )
+                continue
             category = "handoff" if "prompt" in artifact_name else "stage_output"
             add_artifact(artifact_name, stage="implement", category=category)
 
@@ -823,6 +832,17 @@ class WorkflowEngine:
             return []
         return [artifact_name.strip()]
 
+    def _load_bridge_seeding_artifact(self, run_dir: Path) -> RpBridgeSeedingArtifactContent | None:
+        artifact_path = run_dir / "rp-bridge-seeding.json"
+        if not artifact_path.exists():
+            return None
+        try:
+            return ArtifactStore(run_dir, state_manager=self.state_manager).read_validated_artifact(
+                "rp-bridge-seeding.json", RpBridgeSeedingArtifactContent
+            )
+        except ArtifactError:
+            return None
+
     def _json_string_value(self, payload: dict[str, object] | None, key: str) -> str | None:
         if payload is None:
             return None
@@ -895,6 +915,7 @@ class WorkflowEngine:
             if review_handoff:
                 handoff_artifacts = [review_handoff]
 
+        bridge_seeding = self._load_bridge_seeding_artifact(run_dir)
         return RunBridgeDiagnostics(
             mode=self.bridge_config.mode,
             workspace=self.bridge_config.workspace,
@@ -905,6 +926,9 @@ class WorkflowEngine:
             export_transcript=self.bridge_config.export_transcript,
             summary=self._bridge_summary(meta, handoff_artifacts),
             handoff_artifacts=handoff_artifacts,
+            seeding_artifact="rp-bridge-seeding.json" if bridge_seeding is not None else None,
+            seeding_status=bridge_seeding.status if bridge_seeding is not None else None,
+            seeding_summary=bridge_seeding.summary if bridge_seeding is not None else None,
         )
 
     def _bridge_summary(self, meta: RunMeta, handoff_artifacts: list[str]) -> str:
@@ -978,8 +1002,26 @@ class WorkflowEngine:
                 handoff_artifacts = self._matching_artifact_names(artifact_names, stage="implement")
                 if handoff_artifacts:
                     if self.bridge_config is not None:
+                        bridge_seeding = self._load_bridge_seeding_artifact(run_dir)
+                        if bridge_seeding is not None and bridge_seeding.status == "seeded":
+                            first_action = (
+                                f"Open or reuse a RepoPrompt session{bridge_target_hint}, confirm the seeded aiwf artifacts "
+                                f"recorded in rp-bridge-seeding.json, then inspect {', '.join(handoff_artifacts)} to complete "
+                                "the manual-assist implementation handoff."
+                            )
+                        elif bridge_seeding is not None:
+                            first_action = (
+                                f"Open or reuse a RepoPrompt session{bridge_target_hint}, manually add context-pack.md and "
+                                f"exec-plan.md (see rp-bridge-seeding.json), then inspect {', '.join(handoff_artifacts)} to "
+                                "complete the manual-assist implementation handoff."
+                            )
+                        else:
+                            first_action = (
+                                f"Open or reuse a RepoPrompt session{bridge_target_hint}, then inspect {', '.join(handoff_artifacts)} "
+                                "to complete the manual-assist implementation handoff."
+                            )
                         return [
-                            f"Open or reuse a RepoPrompt session{bridge_target_hint}, then inspect {', '.join(handoff_artifacts)} to complete the manual-assist implementation handoff.",
+                            first_action,
                             f"Run `uv run aiwf resume {run_id}` when the implementation handoff is complete.",
                         ]
                     return [

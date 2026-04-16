@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from aiwf.adapters.base import HostCapabilities, HostContract, ReviewArtifactContract
 from aiwf.adapters.claude_code import ClaudeCodeAdapter
+from aiwf.adapters.rp_agent import RpAgentAdapter
 from aiwf.cli import app
 from aiwf.engine import WorkflowEngine
 from aiwf.exceptions import ErrorCode
@@ -510,20 +511,16 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     assert blocked_inspect_json_result.exit_code == 0
     blocked_inspect_payload = json.loads(blocked_inspect_json_result.stdout)
     assert blocked_inspect_payload["rp_bridge"] == bridge_payload
-    assert blocked_inspect_payload["diagnostics"]["bridge"] == {
-        "mode": "manual-assist",
-        "workspace": "workspace-alpha",
-        "tab": "implement-tab",
-        "context_id": "ctx-123",
-        "agent_role": "implementer",
-        "timeout_seconds": 900,
-        "export_transcript": True,
-        "summary": (
-            "RepoPrompt manual-assist is active for implement; complete the RepoPrompt-side handoff "
-            "using rp-agent-implement-prompt.md with the stored bridge hints, then resume."
-        ),
-        "handoff_artifacts": ["rp-agent-implement-prompt.md"],
-    }
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["mode"] == "manual-assist"
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["workspace"] == "workspace-alpha"
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["tab"] == "implement-tab"
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["context_id"] == "ctx-123"
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["agent_role"] == "implementer"
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["timeout_seconds"] == 900
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["export_transcript"] is True
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["handoff_artifacts"] == ["rp-agent-implement-prompt.md"]
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["seeding_artifact"] == "rp-bridge-seeding.json"
+    assert blocked_inspect_payload["diagnostics"]["bridge"]["seeding_status"] in {"skipped", "failed"}
 
     resume_result = runner.invoke(
         app,
@@ -619,6 +616,60 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
     resumed_meta = RunStateManager(ai_root).load_run(run_id)
     assert resumed_meta.status.value == "passed"
     assert resumed_meta.data["rp_bridge"] == bridge_payload
+
+
+def test_cli_inspect_surfaces_bridge_seeding_artifact_and_status(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="seed-ok")
+    bridge_config = RpBridgeRunConfig(mode="manual-assist", workspace="workspace-alpha", context_id="ctx-123")
+    engine = WorkflowEngine(
+        RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(fake_cli)]),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        bridge_config=bridge_config,
+    )
+
+    run_id = engine.run_implement(task_path)
+
+    inspect_result = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root)])
+
+    assert inspect_result.exit_code == 0
+    assert "bridge_seeding_artifact=rp-bridge-seeding.json" in inspect_result.stdout
+    assert "bridge_seeding_status=seeded" in inspect_result.stdout
+    assert "bridge_seeding_summary=Bridge context seeding prepared the aiwf run artifacts" in inspect_result.stdout
+    assert "bridge_seeding=" in inspect_result.stdout
+
+    inspect_json_result = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+
+    assert inspect_json_result.exit_code == 0
+    payload = json.loads(inspect_json_result.stdout)
+    assert payload["bridge_seeding"]["status"] == "seeded"
+    assert payload["diagnostics"]["bridge"]["seeding_status"] == "seeded"
+    assert payload["artifacts"]["bridge_seeding"].endswith("rp-bridge-seeding.json")
+
+
+
+def test_cli_inspect_surfaces_bridge_seeding_failure_without_breaking_manual_handoff(tmp_path: Path) -> None:
+    task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    fake_cli = _write_fake_rp_bridge_cli(tmp_path, mode="seed-manage-fail")
+    bridge_config = RpBridgeRunConfig(mode="manual-assist", workspace="workspace-alpha")
+    engine = WorkflowEngine(
+        RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config, rp_command=[str(fake_cli)]),
+        ai_root=ai_root,
+        repo_root=repo_root,
+        bridge_config=bridge_config,
+    )
+
+    run_id = engine.run_implement(task_path)
+
+    inspect_json_result = runner.invoke(app, ["inspect", run_id, "--ai-root", str(ai_root), "--json"])
+
+    assert inspect_json_result.exit_code == 0
+    payload = json.loads(inspect_json_result.stdout)
+    assert payload["bridge_seeding"]["status"] == "failed"
+    assert payload["diagnostics"]["bridge"]["seeding_status"] == "failed"
+    assert "manually add context-pack.md and exec-plan.md" in payload["diagnostics"]["next_actions"][0]
+
 
 
 def test_cli_codex_adapter_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) -> None:
@@ -1443,7 +1494,7 @@ def test_cli_inspect_bridge_probe_surfaces_read_only_tool_probe(tmp_path: Path) 
     assert inspect_result.exit_code == 0
     assert "bridge_probe=available" in inspect_result.stdout
     assert fake_cli.name in inspect_result.stdout
-    assert "bridge_probe_tools=file_search,manage_selection" in inspect_result.stdout
+    assert "bridge_probe_tools=file_search,manage_selection,workspace_context" in inspect_result.stdout
 
     inspect_json_result = runner.invoke(
         app,
@@ -1461,7 +1512,7 @@ def test_cli_inspect_bridge_probe_surfaces_read_only_tool_probe(tmp_path: Path) 
     payload = json.loads(inspect_json_result.stdout)
     assert payload["bridge_probe"]["available"] is True
     assert payload["bridge_probe"]["path"] == str(fake_cli)
-    assert [tool["name"] for tool in payload["bridge_probe"]["tools"]] == ["file_search", "manage_selection"]
+    assert [tool["name"] for tool in payload["bridge_probe"]["tools"]] == ["file_search", "manage_selection", "workspace_context"]
     assert payload["bridge_probe"]["error"] is None
 
 
@@ -2241,7 +2292,23 @@ def _write_fake_rp_bridge_cli(tmp_path: Path, *, mode: str) -> Path:
             "    if MODE == 'fail':\n"
             "        sys.stderr.write('tool listing failed\\n')\n"
             "        raise SystemExit(9)\n"
-            "    sys.stdout.write(json.dumps({'tools': [{'name': 'file_search'}, {'name': 'manage_selection'}]}))\n"
+            "    sys.stdout.write(json.dumps({'tools': [{'name': 'file_search'}, {'name': 'manage_selection'}, {'name': 'workspace_context'}]}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--workspace-context' in sys.argv:\n"
+            "    workspace = sys.argv[-1] if len(sys.argv) >= 3 else None\n"
+            "    sys.stdout.write(json.dumps({'workspace': workspace, 'context_id': 'ctx-123', 'selected_paths': ['src/example.py']}))\n"
+            "    sys.stdout.write('\\n')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "if '--manage-selection' in sys.argv:\n"
+            "    payload = json.loads(sys.argv[-1])\n"
+            "    if MODE == 'seed-manage-fail':\n"
+            "        sys.stderr.write('manage selection failed\\n')\n"
+            "        raise SystemExit(7)\n"
+            "    paths = payload.get('paths', [])\n"
+            "    sys.stdout.write(json.dumps({'workspace': payload.get('workspace'), 'context_id': payload.get('context_id'), 'selected_paths': paths, 'added_paths': paths}))\n"
             "    sys.stdout.write('\\n')\n"
             "    raise SystemExit(0)\n"
             "\n"

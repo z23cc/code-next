@@ -609,6 +609,7 @@ def _build_inspection_payload(
     diagnostics = _load_run_surface(ai_root, run_id, "run-diagnostics.json")
     provenance = _load_optional_run_surface(ai_root, run_id, "run-provenance.json")
     review_report = _load_optional_run_surface(ai_root, run_id, "review-report.json")
+    bridge_seeding = _load_optional_run_surface(ai_root, run_id, "rp-bridge-seeding.json")
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -616,11 +617,13 @@ def _build_inspection_payload(
         "diagnostics": diagnostics,
         "provenance": provenance,
         "review_report": review_report,
+        "bridge_seeding": bridge_seeding,
         "rp_bridge": meta.data.get("rp_bridge") if "rp_bridge" in meta.data else None,
         "artifacts": {
             "diagnostics": str(_artifact_path(ai_root, run_id, "run-diagnostics.json")),
             "provenance": str(_artifact_path(ai_root, run_id, "run-provenance.json")),
             "review_report": str(_artifact_path(ai_root, run_id, "review-report.json")) if review_report is not None else None,
+            "bridge_seeding": str(_artifact_path(ai_root, run_id, "rp-bridge-seeding.json")) if bridge_seeding is not None else None,
         },
     }
 
@@ -922,6 +925,15 @@ def _print_inspection(
         handoff_artifacts = diagnostics_bridge.get("handoff_artifacts")
         if isinstance(handoff_artifacts, list) and handoff_artifacts:
             console.print(f"bridge_handoff_artifacts={_format_csv(handoff_artifacts)}")
+        seeding_artifact = diagnostics_bridge.get("seeding_artifact")
+        seeding_status = diagnostics_bridge.get("seeding_status")
+        seeding_summary = diagnostics_bridge.get("seeding_summary")
+        if isinstance(seeding_artifact, str) and seeding_artifact.strip():
+            console.print(f"bridge_seeding_artifact={seeding_artifact}")
+        if isinstance(seeding_status, str) and seeding_status.strip():
+            console.print(f"bridge_seeding_status={seeding_status}")
+        if isinstance(seeding_summary, str) and seeding_summary.strip():
+            console.print(f"bridge_seeding_summary={seeding_summary}")
     bridge_probe_payload = payload.get("bridge_probe")
     if isinstance(bridge_probe_payload, Mapping):
         if bridge_probe_payload.get("available"):
@@ -996,6 +1008,8 @@ def _print_inspection(
     artifacts = payload["artifacts"]
     console.print(f"diagnostics={artifacts['diagnostics']}")
     console.print(f"provenance={artifacts['provenance']}")
+    if artifacts.get("bridge_seeding"):
+        console.print(f"bridge_seeding={artifacts['bridge_seeding']}")
 
 
 @run_app.command("plan")
