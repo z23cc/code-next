@@ -206,6 +206,17 @@ def _resolve_bridge_config(
     if bridge_apply_edits and resolved_mode != "managed-agent":
         raise AiwfError("Bridge destructive edits currently require --bridge-mode managed-agent")
 
+    resolved_composition: Literal["manage-selection", "context-builder"] = "manage-selection"
+    if bridge_composition is not None:
+        if bridge_composition == "manage-selection":
+            resolved_composition = "manage-selection"
+        elif bridge_composition == "context-builder":
+            resolved_composition = "context-builder"
+        else:
+            raise AiwfError(
+                "Bridge composition must be one of: manage-selection, context-builder"
+            )
+
     try:
         return RpBridgeRunConfig(
             mode=resolved_mode,
@@ -215,7 +226,7 @@ def _resolve_bridge_config(
             agent_role=bridge_agent_role,
             timeout_seconds=bridge_timeout,
             export_transcript=bridge_export_transcript,
-            composition=bridge_composition or "manage-selection",
+            composition=resolved_composition,
             use_oracle_for_review=bridge_use_oracle_for_review,
             apply_edits=bridge_apply_edits,
             apply_edits_clean_repo_required=not bridge_apply_edits_allow_dirty,

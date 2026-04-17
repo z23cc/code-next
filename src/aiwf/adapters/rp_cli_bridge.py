@@ -678,6 +678,8 @@ class RpCliBridgeClient:
                 raw_stdout=invocation.stdout,
                 raw_stderr=invocation.stderr,
             )
+        raw_tokens = response.get("tokens")
+        raw_sections = response.get("sections")
         return RpWorkspaceContextResult(
             ok=True,
             command=invocation.command,
@@ -686,8 +688,8 @@ class RpCliBridgeClient:
             context_id=self._optional_string(response.get("context_id")),
             selected_paths=self._extract_selected_paths(response),
             prompt=self._optional_string(response.get("prompt")),
-            tokens=dict(response.get("tokens")) if isinstance(response.get("tokens"), dict) else None,
-            sections=dict(response.get("sections")) if isinstance(response.get("sections"), dict) else None,
+            tokens=dict(raw_tokens) if isinstance(raw_tokens, Mapping) else None,
+            sections=dict(raw_sections) if isinstance(raw_sections, Mapping) else None,
             export_path=self._optional_string(response.get("export_path"))
             or self._optional_string(response.get("path")),
             raw_payload=response,
@@ -737,6 +739,7 @@ class RpCliBridgeClient:
                 raw_stdout=invocation.stdout,
                 raw_stderr=invocation.stderr,
             )
+        raw_tokens = response.get("tokens")
         return RpWorkspaceContextResult(
             ok=True,
             command=invocation.command,
@@ -745,7 +748,7 @@ class RpCliBridgeClient:
             context_id=self._optional_string(response.get("context_id")),
             selected_paths=self._extract_selected_paths(response),
             prompt=self._optional_string(response.get("prompt")),
-            tokens=dict(response.get("tokens")) if isinstance(response.get("tokens"), dict) else None,
+            tokens=dict(raw_tokens) if isinstance(raw_tokens, Mapping) else None,
             sections={
                 key: response.get(key)
                 for key in ("selection", "code", "files", "tree")
@@ -1080,7 +1083,7 @@ class RpCliBridgeClient:
             matches=parsed,
             matched_paths=tuple(sorted({match.path for match in parsed})),
             count=(len(parsed) if isinstance(response, list) else self._optional_int(response.get("count")) if isinstance(response, dict) else None),
-            truncated=self._optional_bool(response.get("truncated")) if isinstance(response, dict) else False,
+            truncated=(self._optional_bool(response.get("truncated")) or False) if isinstance(response, dict) else False,
             raw_payload=response,
             raw_stdout=invocation.stdout,
             raw_stderr=invocation.stderr,

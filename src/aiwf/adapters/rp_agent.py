@@ -7,7 +7,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence, cast
 
 from aiwf.adapters.base import BridgeContract, HostCapabilities, HostContract, NativeRuntimeContract, ReviewArtifactContract
 from aiwf.adapters.rp_bridge_normalize import (
@@ -50,6 +50,14 @@ _RP_REQUEST_TYPE_BY_STAGE = {
     "implement": "execute",
     "review": "review",
 }
+
+BridgeStage = Literal["implement", "review"]
+BridgeManagedRecovery = Literal["initial", "resumed"]
+BridgeManagedStatus = Literal["completed", "failed", "waiting_for_input", "timeout", "cancelled"]
+BridgeEditTool = Literal["apply_edits", "file_actions"]
+BridgeEditApplyStatus = Literal["applied", "failed", "partially_applied"]
+BridgeEditsArtifactStatus = Literal["previewed", "applied", "partially_applied", "failed"]
+BridgeContextBuilderResponseType = Literal["clarify", "plan", "question", "review"]
 
 
 _SKIPPED_PATH_PARTS = {
@@ -297,7 +305,7 @@ class RpAgentAdapter:
 
         prompt_path = run_dir / "rp-agent-review-prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
-        review_report = {
+        review_report: dict[str, object] = {
             # Contract-required fields validated by the shared review contract.
             "summary": f"RepoPrompt review handoff prompt written for {task.title}",
             "issues": [],
@@ -707,7 +715,7 @@ class RpAgentAdapter:
         if stage == "implement" and bridge_seeding is not None:
             lines.extend(
                 [
-                    f"- bridge_seeding_artifact: rp-bridge-seeding.json",
+                    "- bridge_seeding_artifact: rp-bridge-seeding.json",
                     f"- bridge_seeding_status: {bridge_seeding.status}",
                     f"- bridge_seeding_summary: {bridge_seeding.summary}",
                 ]
@@ -1019,7 +1027,7 @@ class RpAgentAdapter:
         self,
         run_dir: Path,
         *,
-        stage: str,
+        stage: BridgeStage,
         prompt: str,
         prompt_artifact: str,
         response_artifact: str,
@@ -1048,7 +1056,7 @@ class RpAgentAdapter:
             resolved_tab = tab
         if resolved_context_id is None:
             resolved_context_id = context_id
-        recovery: str = "initial"
+        recovery: BridgeManagedRecovery = "initial"
 
         if session_id is not None:
             recovery = "resumed"
@@ -1278,7 +1286,7 @@ class RpAgentAdapter:
         if not wait_result.ok:
             timeout = wait_result.error is not None and wait_result.error.code == "TIMEOUT"
             transport_unavailable = self._is_bridge_transport_unavailable_error(wait_result.error)
-            status = "timeout" if timeout else "failed"
+            status: Literal["timeout", "failed"] = "timeout" if timeout else "failed"
             record = RpBridgeManagedAgentRecord(
                 stage=stage,
                 session_id=session_id,
@@ -1320,7 +1328,11 @@ class RpAgentAdapter:
                 ),
             )
 
-        terminal_status = wait_result.status or "failed"
+        terminal_status_raw = wait_result.status or "failed"
+        if terminal_status_raw in {"completed", "failed", "waiting_for_input", "timeout", "cancelled"}:
+            terminal_status: BridgeManagedStatus = cast(BridgeManagedStatus, terminal_status_raw)
+        else:
+            terminal_status = "failed"
         response_text = wait_result.output or log_output
         if terminal_status == "completed":
             record = RpBridgeManagedAgentRecord(
@@ -1676,9 +1688,14 @@ class RpAgentAdapter:
 
         apply_token = f"aiwf-p10-managed-{stage}"
         applied_paths: list[str] = []
-        last_tool = "apply_edits" if normalized_apply_requests else "file_actions"
+        last_tool: BridgeEditTool = "apply_edits" if normalized_apply_requests else "file_actions"
 
-        def _write_failure(status: str, summary: str, *, detail: dict[str, Any]) -> _BridgeEditsOutcome:
+        def _write_failure(
+            status: Literal["failed", "partially_applied"],
+            summary: str,
+            *,
+            detail: dict[str, Any],
+        ) -> _BridgeEditsOutcome:
             self._write_bridge_edits_artifact(
                 run_dir,
                 RpBridgeEditsArtifact(
@@ -1703,14 +1720,16 @@ class RpAgentAdapter:
         for index, request in enumerate(normalized_apply_requests):
             path = str(request.get("path", "")).strip()
             if not path:
-                status = "partially_applied" if applied_paths else "failed"
+                apply_status_missing: Literal["failed", "partially_applied"] = (
+                    "partially_applied" if applied_paths else "failed"
+                )
                 return _write_failure(
-                    status,
+                    apply_status_missing,
                     "Bridge apply_edits request is missing required path field.",
                     detail={"request_index": index, "tool": "apply_edits"},
                 )
             last_tool = "apply_edits"
-            result = client.apply_edits_commit(
+            apply_result = client.apply_edits_commit(
                 apply_token=apply_token,
                 path=path,
                 rewrite=request.get("rewrite") if isinstance(request.get("rewrite"), str) else None,
@@ -1723,19 +1742,21 @@ class RpAgentAdapter:
                 on_missing=request.get("on_missing") if request.get("on_missing") in {"error", "create"} else None,
                 verbose=request.get("verbose") if isinstance(request.get("verbose"), bool) else None,
             )
-            if not result.ok:
-                status = "partially_applied" if applied_paths else "failed"
-                summary = self._bridge_error_summary(result.error, fallback="Bridge apply_edits commit failed")
+            if not apply_result.ok:
+                apply_status_commit: Literal["failed", "partially_applied"] = (
+                    "partially_applied" if applied_paths else "failed"
+                )
+                summary = self._bridge_error_summary(apply_result.error, fallback="Bridge apply_edits commit failed")
                 return _write_failure(
-                    status,
+                    apply_status_commit,
                     summary,
                     detail={
                         "request_index": index,
                         "tool": "apply_edits",
-                        "error_code": result.error.code if result.error is not None else None,
+                        "error_code": apply_result.error.code if apply_result.error is not None else None,
                     },
                 )
-            for changed_path in result.changed_paths:
+            for changed_path in apply_result.changed_paths:
                 if changed_path not in applied_paths:
                     applied_paths.append(changed_path)
 
@@ -1743,34 +1764,44 @@ class RpAgentAdapter:
             action = str(request.get("action", "")).strip()
             path = str(request.get("path", "")).strip()
             if action not in {"create", "delete", "move"} or not path:
-                status = "partially_applied" if applied_paths else "failed"
+                invalid_action_status: Literal["failed", "partially_applied"] = (
+                    "partially_applied" if applied_paths else "failed"
+                )
                 return _write_failure(
-                    status,
+                    invalid_action_status,
                     "Bridge file_actions request is missing required action/path fields.",
                     detail={"request_index": index, "tool": "file_actions"},
                 )
             last_tool = "file_actions"
-            result = client.file_actions_commit(
+            if action == "create":
+                action_literal: Literal["create", "delete", "move"] = "create"
+            elif action == "delete":
+                action_literal = "delete"
+            else:
+                action_literal = "move"
+            file_action_result = client.file_actions_commit(
                 apply_token=apply_token,
-                action=action,  # type: ignore[arg-type]
+                action=action_literal,
                 path=path,
                 content=request.get("content") if isinstance(request.get("content"), str) else None,
                 new_path=request.get("new_path") if isinstance(request.get("new_path"), str) else None,
                 if_exists=request.get("if_exists") if request.get("if_exists") in {"error", "overwrite"} else None,
             )
-            if not result.ok:
-                status = "partially_applied" if applied_paths else "failed"
-                summary = self._bridge_error_summary(result.error, fallback="Bridge file_actions commit failed")
+            if not file_action_result.ok:
+                action_status: Literal["failed", "partially_applied"] = (
+                    "partially_applied" if applied_paths else "failed"
+                )
+                summary = self._bridge_error_summary(file_action_result.error, fallback="Bridge file_actions commit failed")
                 return _write_failure(
-                    status,
+                    action_status,
                     summary,
                     detail={
                         "request_index": index,
                         "tool": "file_actions",
-                        "error_code": result.error.code if result.error is not None else None,
+                        "error_code": file_action_result.error.code if file_action_result.error is not None else None,
                     },
                 )
-            for changed_path in result.changed_paths:
+            for changed_path in file_action_result.changed_paths:
                 if changed_path not in applied_paths:
                     applied_paths.append(changed_path)
 
@@ -1840,8 +1871,8 @@ class RpAgentAdapter:
         self,
         run_dir: Path,
         *,
-        stage: str,
-        status: str | None = None,
+        stage: BridgeStage,
+        status: BridgeManagedStatus | None = None,
     ) -> RpBridgeManagedAgentRecord | None:
         artifact_path = run_dir / "rp-bridge-agent-log.json"
         if not artifact_path.exists():
@@ -1880,13 +1911,14 @@ class RpAgentAdapter:
         self,
         run_dir: Path,
         *,
-        stage: str,
+        stage: BridgeStage,
         session_id: str,
         log_result: object,
         client: RpCliBridgeClient,
         calls: list[RpBridgeToolCall],
     ) -> tuple[str | None, str | None]:
-        transcript_artifact = f"rp-bridge-agent-{stage}-transcript.json"
+        transcript_artifact_name = f"rp-bridge-agent-{stage}-transcript.json"
+        transcript_artifact: str | None = transcript_artifact_name
         transcript_markdown_artifact = f"rp-bridge-agent-{stage}-transcript.md"
         handoff_artifact = f"rp-bridge-agent-{stage}-handoff.xml"
 
@@ -1936,7 +1968,7 @@ class RpAgentAdapter:
                 events=transcript_events,
                 handoff_summary=handoff_summary,
             )
-            (run_dir / transcript_artifact).write_text(
+            (run_dir / transcript_artifact_name).write_text(
                 json.dumps(transcript_payload.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
@@ -2439,11 +2471,14 @@ class RpAgentAdapter:
                         },
                     )
                 )
+                preview_response_type = self._normalize_bridge_context_builder_response_type(
+                    context_preview.response_type
+                )
                 self._write_bridge_context_builder_artifact(
                     run_dir,
                     RpBridgeContextBuilderArtifact(
                         flow="preview",
-                        response_type=context_preview.response_type,
+                        response_type=preview_response_type,
                         status="ok" if context_preview.ok else "failed",
                         workspace=resolved_workspace,
                         context_id=context_preview.context_id or final_context_id,
@@ -2479,11 +2514,14 @@ class RpAgentAdapter:
                             },
                         )
                     )
+                    apply_response_type = self._normalize_bridge_context_builder_response_type(
+                        context_apply.response_type
+                    )
                     self._write_bridge_context_builder_artifact(
                         run_dir,
                         RpBridgeContextBuilderArtifact(
                             flow="apply",
-                            response_type=context_apply.response_type,
+                            response_type=apply_response_type,
                             status="ok" if context_apply.ok else "failed",
                             workspace=resolved_workspace,
                             context_id=context_apply.context_id or final_context_id,
@@ -2614,6 +2652,17 @@ class RpAgentAdapter:
     def _write_bridge_seeding_artifact(self, run_dir: Path, artifact: RpBridgeSeedingArtifact) -> None:
         artifact_path = run_dir / "rp-bridge-seeding.json"
         artifact_path.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def _normalize_bridge_context_builder_response_type(self, value: str | None) -> BridgeContextBuilderResponseType:
+        if value == "clarify":
+            return "clarify"
+        if value == "plan":
+            return "plan"
+        if value == "question":
+            return "question"
+        if value == "review":
+            return "review"
+        return "clarify"
 
     def _write_bridge_context_builder_artifact(self, run_dir: Path, artifact: RpBridgeContextBuilderArtifact) -> None:
         artifact_path = run_dir / "rp-bridge-context-builder.json"
