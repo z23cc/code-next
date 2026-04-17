@@ -50,7 +50,9 @@
             "rp",
             "rp-cli"
           ],
-          "install_hint": "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) to use the experimental RP bridge (manual-assist or managed-agent); manual handoff remains the stable supported path."
+          "install_hint": "Install the real RepoPrompt app / MCP CLI runtime on PATH (for example `rp` or `rp-cli`) to use the experimental RP bridge (manual-assist or managed-agent); manual handoff remains the stable supported path.",
+          "allows_mutations": false,
+          "destructive_capabilities": []
         }
       },
       "auto": {
@@ -91,7 +93,9 @@
             "disabled"
           ],
           "command_candidates": [],
-          "install_hint": null
+          "install_hint": null,
+          "allows_mutations": false,
+          "destructive_capabilities": []
         }
       }
     }

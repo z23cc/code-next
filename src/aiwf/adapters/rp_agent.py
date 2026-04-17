@@ -1329,8 +1329,10 @@ class RpAgentAdapter:
             )
 
         terminal_status_raw = wait_result.status or "failed"
-        if terminal_status_raw in {"completed", "failed", "waiting_for_input", "timeout", "cancelled"}:
-            terminal_status: BridgeManagedStatus = cast(BridgeManagedStatus, terminal_status_raw)
+        if terminal_status_raw in {"running", "started"}:
+            terminal_status: BridgeManagedStatus = "waiting_for_input"
+        elif terminal_status_raw in {"completed", "failed", "waiting_for_input", "timeout", "cancelled"}:
+            terminal_status = cast(BridgeManagedStatus, terminal_status_raw)
         else:
             terminal_status = "failed"
         response_text = wait_result.output or log_output

@@ -41,7 +41,9 @@
             "disabled"
           ],
           "command_candidates": [],
-          "install_hint": null
+          "install_hint": null,
+          "allows_mutations": false,
+          "destructive_capabilities": []
         }
       }
     }
