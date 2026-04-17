@@ -553,7 +553,11 @@ def test_manual_rp_bridge_persists_and_restores_adapter_metadata(tmp_path: Path)
         export_transcript=True,
     )
     engine = WorkflowEngine(
-        RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config),
+        RpAgentAdapter(
+            repo_root=repo_root,
+            bridge_config=bridge_config,
+            rp_command=[str(tmp_path / "missing-rp-cli")],
+        ),
         ai_root=ai_root,
         repo_root=repo_root,
         bridge_config=bridge_config,
@@ -659,7 +663,11 @@ def test_manual_rp_bridge_resume_rejects_disabled_bridge_contract_in_stored_meta
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
     bridge_config = RpBridgeRunConfig(mode="manual-assist", workspace="workspace-alpha")
     engine = WorkflowEngine(
-        RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config),
+        RpAgentAdapter(
+            repo_root=repo_root,
+            bridge_config=bridge_config,
+            rp_command=[str(tmp_path / "missing-rp-cli")],
+        ),
         ai_root=ai_root,
         repo_root=repo_root,
         bridge_config=bridge_config,
@@ -684,7 +692,11 @@ def test_manual_rp_bridge_resume_rejects_unsupported_stored_bridge_mode(tmp_path
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
     bridge_config = RpBridgeRunConfig(mode="manual-assist", workspace="workspace-alpha")
     engine = WorkflowEngine(
-        RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config),
+        RpAgentAdapter(
+            repo_root=repo_root,
+            bridge_config=bridge_config,
+            rp_command=[str(tmp_path / "missing-rp-cli")],
+        ),
         ai_root=ai_root,
         repo_root=repo_root,
         bridge_config=bridge_config,

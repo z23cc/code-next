@@ -120,7 +120,11 @@ def test_rp_agent_adapter_manual_bridge_enriches_prompt_artifacts_and_metadata(t
         timeout_seconds=900,
         export_transcript=True,
     )
-    adapter = RpAgentAdapter(repo_root=repo_root, bridge_config=bridge_config)
+    adapter = RpAgentAdapter(
+        repo_root=repo_root,
+        bridge_config=bridge_config,
+        rp_command=[str(tmp_path / "missing-rp-cli")],
+    )
 
     context = adapter.discover(task, run_dir)
     plan = adapter.plan(task, context)

@@ -454,6 +454,7 @@ def test_cli_rp_bridge_plan_command_persists_bridge_metadata(tmp_path: Path) -> 
 
 def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) -> None:
     task_path, ai_root, repo_root = _create_ai_workspace(tmp_path)
+    isolated_path = str(Path(sys.executable).parent)
     bridge_payload = {
         "mode": "manual-assist",
         "workspace": "workspace-alpha",
@@ -495,6 +496,7 @@ def test_cli_rp_bridge_manual_handoff_flow_uses_stored_metadata(tmp_path: Path) 
             "900",
             "--bridge-export-transcript",
         ],
+        env={"PATH": isolated_path},
     )
 
     assert implement_result.exit_code == 0
